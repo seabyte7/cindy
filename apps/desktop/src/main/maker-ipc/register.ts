@@ -6567,15 +6567,36 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   type SendToSessionDispatchSession = {
     id: string;
+    agentKind: AgentKind;
+    workDir: string;
+    remoteHostId: string | null;
     send(message: UserMessage | string, opts?: SessionSendOptions): Promise<SessionSendResult>;
   };
+
+  async function beginTurnChangeSetAtDispatch(
+    session: SendToSessionDispatchSession,
+    anchorClientId: string,
+  ): Promise<void> {
+    await waitForTurnChangeSetSeal(session.id);
+    await finalizeTurnChangeSet(session.id, null, 'partial');
+    await waitForTurnChangeSetSeal(session.id);
+    await beginTurnChangeSet({
+      sessionId: session.id,
+      anchorClientId,
+      provider: session.agentKind,
+      cwd: session.workDir,
+      remote: session.remoteHostId !== null,
+    });
+  }
 
   async function sendUserMessageWithAwaitedGitBaseline(
     session: SendToSessionDispatchSession,
     message: string,
+    anchorClientId: string,
     opts: SessionSendOptions,
   ): Promise<SessionSendResult> {
     let baselineStarted = false;
+    let turnChangeSetStarted = false;
     const pendingHandoff = await agentHandoffPending.peek(session.id);
     const outgoingMessage: UserMessage = pendingHandoff
       ? (prependHandoffToUserMessage(
@@ -6588,12 +6609,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         ...opts,
         onAccepted: async () => {
           await opts.onAccepted?.();
+          await beginTurnChangeSetAtDispatch(session, anchorClientId);
+          turnChangeSetStarted = true;
           if (gitSnapshotCoordinator) {
             await gitSnapshotCoordinator.onTurnStart(session.id);
             baselineStarted = true;
           }
         },
       });
+      if (turnChangeSetStarted && !sendResult.accepted) {
+        clearPendingTurnChangeSets(session.id);
+      }
       if (baselineStarted && !sendResult.accepted) {
         gitSnapshotCoordinator?.onTurnAbort(session.id);
       }
@@ -6602,6 +6628,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       return sendResult;
     } catch (err) {
+      if (turnChangeSetStarted) {
+        clearPendingTurnChangeSets(session.id);
+      }
       if (baselineStarted) {
         gitSnapshotCoordinator?.onTurnAbort(session.id);
       }
@@ -6799,7 +6828,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         const clientId = createId();
         createdPreviewSessionId = session.id;
         createdPreviewClientId = clientId;
-        const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, {
+        const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, clientId, {
           planMode: false,
           onAccepted: async () => {
             notifyAgentIslandUserPrompt(session, persistedContent ?? message, {
@@ -7055,11 +7084,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       if (live) {
         try {
-          const sendResult = await sendUserMessageWithAwaitedGitBaseline(live, message, {
-            planMode: false,
-            onAccepted: persistUserMessage,
-            onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
-          });
+          const sendResult = await sendUserMessageWithAwaitedGitBaseline(
+            live,
+            message,
+            clientId,
+            {
+              planMode: false,
+              onAccepted: persistUserMessage,
+              onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+            },
+          );
           if (userPromptPreviewStarted) {
             if (sendResult.accepted) {
               commitAgentIslandUserPrompt(targetSessionId, clientId);
@@ -7153,11 +7187,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         await ensureRemoteReadyForSessionStart({ createOpts });
         const { session } = await bootstrapSession(createOpts);
         await markOrcaRoleIfNeeded(session.id, createOpts.orcaRole);
-        const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, {
-          planMode: false,
-          onAccepted: persistUserMessage,
-          onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
-        });
+        const sendResult = await sendUserMessageWithAwaitedGitBaseline(
+          session,
+          message,
+          clientId,
+          {
+            planMode: false,
+            onAccepted: persistUserMessage,
+            onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+          },
+        );
         if (userPromptPreviewStarted) {
           if (sendResult.accepted) {
             commitAgentIslandUserPrompt(targetSessionId, clientId);
@@ -7588,6 +7627,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     sendToSessionInternal,
     createDbMessage,
+    beginDirectTurnChangeSet: async (sessionId, clientId) => {
+      const liveSession = maker.getSession(sessionId);
+      if (!liveSession) {
+        throw new Error('Target session became unavailable before direct turn dispatch.');
+      }
+      await beginTurnChangeSetAtDispatch(liveSession, clientId);
+    },
+    abortDirectTurnChangeSet: clearPendingTurnChangeSets,
     resolveWorkerSenderLabel: async (workerId, fallback) => {
       const link = await getWorkerLink({ workerId });
       if (!link) return fallback;
@@ -9692,18 +9739,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       broadcastGhostMessageRewritten({ sessionId, clientId: item.clientId, ...info }),
     beforeDispatchUserTurn: async (sessionId, item) => {
       autoResumeBookkeeping.markReplacementDispatching(sessionId, item.clientId);
-      await waitForTurnChangeSetSeal(sessionId);
-      await finalizeTurnChangeSet(sessionId, null, 'partial');
-      await waitForTurnChangeSetSeal(sessionId);
       const liveSession = maker.getSession(sessionId);
       if (liveSession) {
-        await beginTurnChangeSet({
-          sessionId,
-          anchorClientId: item.clientId,
-          provider: liveSession.agentKind,
-          cwd: liveSession.workDir,
-          remote: liveSession.remoteHostId !== null,
-        });
+        await beginTurnChangeSetAtDispatch(liveSession, item.clientId);
       }
       // hook 续跑回流的**权威归属点**: 在 vendor dispatch 之前(本回调被 await), 所以
       // 观察器挂上就不丢正文开头, 而 live session 此刻必然已就绪。clientId 对得上的
