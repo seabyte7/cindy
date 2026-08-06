@@ -15,29 +15,18 @@ vi.mock('react-i18next', () => ({
 }));
 
 // 预览卡内容不在本文件的覆盖范围(Content 直接丢掉,与原先 Tip stub 只透传
-// children 等价)。Provider 记**挂载中的实例数**而不是渲染次数:组件会因
-// 测量 setState 反复重渲,计渲染次数是脆的;挂载数对重渲染免疫。
-const tooltipMocks = vi.hoisted(() => ({ mountedProviders: { value: 0 } }));
-
-vi.mock('@/components/ui/tooltip', async () => {
-  const { useEffect } = await import('react');
-  return {
-    Tooltip: {
-      Provider: ({ children }: { children: ReactNode }) => {
-        useEffect(() => {
-          tooltipMocks.mountedProviders.value += 1;
-          return () => {
-            tooltipMocks.mountedProviders.value -= 1;
-          };
-        }, []);
-        return <>{children}</>;
-      },
-      Root: ({ children }: { children: ReactNode }) => <>{children}</>,
-      Trigger: ({ children }: { children: ReactNode }) => <>{children}</>,
-      Content: () => null,
-    },
-  };
-});
+// children 等价)。Provider 直接渲染结构标记,避免用 effect 维护跨测试的
+// 全局挂载计数:全量并发时 effect flush / cleanup 时序会让计数出现短暂的 0。
+vi.mock('@/components/ui/tooltip', () => ({
+  Tooltip: {
+    Provider: ({ children }: { children: ReactNode }) => (
+      <div data-message-nav-rail-tooltip-provider="true">{children}</div>
+    ),
+    Root: ({ children }: { children: ReactNode }) => <>{children}</>,
+    Trigger: ({ children }: { children: ReactNode }) => <>{children}</>,
+    Content: () => null,
+  },
+}));
 
 import { MessageNavRail } from '../MessageNavRail';
 import { NAV_RAIL_ACTIVE_FUDGE_PX, type NavRailEntry } from '../messageNavRailModel';
@@ -92,7 +81,6 @@ const ENTRIES: NavRailEntry[] = [
 describe('MessageNavRail', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
-    tooltipMocks.mountedProviders.value = 0;
     vi.stubGlobal('ResizeObserver', ResizeObserverStub);
     // jsdom 没有 CSS.escape(真实渲染器 Chromium 提供);测试 id 都是安全字符。
     vi.stubGlobal('CSS', { escape: (s: string) => s });
@@ -140,7 +128,7 @@ describe('MessageNavRail', () => {
       { id: 'u4', top: 600 },
       { id: 'u5', top: 900 },
     ]);
-    render(
+    const { container } = render(
       <MessageNavRail
         entries={ENTRIES}
         scrollRef={{ current: root }}
@@ -152,7 +140,7 @@ describe('MessageNavRail', () => {
     await waitFor(() => {
       expect(screen.getAllByRole('button')).toHaveLength(5);
     });
-    expect(tooltipMocks.mountedProviders.value).toBe(1);
+    expect(container.querySelectorAll('[data-message-nav-rail-tooltip-provider]')).toHaveLength(1);
   });
 
   it('点击刻度回调 onJump(clientId),且点击项乐观标记为当前项', async () => {
