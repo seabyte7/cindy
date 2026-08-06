@@ -176,7 +176,10 @@ import {
   resolveCodexSubagentModelFallback,
 } from './codex-subagent-config.js';
 import { readSubagentModelSettings } from './subagent-model-settings-store.js';
-import { registerCodexProcessRole } from '../process-monitor/codex-process-registry.js';
+import {
+  registerAgentProcess,
+  registerCodexProcessRole,
+} from '../process-monitor/codex-process-registry.js';
 import { getOutboundPathSnapshotFor } from './outbound-proxy-resolver.js';
 import {
   createDesktopMakerMemoryManager,
@@ -744,6 +747,8 @@ export function getMaker(): Maker {
       runtimeConfig: buildDesktopClaudeRuntimeConfig(getClaudeEndpoint),
       binaryPath: claudePath,
       logger: desktopMakerLogger,
+      registerLocalAgentProcess: ({ pid, kind, role }) =>
+        registerAgentProcess(pid, kind, role),
       reviewAutoPermissionAction,
       // 每个 session 的 cc 子进程 debug 写到 sessions/<id>/cc-debug.raw.log (logger 拼路径
       // + mkdir), tailer 再归一化汇入该 session 的 <date>.ndjson。
@@ -1428,6 +1433,8 @@ export function getMaker(): Maker {
 
     const piAgent = buildPiAgent({
       logger: desktopMakerLogger,
+      registerLocalAgentProcess: ({ pid, kind, role }) =>
+        registerAgentProcess(pid, kind, role),
       reviewAutoPermissionAction,
       capabilityAdditions: {
         availableModels: deriveAvailableModels(getDesktopSelectableCatalog(), 'pi'),
