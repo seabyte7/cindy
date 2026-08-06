@@ -4318,7 +4318,7 @@ interface ElectronAPI {
     subscribe: () => Promise<void>;
     unsubscribe: () => Promise<void>;
     terminate: (
-      pid: number,
+      request: import('../shared/processMonitor').TerminateAgentProcessRequest,
     ) => Promise<import('../shared/processMonitor').TerminateAgentProcessResult>;
     onSample: (
       cb: (sample: import('../shared/processMonitor').ProcessMonitorSample) => void,
