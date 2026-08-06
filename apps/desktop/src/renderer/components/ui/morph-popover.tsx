@@ -157,8 +157,8 @@ export function MorphPopover({
   const chipRectRef = useRef<DOMRect | null>(null);
   // 初始形变是否已完成(ResizeObserver 只在其后接管,避免和开场动画打架)
   const settledRef = useRef(false);
-  // 指针选择菜单动作时不把焦点归还 trigger:否则 trigger 的 focus tooltip 会压在
-  // 动作打开的下一层弹窗上。键盘关闭仍按 §14.2 回焦。
+  // 指针驱动的关闭(菜单动作、trigger toggle、outside 交接)不把焦点归还 trigger:
+  // 否则旧层会在收合结束时抢走下一层交互面的焦点。键盘关闭仍按 §14.2 回焦。
   const pointerInteractionRef = useRef(false);
 
   const requestClose = useCallback(() => onOpenChange(false), [onOpenChange]);
@@ -453,6 +453,10 @@ export function MorphPopover({
       // autoFocusTarget 是当前交互层的一部分(例如统一建议面板外的 composer)。
       // 指针在该目标内调整光标时也不应按 outside pointerdown 收起。
       if (isWithinExternalFocusTarget(t)) return;
+      // outside pointerdown 也是鼠标关闭。目标控件可能 preventDefault 阻止默认聚焦
+      // (如 AgentSelect 为维持 composer focus-within),不能因此把旧层误判成键盘关闭、
+      // 在收合结束后延迟抢回旧 trigger 焦点并关掉刚打开的相邻弹层。
+      pointerInteractionRef.current = true;
       requestClose();
     };
     const onKeyDown = (e: KeyboardEvent) => {
