@@ -15,7 +15,6 @@ import '@/i18n';
 import './themes/colors';
 
 import { TopLevelErrorBoundary } from './components/error/TopLevelErrorBoundary';
-import { initTapdb } from './analytics/tapdbClient';
 import { installScrollbarAutoHide } from './lib/scrollbarAutoHide';
 import { bootstrapMemorySettingsFromMain } from './lib/memorySettingsStore';
 import {
@@ -210,11 +209,6 @@ void (async () => {
   // 主视图挂载前完成 memory 真值同步与旧配置迁移，确保用户可交互的 toggle 不会和
   // 启动快照并发。浮窗不消费该设置，跳过同步以免多个 renderer 争写共享 localStorage。
   await bootstrapMemorySettingsFromMain();
-
-  // TapDB 在线活跃上报 — 只在主视图启用,避免 voice-input 浮窗的弹出被算成 PV。
-  // 这里只挂"同意闸":SDK 是否初始化由 main 的 analytics-settings 决定,用户没
-  // 同意过《隐私政策》时一个字节都不会发出去(见 analytics/tapdbClient.ts)。
-  initTapdb();
 
   // 顶层 boundary:App 内 RouterProvider 之上的 provider 链渲染崩溃时兜底
   // (路由子树的崩溃仍由 router.tsx 的 errorElement 就近接住)。
