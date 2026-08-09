@@ -27,6 +27,7 @@
 | [log-upload-and-redaction.md](./dev-rules/log-upload-and-redaction.md) | 日志上报规则 | authoritative | 客户端日志采集/脱敏/上报：记录边界不变量、来源白名单方向、标记代次与原子清除、区域绑定与崩溃时序 | — |
 | [protocol-and-submodules.md](./dev-rules/protocol-and-submodules.md) | 协议/submodule 规则 | authoritative | `cindy-protocol` 权威源、device-link relay 层、内建插件来源与 wire protocol 兼容 | — |
 | [architecture-invariants.md](./dev-rules/architecture-invariants.md) | 架构不变量 | authoritative | package 解耦、main 静态依赖、主界面布局树（`layoutTree`/`LayoutStore`/panel registry） | — |
+| [architecture.md](./architecture.md) | 架构说明 | 参考 | Cindy 客户端整体分层、Desktop/Mobile、共享 packages、协议、远程与运行链路 | — |
 | [configuration-and-overrides.md](./dev-rules/configuration-and-overrides.md) | 配置契约 | authoritative | 配置可见性分层、默认值+override 分离、迁移与恢复默认语义 | — |
 | [remote-and-mobile-adaptation.md](./dev-rules/remote-and-mobile-adaptation.md) | 远程/手机版门禁 | authoritative | SSH 远程工作区、device-link allowlist、`apps/mobile` 入口与功能类 PR 三选一门禁 | — |
 | [development-workflow.md](./dev-rules/development-workflow.md) | 开发工作流 | authoritative | worktree dogfooding 契约、提 PR/直推 main 门禁、Review P0/P1/P2 口径 | — |

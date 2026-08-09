@@ -79,9 +79,9 @@ export default defineConfig({
     //
     // 只给 forks 池配这个 execArgv,threads 池一律不配:给 worker thread 传自定义
     // execArgv 会让 isolate 销毁时段错误(实测数据见 scripts/shared/node-webstorage.mjs),
-    // 所以哪怕有人手动 `--pool=threads` 也不该拿到这份配置。需要这个 flag 的 Node 上,
-    // 根 manifest 会用同一个 nodeWebstorageEnabled() 判据把 unit tier 留在 forks,
-    // 两者不会同时生效;不需要 flag 的 Node(本机与 CI 的 22)上压根没有 webstorage 全局。
+    // 所以哪怕有人手动 `--pool=threads` 也不该拿到这份配置。根 manifest 会在需要
+    // 这个 flag 的 Node、win32 以及 macOS Node 24+ 上把 unit tier 留在 forks,
+    // 其中 macOS Node 24+ 是为规避 native addon 在 worker isolate 销毁时的段错误。
     poolOptions: {
       forks: { execArgv: ['--no-experimental-webstorage'] },
     },

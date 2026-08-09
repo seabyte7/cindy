@@ -6,6 +6,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import manifest, {
+	desktopUnitPool,
 	desktopUnitWorkerCount,
 	unitTestShardArgs,
 } from "../test-workspaces.config.mjs";
@@ -173,9 +174,9 @@ test("unit workspace concurrency reserves the full worker budget for heavy works
 	assert.equal(desktop.tiers.unit.execution, "exclusive");
 	assert.deepEqual(desktop.tiers.unit.command.args, [
 		"run",
-		// win32 pins forks: threads segfaults the desktop suite there, and the
-		// LaunchServices churn that threads exists to avoid is macOS-only.
-		`--pool=${nodeWebstorageEnabled() || process.platform === "win32" ? "forks" : "threads"}`,
+		// Desktop pins forks for runtimes where threads segfault, while Node 22 on
+		// macOS keeps threads to avoid the LaunchServices churn from child processes.
+		`--pool=${desktopUnitPool()}`,
 		`--maxWorkers=${desktopUnitWorkerCount()}`,
 		...unitTestShardArgs(),
 	]);
@@ -183,6 +184,30 @@ test("unit workspace concurrency reserves the full worker budget for heavy works
 	assert.equal(desktopUnitWorkerCount(4), 4);
 	assert.equal(desktopUnitWorkerCount(32), 8);
 	assert.equal(desktopUnitWorkerCount(Number.NaN), 1);
+	assert.equal(
+		desktopUnitPool({ platform: "darwin", nodeVersion: "22.12.0" }),
+		"threads",
+	);
+	assert.equal(
+		desktopUnitPool({ platform: "darwin", nodeVersion: "24.15.0" }),
+		"forks",
+	);
+	assert.equal(
+		desktopUnitPool({ platform: "linux", nodeVersion: "24.15.0" }),
+		"threads",
+	);
+	assert.equal(
+		desktopUnitPool({ platform: "win32", nodeVersion: "22.12.0" }),
+		"forks",
+	);
+	assert.equal(
+		desktopUnitPool({
+			platform: "darwin",
+			nodeVersion: "22.12.0",
+			webstorageEnabled: true,
+		}),
+		"forks",
+	);
 	assert.equal(mobile.tiers.unit.execution, "exclusive");
 	assert.deepEqual(mobile.tiers.unit.command.args, [
 		"run",
@@ -207,11 +232,10 @@ test("unit tier pins an explicit vitest pool, forks only by documented exception
 	// opting back into forks must be a deliberate edit to this list.
 	// Desktop's entry is conditional: it stays on forks on a Node whose
 	// webstorage globals force the execArgv that worker threads cannot take,
-	// and on win32, where threads segfaults the suite outright (native addon
-	// finalizers crashing in isolate teardown) and no launchservicesd exists
-	// for the churn to hurt.
+	// on win32, and on macOS Node 24+ where native addon finalizers crash during
+	// worker isolate teardown.
 	const forksByException = [
-		...(nodeWebstorageEnabled() || process.platform === "win32"
+		...(desktopUnitPool() === "forks"
 			? ["apps/desktop"]
 			: []),
 		"packages/maker-core",

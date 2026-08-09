@@ -20,17 +20,21 @@ const vitestBin = (...args) => ({ type: 'packageBin', bin: 'vitest', args });
 // opts out when its tests cannot survive a worker thread; the known blockers
 // are recorded at their call site below — desktop needs the webstorage flag on a
 // Node that installs those globals, and the flag cannot coexist with worker
-// threads (scripts/shared/node-webstorage.mjs), while maker-core fakes HOME,
-// which a worker cannot see because `process.env` there is a thread-local copy
-// while `os.homedir()` reads the real environment through libuv.
+// threads (scripts/shared/node-webstorage.mjs). Desktop also stays on forks on
+// macOS Node 24+ because the native-addon finalizer can segfault while a worker
+// isolate is torn down. maker-core fakes HOME, which a worker cannot see because
+// `process.env` there is a thread-local copy while `os.homedir()` reads the real
+// environment through libuv.
 //
 // win32 opts desktop out wholesale: on Windows (Node 24.14.1, 2026-07-30) the
 // desktop suite under threads segfaulted the whole vitest process (exit 139)
 // on 2 of 2 runs — same native-addon-finalizer-in-isolate-teardown crash
 // class node-webstorage.mjs documents, only without execArgv in play — while
-// forks passed 15651 tests twice in a row. The churn this pool exists to
-// avoid is a LaunchServices problem; Windows has no launchservicesd, so forks
-// costs it nothing.
+// forks passed 15651 tests twice in a row. The same crash is reproducible on
+// macOS with Node 24.15.0, where forks also pass the complete desktop unit tier.
+// The churn this pool exists to avoid is a LaunchServices problem; Windows has
+// no launchservicesd, and Node 24+ is not the documented CI runtime, so forks
+// costs those fallback environments nothing they already depend on.
 //
 // Keep every opt-out listed in the pool regression test, and keep the list
 // short: at 1330 of this tier's 1845 files, desktop alone decides whether the
@@ -88,6 +92,19 @@ export function desktopUnitWorkerCount(
   return Math.max(1, Math.min(8, available));
 }
 
+export function desktopUnitPool({
+  platform = process.platform,
+  nodeVersion = process.versions.node,
+  webstorageEnabled = nodeWebstorageEnabled(),
+} = {}) {
+  const nodeMajor = Number.parseInt(String(nodeVersion).split('.')[0], 10);
+  const macOSNode24Plus =
+    platform === 'darwin' && Number.isInteger(nodeMajor) && nodeMajor >= 24;
+  return webstorageEnabled || platform === 'win32' || macOSNode24Plus
+    ? 'forks'
+    : 'threads';
+}
+
 const noCollectableWorkspace = (name, cwd, reason = noCollectableTestsReason) => ({
   name,
   cwd,
@@ -129,14 +146,11 @@ export default {
           // what local dev and CI run, the flag is a no-op, so this suite's 1330
           // files take threads and stop spawning a process each. On a
           // webstorage-enabled Node the flag wins and the suite stays on forks.
-          // win32 stays on forks unconditionally — threads segfaults there and
-          // the churn threads exists to avoid is macOS-only (see the pool note
-          // at the top of this file).
+          // win32 and macOS Node 24+ stay on forks because threads segfault in
+          // native-addon isolate teardown on those runtimes.
           command: unitVitestCommand(
             desktopUnitWorkerCount(),
-            nodeWebstorageEnabled() || process.platform === 'win32'
-              ? 'forks'
-              : 'threads',
+            desktopUnitPool(),
           ),
           exclude: [
             '**/*.git-integration.test.ts',
