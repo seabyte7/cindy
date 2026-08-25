@@ -65,6 +65,12 @@ import { toRemoteMediaOrigin } from '@/lib/sessionFileOrigin';
 import { rewriteToRemoteMediaOrigin } from '../../../shared/remoteMediaUrl';
 import { useInstalledGhosts } from '@/cindy-brain/useInstalledGhosts';
 import { useChatSessionFile } from './ChatSessionFileContext';
+import {
+  ACTIVITY_ROW_CHEVRON_SLOT_CLASS,
+  ACTIVITY_ROW_COLOR_TRANSITION_CLASS,
+  ACTIVITY_ROW_HOVER_SURFACE_CLASS,
+  ACTIVITY_ROW_RADIUS_CLASS,
+} from './activityRowChrome';
 import { ImageLightbox } from './ImageLightbox';
 import { TextLightbox } from './TextLightbox';
 import { ToolPayloadLightbox, type ToolPayloadMode } from './ToolPayloadLightbox';
@@ -812,14 +818,14 @@ export function AgentActionRow({
     // 身份视觉(头像/印记)由结果位的意识卡片头部承担(2026-07-12 Lizi 定案)。
     if (ghostInfo) {
       return (
-        <span className="truncate text-[14px] font-medium text-[var(--msg-tool-card-chevron)]">
+        <span className="truncate text-14 font-medium text-[var(--msg-tool-card-chevron)]">
           「{ghostInfo.name}」· {ghostInfo.tool}
         </span>
       );
     }
     if (fileChangeCountText) {
       return (
-        <span className="min-w-0 truncate text-[14px] font-medium text-[var(--msg-tool-card-chevron)]">
+        <span className="min-w-0 truncate text-14 font-medium text-[var(--msg-tool-card-chevron)]">
           {fileChangeCountText}
         </span>
       );
@@ -836,7 +842,7 @@ export function AgentActionRow({
             'bg-[var(--chat-input-chip-bg)]',
             'border-[var(--chat-input-chip-border)]',
             'text-[var(--chat-input-chip-text)]',
-            'font-mono text-[13px] leading-[18px] whitespace-nowrap',
+            'font-mono text-13 leading-[1.385] whitespace-nowrap',
             'cursor-pointer transition-colors',
             'group-hover:bg-[var(--cmd-palette-item-hover)]',
             'min-w-0 max-w-full',
@@ -849,7 +855,7 @@ export function AgentActionRow({
     }
     return (
       <span
-        className="text-[14px] font-medium text-[var(--msg-tool-card-chevron)] truncate min-w-0 cursor-pointer"
+        className="text-14 font-medium text-[var(--msg-tool-card-chevron)] truncate min-w-0 cursor-pointer"
         title={displayParam.fullTitle}
       >
         {displayParam.text}
@@ -876,7 +882,7 @@ export function AgentActionRow({
   };
 
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col" data-message-client-id={message.clientId}>
       <button
         type="button"
         onClick={(e) => void onActivate(e.currentTarget)}
@@ -894,8 +900,10 @@ export function AgentActionRow({
         }
         className={cn(
           'group flex w-full items-center gap-[6px]',
-          'rounded-[6px] px-2 py-[3px]',
-          'hover:bg-[var(--msg-code-inline-bg)] transition-colors',
+          ACTIVITY_ROW_RADIUS_CLASS,
+          'px-2 py-[3px]',
+          ACTIVITY_ROW_HOVER_SURFACE_CLASS,
+          ACTIVITY_ROW_COLOR_TRANSITION_CLASS,
           'cursor-pointer select-none outline-none',
           'focus-visible:ring-2 focus-visible:ring-[var(--info-700)]/40',
           'text-left',
@@ -920,28 +928,21 @@ export function AgentActionRow({
           )}
         </span>
         {!hideVerb && (
-          <span className="text-[14px] text-[var(--msg-tool-card-chevron)] shrink-0">
+          <span className="text-14 text-[var(--msg-tool-card-chevron)] shrink-0">
             {rowVerbLabel}
           </span>
         )}
         {displayCell}
         <span className="flex-1" />
         {stats && (
-          <span className="font-mono text-[13px] font-medium shrink-0 flex gap-1">
+          <span className="font-mono text-13 font-medium shrink-0 flex gap-1">
             <span className="text-[var(--diff-add-fg)]">+{stats.add}</span>
             <span className="text-[var(--diff-del-fg)]">-{stats.del}</span>
           </span>
         )}
         {/* v9: 移除 chevron 上的"查看详情" Tooltip。整行 button 已经是
             统一激活目标，末尾 chevron 只保留视觉提示。 */}
-        <span
-          aria-hidden="true"
-          className={cn(
-            'flex h-[18px] w-[18px] items-center justify-center rounded-[4px] shrink-0',
-            'text-[var(--msg-tool-card-chevron)]',
-            'group-hover:bg-[var(--cmd-palette-item-hover)] transition-colors',
-          )}
-        >
+        <span aria-hidden="true" className={ACTIVITY_ROW_CHEVRON_SLOT_CLASS}>
           {isInlineExpand && expanded ? (
             <ChevronDown size={13} />
           ) : (
@@ -953,7 +954,7 @@ export function AgentActionRow({
         <div
           data-agent-action-raw-command="true"
           title={rawCommand}
-          className="min-w-0 truncate px-2 pb-[3px] pl-[30px] font-mono text-[12px] leading-[18px] text-[var(--msg-tool-card-chevron)]"
+          className="min-w-0 truncate px-2 pb-[3px] pl-[30px] font-mono text-12 leading-[1.5] text-[var(--msg-tool-card-chevron)]"
         >
           {rawCommand}
         </div>

@@ -15,6 +15,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+import {
+  canHostControlPiSubagentRun,
+  controlPiSubagentRuns,
+  isPiSubagentTerminal,
+  listPiSubagentRuns,
+  piSubagentRunRoot,
+} from '@cindy/maker-core/pi-subagent-runs';
 import type {
   AgentEvent,
   AgentKind,
@@ -23,12 +30,19 @@ import type {
   InteractionRequest,
   Maker,
   SendOrigin,
+  Session,
   SessionSendOptions,
   SessionSendResult,
   UserMessage,
 } from '@cindy/maker-core';
+import { storedCustomProviderId } from '@cindy/model-providers';
 import { createId } from '@paralleldrive/cuid2';
-import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
+import {
+  GATEWAY_PROXY_TOKEN_INVALID_REASON,
+  isCindyGatewayProviderId,
+  isGatewayProxyTokenInvalidError,
+  redactSensitiveText,
+} from '@cindy/maker-shared/error-redaction';
 import { permissionModeOrAsk } from '@cindy/maker-shared/permission-mode';
 import {
   isProductTurnCompletionTailEvent,
@@ -40,7 +54,11 @@ import {
 } from '@cindy/device-link';
 import { and, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
-import { getActiveAppSession, getActiveDataOwnerPushStamp } from '../appSessionState.js';
+import {
+  getActiveAppSession,
+  getActiveDataOwnerPushStamp,
+  isAppSessionBoundaryPending,
+} from '../appSessionState.js';
 import { upsertRecentWorkdir } from '../localDb/ipc/recentWorkdirs.js';
 import type { AgentMeta } from '../../renderer/lib/ccAgent.types';
 import {
@@ -78,6 +96,7 @@ import {
   type GhostSetupInteractionSnapshot,
 } from '../cindy-brain/ghostSetupInteractionBridge.js';
 import { initGhostSetupCoordinator } from '../cindy-brain/ghostSetupCoordinator.js';
+import { classifyGhostVisibility } from '../cindy-brain/ghostVisibility.js';
 import { toolNotFoundMessage } from '../cindy-brain/pipeDispatcher.js';
 import { getGhostSetupChangeBus } from '../cindy-brain/ghostSetupChangeBus.js';
 import { isGhostDisabledForWorkdir } from '../cindy-brain/ghostWorkdirPrefs.js';
@@ -86,6 +105,7 @@ import {
   executeGhostSetupInlineAction,
   getGhostManager,
   getGhostSetupAssessment,
+  getIOSSimulatorPluginAccessDecision,
   isGhostAvailableForActiveSession,
 } from '../cindy-brain/index.js';
 import {
@@ -136,6 +156,15 @@ import {
 import { parseComputerPermissionGrantRequest } from '../computer-permission-guide/request.js';
 import { shouldUseComputerPermissionGuide } from './computerPermissionGuideEligibility.js';
 import {
+  resolveSessionQueueCounts,
+  type SessionQueueInspectionEntry,
+} from './sessionQueueInspection.js';
+import {
+  createSessionControlService,
+  sessionQueueOriginForDispatcher,
+} from './sessionControlService.js';
+import { readCanonicalSessionActivity } from './sessionActivityProjection.js';
+import {
   listAtBrowserTabs,
   parseAtContextCatalogRequest,
   readAtDesktopWindows,
@@ -149,10 +178,12 @@ import {
 import * as imageCacheStore from '../imageCacheStore.js';
 import * as cindyChatAttachments from '../cindy-media/chatAttachments.js';
 import { materializeGeneratedImage } from '../cindy-media/generatedMedia.js';
-import { getDbClient } from '../localDb/client/current.js';
+import { getDbClient, isDbClientNotReadyError } from '../localDb/client/current.js';
+import { getMessagesForHistory } from '../localDb/chatHistoryReader.js';
 import {
   awaitAgentInputQueueSnapshotPersistence,
   loadAgentInputQueueSnapshot,
+  loadAgentInputQueueSnapshotCounts,
   saveAgentInputQueueSnapshot,
 } from '../localDb/agentInputQueueSnapshots.js';
 import {
@@ -165,31 +196,95 @@ import {
 } from '../localDb/dialogueWorkdirSelfHeal.js';
 import {
   broadcastMessageRow,
+  broadcastMessageAgentMetaUpdate,
   broadcastMessageDeleted,
+  commitContextRebuild,
   commitMessageDeletion,
   createMessage as createDbMessage,
+  findLatestContextRebuildMeta,
   rewindPersistedUserMessageAfterClear,
   findParkedEngineSession,
   getMessageDeletionTarget,
   listMessagesForAgentHandoff,
+  findLatestUserMessageForRebuild,
   patchMessageAgentMeta,
   supersedeRetriedUserTurn,
+  updateMessageContent,
 } from '../localDb/ipc/messages.js';
 import { invalidateWorkersByLeadSingleFlight } from '../localDb/ipc/orcaWorkerListSingleFlight.js';
 import { messageToCamel } from '../localDb/mapper.js';
 import { visibleMessageTextForConversationSearch } from '../localDb/conversationSearch.pure.js';
+import { buildReviewPrompt } from '../reviewer/reviewPrompt.js';
+import {
+  listReviewHistoricalAttachments,
+  loadReviewEvidence,
+  readReviewContextFingerprint,
+  reviewBranchBaselineIsCurrent,
+  reviewWorkspaceFingerprintIsCurrent,
+  resolveReviewArtifactPath,
+  SensitiveReviewPathError,
+} from '../reviewer/reviewEvidence.js';
+import {
+  authorizeReviewExplicitArtifacts,
+  ReviewArtifactAuthorizationError,
+  type ReviewArtifactConfirmationItem,
+} from '../reviewer/reviewArtifactAuthorization.js';
+import { buildReviewArtifactConfirmationDialog } from '../reviewer/reviewArtifactDialog.js';
+import {
+  cleanupOrphanedReviewArtifactSnapshots,
+  prepareStableReviewArtifactSnapshots,
+} from '../reviewer/reviewArtifactSnapshot.js';
+import {
+  fingerprintReviewArtifacts,
+  ReviewArtifactFingerprintChangedError,
+  ReviewArtifactFingerprintLimitError,
+} from '../reviewer/reviewArtifactFingerprint.js';
+import { reviewChangeSetContentPaths } from '../reviewer/reviewEvidenceSafety.js';
+import { enforceReviewCreateOptions } from '../reviewer/reviewSessionPolicy.js';
+import { reviewSourceIdentityMatches } from '../reviewer/reviewSourceIdentity.js';
+import { buildReviewSessionTitle } from '../reviewer/reviewSessionTitle.js';
+import {
+  readReviewRunFromAgentMeta,
+  type ReviewRunMeta,
+  type ReviewRunOwner,
+} from '../../shared/reviewRun.js';
+import {
+  createRetryableReviewStartup,
+  hasReviewOwnerProcessEnded,
+  shouldFailInterruptedReview,
+} from '../reviewer/reviewRunRecovery.js';
+import { startReviewOwnerLiveness } from '../reviewer/reviewOwnerLiveness.js';
+import {
+  discardInvalidReviewSourceLease,
+  listPersistedReviewSourceLeases,
+  releaseReviewSourceLease,
+  tryAcquireReviewSourceLease,
+} from '../reviewer/reviewSourceLease.js';
+import { persistSubagentTaskUpdate } from '../localDb/subagentRuns.js';
+import { broadcastSubagentRunsChanged } from '../localDb/ipc/subagentRuns.js';
+import {
+  captureSubagentObservationGeneration,
+  clearSubagentObservationRewindState,
+  enqueueSubagentObservationWrite,
+  noteSubagentObservationTurnStarted,
+} from '../subagentObservationRewindFence.js';
 import {
   applyAgentSwitchToSessionRow,
   applyAgentSwitchResumeFallbackAtomically,
   broadcastSessionPatched,
+  captureSessionRecycleScope,
   clearSessionContextInDb,
   createSessionRemoteHostIdReader,
   getSessionRowSnapshot,
   getSessionRowSnapshotStrict,
   persistSessionFields,
+  recycleSessionWorktreeForStatusChange,
 } from '../localDb/ipc/sessions.js';
-// sidebar-card-mode: turn-done 后触发任务现状摘要生成
-import { maybeGenerateSessionTaskSummary } from '../sessionTaskSummary.js';
+// sidebar-card-mode: turn-done 后刷新列表预览,并按需生成置顶卡片摘要
+import {
+  maybeGenerateSessionTaskSummary,
+  refreshSessionListPreview,
+} from '../sessionTaskSummary.js';
 import {
   addOrUpdateWorker,
   archiveSingleWorkerSession,
@@ -214,6 +309,10 @@ import {
   updateWorkerStatus,
 } from '../localDb/orcaTeamStore.js';
 import { messages, orcaTeams, orcaWorkers, sessions } from '../localDb/schema.js';
+import {
+  isOrcaWorkerPermissionMode,
+  type OrcaWorkerPermissionMode,
+} from '../../shared/orca-worker-permission-mode.js';
 import { t } from '../i18n.js';
 import { createLogger } from '../logger.js';
 import {
@@ -222,6 +321,7 @@ import {
   readClaudeApiKey,
 } from '../maker-host/auth-adapters.js';
 import { prepareSharedProjectSkillLinks } from '../maker-host/shared-global-skills.js';
+import { ensurePiManagerInstalled } from '../maker-host/pi-manager-client.js';
 import {
   setRemoteCodexLiveTurnChecker,
   setRemoteSessionStartEnsure,
@@ -250,6 +350,7 @@ import {
   ensureCodexMcpBridgeStartedForRemote,
   finalizeCodexAfterAuthModeChange,
   getMaker,
+  getMakerIfReady,
   getPluginRegistry,
   prepareCodexForAuthModeChange,
   restartCodexAfterAuthModeChange,
@@ -269,17 +370,23 @@ import {
 import type { GitSnapshotCoordinator } from '../git-snapshot/gitSnapshotCoordinator.js';
 import {
   getRemoteNewMakerDefaults,
+  getRemoteNewMakerDefaultsByVendor,
   getWorkerDefaultsFromNewMaker,
+  getWorkerPermissionModeFromCreationPrefs,
   type NewMakerDraftSnapshot,
   type ProviderModelMemorySnapshot,
   setNewMakerDraftCache,
   setProviderModelMemoryCache,
+  setWorkerCreationPrefsCache,
 } from '../maker-host/newMakerDefaultsCache.js';
 import {
   applyNewMakerWorktreeBranchPreference,
   getNewMakerWorktreeBranchPreference,
 } from '../maker-host/newMakerWorktreeBranchPreferenceCache.js';
-import { withRehydrateCloseSuppressed } from '../maker-host/rehydrateCloseSuppression.js';
+import {
+  rehydrateCloseSuppression,
+  withRehydrateCloseSuppressed,
+} from '../maker-host/rehydrateCloseSuppression.js';
 import { handleCloseSessionRequest } from './closeSessionRequest.js';
 import {
   createOrcaIdleReleaseWatcher,
@@ -289,6 +396,7 @@ import {
 import {
   ackSessionTurnEndedDurable,
   hasAssistantProgressAfterMessage,
+  getRecoveryContextSnapshot,
   markSessionTurnEnded,
   markSessionTurnEndedAfterBarrier,
   markSessionTurnStarted,
@@ -305,6 +413,7 @@ import {
   readSessionWorkingDirFromDb,
 } from '../maker-host/session-storage.js';
 import {
+  backgroundTurnPredatesSessionClear,
   clearSessionPersistState,
   consumeLastAssistantPersistId,
   consumeLastTopLevelAssistantPersistId,
@@ -322,13 +431,18 @@ import {
   noteSessionClearBoundary,
   noteTurnStarted,
   onAssistantTextEvent,
+  onAgentTaskUpdateEvent,
   onInteractionMessage,
   onInteractionResolved,
+  clearCodexPlanRowsForSession,
   persistCodexPlanOnDone,
+  persistCodexPlanOnTerminalError,
   onThinkingEvent,
   onToolResultEvent,
   onToolResultFullEvent,
   onToolUseEvent,
+  preserveTurnPersistStateForBackground,
+  sealAssistantBlockForLateFinal,
   markAutoResumeOutcome,
   onTurnErrorEvent,
   prepareSyntheticToolEventForBroadcast,
@@ -350,6 +464,7 @@ import {
   ensureRemoteHostReady,
   getRemoteSshPool,
   isCcMgrUpgradeInFlight,
+  broadcastSilentInstallStatus,
 } from '../remote-ssh/index.js';
 import {
   recordSessionContextSnapshot,
@@ -384,8 +499,8 @@ import {
   setModelPriceOverride,
 } from '../usage/modelPriceOverrideStore.js';
 import {
+  ClaudeOutputLagTimingGuard,
   computeModelUsageDeltas,
-  detectOutputLag,
   type ModelUsageCumulative,
   type ModelUsageDeltaEntry,
 } from '../usage/modelUsageDelta.js';
@@ -393,22 +508,26 @@ import {
   claudeSubscriptionUsageModelKey,
   codexApiUsageModelKey,
   codexSubscriptionUsageModelKey,
+  getSubscriptionValuePriceFor,
   piSubscriptionUsageModelKey,
 } from '../usage/usageHistory.js';
 import {
   billingRouteForExplicitProvider,
   buildClaudeTurnUsageDetails,
   computePriceQuoteTurnMoney,
-  estimateClaudeSubscriptionTurnValue,
   isAnthropicModel,
+  normalizeTurnUsageSegments,
   normalizeModelIdForPricing,
+  resolveTurnCost,
   resolveClaudeTurnCostSinks,
+  sumTurnUsageSegments,
   type BillingRoute,
 } from '../usage/turnCostCalculator.js';
 import {
   CHATGPT_MODEL_PREFIX,
   XAI_MODEL_PREFIX,
-  isSubscriptionDirectModel,
+  isExclusiveXaiModelId,
+  isSubscriptionDirectRoute,
 } from '../../shared/subscriptionModels.js';
 import {
   addRegionalMoney,
@@ -416,8 +535,29 @@ import {
   type RegionalMoney,
 } from '../../shared/regionalMoney.js';
 import { currentLedgerCurrency } from '../usage/ledgerCurrency.js';
+import {
+  mergePiPackageCommands,
+  shouldListPiPackageCommands,
+  type PiPackageMutationRequest,
+} from '../../shared/piPackages.js';
+import {
+  capturePiPackageEnableIdentity,
+  listManagedPiPromptCommands,
+  listPiPackages,
+  mutatePiPackage,
+  onPiPackagesChanged,
+} from '../maker-host/pi-package-store.js';
+import {
+  issuePiPackageMutationGrant,
+  piPackageMutationNeedsGrant,
+} from '../maker-host/pi-package-mutation-grant.js';
+import { escapePiPackageNativeDialogText } from '../maker-host/pi-package-native-dialog.js';
 import { CURRENT_CINDY_REGION } from '../../shared/brandRegion.js';
-import { triggerClaudeSubscriptionUsageRefresh, triggerCodexAccountUsageRefresh } from './usage.js';
+import {
+  triggerClaudeSubscriptionUsageRefresh,
+  triggerCodexAccountUsageRefresh,
+  triggerXaiSubscriptionUsageRefresh,
+} from './usage.js';
 import {
   rebroadcastCodexTodayUsage,
   rebroadcastTodaySpend,
@@ -426,10 +566,18 @@ import {
   recordModelTurnUsage,
   recordTurnSpend,
 } from '../usageBroadcaster.js';
-import { throwIpcError } from '../utils/ipcValidate.js';
+import { requireEnum, requireObject, throwIpcError } from '../utils/ipcValidate.js';
+import {
+  runPiPackageListIpcBoundary,
+  runPiPackageMutationIpcBoundary,
+} from './piPackageMutationIpc.js';
 import { dbToMakerAgentKind, makerToDbAgentKind } from '../../shared/agentKindConversion.js';
 import { readWorkflowProgressForSession } from '../workflow-progress/reader.js';
 import { AgentInputCoordinator } from './agent-input-coordinator.js';
+import {
+  clearPromptPredictionSessionStopped,
+  notePromptPredictionSessionStopped,
+} from './promptPredictionStopLedger.js';
 import {
   estimateReferenceTokens,
   MAX_REFERENCE_MESSAGES,
@@ -438,6 +586,8 @@ import {
   resolveSessionReferences,
 } from './sessionReferenceResolver.js';
 import { registerAndroidAutomationHandlers } from './androidHandlers.js';
+import { registerIOSSimulatorHandlers } from './iosSimulatorHandlers.js';
+import { cancelIOSSimulatorSessionOperations } from '../mcp-integrations/ios-simulator.js';
 import { MAKER_INVOKE, MAKER_PUSH, MAKER_SEND } from './channels.js';
 import type { CollabDispatchOutcome } from './collabSendOutcome.js';
 import { runAcceptedCallback } from './acceptedCallbackRunner.js';
@@ -451,6 +601,21 @@ import {
 } from './handoffWorktree.js';
 import { validateHandoffWorkingDir } from './handoffWorkingDir.js';
 import { registerProjectPluginPolicyHandlers } from './projectPluginPolicyHandlers.js';
+import { registerLocalModelHandlers } from '../local-model-runtime/ipc.js';
+import { ensureManagedOllamaReadyForSession } from '../local-model-runtime/preflight.js';
+import {
+  TURN_CHANGE_SET_DETAIL_ID_LIMIT,
+  TurnChangeSetActionError,
+  applyTurnChangeSetAction,
+  beginTurnChangeSet,
+  clearPendingTurnChangeSets,
+  finalizeTurnChangeSet,
+  getTurnChangeSets,
+  listTurnChangeSets,
+  noteTurnDiffEvent,
+  normalizeTurnChangeSetWorkspaceKey,
+  waitForTurnChangeSetSeal,
+} from '../turn-change-set/store.js';
 import { registerPrecreatedWorktreeDiscardHandler } from './precreatedWorktreeDiscardHandler.js';
 import { registerNewMakerWorktreePreferenceHandler } from './newMakerWorktreePreferenceHandler.js';
 import { registerNewMakerWorktreeBranchPreferenceHandler } from './newMakerWorktreeBranchPreferenceHandler.js';
@@ -468,11 +633,14 @@ import {
   type OrcaInterAgentDispatcher,
   type OrcaInterAgentMessageSource,
 } from './orcaInterAgentDispatcher.js';
+import { OrcaWorkerPermissionConfirmBridge } from './orcaWorkerPermissionConfirmBridge.js';
 import {
   getOrcaWorkspaceInfoReadOnly,
   getOrcaWorkerDiagnosticStatusReadOnly,
   readOrcaWorkerOutputReadOnly,
 } from './orcaDiagnostics.js';
+import { startOrcaTeamWithPermissionGate } from './orcaStartTeamPermissionGate.js';
+import { createWorkerCreationPrefsSyncHandler } from './workerCreationPrefsSyncHandler.js';
 import { createMakerSendTransaction } from './makerSendTransaction.js';
 import {
   installDesktopInteractionHandler,
@@ -480,6 +648,9 @@ import {
 } from './interactionRouter.js';
 import { registerMakerMessageDeleteHandler } from './messageDeleteHandler.js';
 import {
+  cleanupOrphanedTempAttachments,
+  cleanupSessionTempAttachments,
+  configureTempAttachmentOwner,
   normalizeUserMessage,
   materializeDirectSendOssAttachments,
   materializeQueuedOssAttachmentsDeferred,
@@ -493,6 +664,11 @@ import {
 } from '../agent-island/notificationPolicy.js';
 import { getAgentIslandService } from '../agent-island/service.js';
 import { createOrcaLifecycleService, ORCA_WORKER_READY_MESSAGE } from './orcaLifecycleService.js';
+import { buildUiAssignmentInitialTask } from './orcaUiAssignment.js';
+import {
+  createOrcaUiAssignmentDispatchClaims,
+  createOrcaUiAssignmentHistoryGate,
+} from './orcaUiAssignmentHistoryGate.js';
 import { throwOrcaServiceFailure } from './orcaServiceFailure.js';
 import {
   createOrcaTeamService,
@@ -505,8 +681,11 @@ import {
 import {
   createOrcaWorkerCreationService,
   normalizeOrcaWorkerLabel,
-  providerRouteRequiresExplicitSelection,
 } from './orcaWorkerCreationService.js';
+import {
+  resolveSendToSessionExecutionConfig,
+  type SendToSessionExecutionOverrides,
+} from './sendToSessionExecutionConfig.js';
 import { registerOrcaWorkerControlHandlers } from './orcaWorkerControlHandlers.js';
 import {
   clearOrcaMcpHydrated,
@@ -537,15 +716,31 @@ import {
   type MakerSessionAgentSwitchHandlerDeps,
 } from './sessionAgentSwitchHandler.js';
 import {
+  extractAgentIslandPromptText,
   prependNoteToWireUserMessage,
   prependHandoffToUserMessage,
   type HandoffWireMessage,
 } from './agentHandoff.js';
+import {
+  createContextOverflowRollover,
+  isContextOverflowErrorData,
+  isPiPromptRpcTimeoutError,
+  lookupVerifiedContextWindow,
+  persistedUserContentToWireMessage,
+  shouldRebuildPiNativeSession,
+} from './contextOverflowRollover.js';
 import { hydrateQueuedAgentReferences } from './agentInputReferences.js';
 import { agentHandoffPending } from './agentHandoffPendingSingleton.js';
+import { clearSealedCodexPlanState, readCodexPlanState } from '../localDb/codexPlanState.js';
+import { buildCompletedPlanGuardNote, buildPlanReconcileNote } from './planReconcile.js';
 import { type MakerSessionCreateOpts, withCreateSessionStderr } from './sessionRequest.js';
 import { persistAndHydrateSessionProvider } from './sessionProviderBootstrap.js';
 import { registerMakerSessionSendHandler } from './sessionSendHandler.js';
+import {
+  registerReviewStartHandler,
+  ReviewPreconditionError,
+  type ReviewFailureReason,
+} from './reviewStartHandler.js';
 import { registerStopAgentTaskHandler } from './stopAgentTaskHandler.js';
 import { registerStopSessionBackgroundTasksHandler } from './stopSessionBackgroundTasksHandler.js';
 import { registerProviderHandlers } from './providerHandlers.js';
@@ -561,27 +756,30 @@ import {
   refreshActiveCatalogFromSource,
   refreshCustomProvidersIntoCatalog,
 } from '../maker-host/createDesktopProviderService.js';
-import {
-  connectedProvidersForAgent,
-  effectiveSourceIdForModel,
-  findModelRegistryRoute,
-  isModelSelectableForNewRoute,
-  type ProviderView,
-} from '@cindy/model-providers';
+import { readOrcaWorkerProviderRoutingContext } from './orcaProviderRoutingContext.js';
 import {
   getSessionProvider,
+  hasSessionProvider,
   hydrateSessionProvider,
   normalizeSessionProviderId,
   setSessionProvider,
 } from '../maker-host/session-provider-store.js';
 import { getActiveCatalog, setDiscoveredProviderModels } from '../maker-host/active-catalog.js';
+import { readCompactionPct } from '../maker-host/compaction-settings-store.js';
+import { resolveVerifiedContextWindow } from '../maker-host/catalog-to-descriptors.js';
+import { refreshXaiMediaModels } from '../maker-host/model-discovery/xai-media.js';
 import { testProviderConnection } from '../maker-host/provider-diagnostics.js';
 import { fetchProviderModels } from '../maker-host/provider-model-fetch.js';
-import { beginProviderRouteMutation, isUserProviderSession } from '../maker-host/provider-route.js';
+import {
+  beginProviderRouteMutation,
+  isUserProviderSession,
+  setPendingCredentialSwitchReader,
+} from '../maker-host/provider-route.js';
 import {
   getAnthropicModelDiscoveryFailure,
   refreshAnthropicModelsFromHttp,
 } from '../maker-host/model-discovery/anthropic.js';
+import { refreshXaiModelsFromHttp } from '../maker-host/model-discovery/xai.js';
 import { refreshBuiltinProviderModels } from '../maker-host/provider-model-refresh.js';
 import {
   configureProviderModelAutoRefresh,
@@ -614,10 +812,14 @@ import {
   storeCustomProviderHeaders,
   storeCustomProviderKey,
 } from '../secrets/providerSecretStore.js';
-import { setSessionEffort, setSessionFastMode } from '../maker-host/session-effort-store.js';
+import {
+  getSessionFastMode,
+  setSessionEffort,
+  setSessionFastMode,
+} from '../maker-host/session-effort-store.js';
 import {
   getModelVisibilityMirrorSnapshot,
-  syncModelVisibilityMirror,
+  syncModelVisibilityMirrorForOwner,
 } from '../maker-host/model-visibility-mirror.js';
 import {
   clearProviderDisableOverrides,
@@ -627,7 +829,14 @@ import {
 } from '../maker-host/model-disable-store.js';
 import { readProviderOrder, setProviderOrder } from '../maker-host/provider-order-store.js';
 import {
+  resolveCurrentSetModelProviderId,
+  resolveExclusiveSetModelReroute,
+  resolveSetModelGuardProviderId,
+} from '../maker-host/model-route-guard.js';
+import {
+  pinExclusiveSessionProvider,
   resolveLenientSessionRoute,
+  shouldApplyExclusiveProviderRerouteLive,
   verdictForModelRoute,
 } from '../maker-host/model-route-guard-live.js';
 import { setClaudeProxySessionIdResolver } from '../maker-host/anthropic-compat-proxy-host.js';
@@ -656,16 +865,34 @@ import {
   type MemoryChangeParts,
 } from './deferredCodexRestart.js';
 import {
+  createDeferredRestartAppliedWake,
+  createDeferredRestartQueueGate,
+} from './deferredRestartQueueWiring.js';
+import {
   hasAnySessionInTurn,
   isSessionTurnDispatchBoundaryBusy,
   isTerminalTurnErrorEvent,
   SessionTurnActivityTracker,
 } from './sessionTurnActivityTracker.js';
+import { SilentStopTurnLeaseGate, SessionTurnLeaseTracker } from './sessionTurnLease.js';
+import { ProductTurnUsageTargetTracker, ProductTurnWallClockTracker } from './turnWallClock.js';
 import { resolveClearSessionBoundary } from './clearSessionBoundary.js';
-import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
+import {
+  assertAgentCommandListIpcCaller,
+  toAgentCommandListFailure,
+} from './agentCommandListIpcBoundary.js';
+import {
+  assertAgentSkillListIpcCaller,
+  toAgentSkillListFailure,
+} from './agentSkillListIpcBoundary.js';
+import {
+  captureDataOwnerBroadcastScope,
+  tapWindowBroadcast,
+} from '../device-link/broadcast-tap.js';
 import { setBusyProbe as setDeviceLinkBusyProbe } from '../device-link/index.js';
 import {
   markRemoteSettingPersistedInsideHandler,
+  setRemoteReviewInputGuard as setDeviceLinkRemoteReviewInputGuard,
   setRemoteWorkingDirGuard as setDeviceLinkRemoteWorkingDirGuard,
   setRemoteSettingsPersist as setDeviceLinkRemoteSettingsPersist,
 } from '../device-link/dispatch.js';
@@ -677,6 +904,7 @@ import {
 import {
   attachMainOwnedInputBoundary,
   buildMobileClientPromptNote,
+  shouldPrependMobileClientPromptNote,
   stripMainOnlySendOpts,
   stampMobileClientOrigin,
   type MainOwnedInputBoundaryStamp,
@@ -686,6 +914,7 @@ import {
   isPluginSetupInteractionDecision,
 } from './interactionResolveOrigin.js';
 import { checkRemoteWorkingDir } from '../device-link/remote-workdir-guard.js';
+import { assertReviewSessionExternalInputAllowed } from '../reviewer/reviewSessionInputPolicy.js';
 import { createWorkerTurnStartSequencer } from './workerTurnStartSequencer.js';
 import { createBusinessSessionId } from '../sessionIds.js';
 import { forkSessionAtMessage } from '../maker-orchestration/fork.js';
@@ -725,6 +954,7 @@ import {
   hasEnabledUserMessageHookGhost,
   screenGhostUserMessage,
   setGhostAgentTurnRunner,
+  setGhostSessionRevealer,
   setGhostErrandRunner,
   setGhostWorkspaceSessionService,
   notifyGhostSessionEvent,
@@ -736,6 +966,11 @@ import {
   writeGhostErrandSessionId,
 } from '../cindy-brain/errandPrefsStore.js';
 import { isGhostPickedDir } from '../cindy-brain/pickGrantsStore.js';
+import {
+  resolveGhostUserHookModel,
+  withGhostAssistantHookModel,
+  withGhostUserHookModel,
+} from '../cindy-brain/subscriptionGateway.js';
 import { createGhostErrandRunner } from './ghostErrandRunner.js';
 import {
   createGhostErrandSession,
@@ -907,6 +1142,14 @@ const autoResumeBookkeeping = new AutoResumeBookkeeping({
     failPendingSchedulerAutoResume(sessionId, attemptToken),
   log: (message, fields) => log.debug(message, fields),
 });
+
+/**
+ * A Codex reconnect-stall retry is scheduled against the current runtime
+ * Session, but that provider may close/rebuild the exact instance before the
+ * backoff timer fires. Bind the lease to the instance, not only sessionId:
+ * a replacement Session can otherwise inherit a late close callback.
+ */
+const pendingCodexReconnectStalledRebuilds = new WeakMap<Session, number>();
 
 /**
  * 用户明确停止会话时统一撤销两类自动续跑与它们的退避簿记。
@@ -1279,8 +1522,14 @@ type SendToSessionInternalResult =
       wakeKind: 'resumed' | 'already-active' | 'created' | 'queued';
       targetTitle: string | null;
       targetLastUserSendAt: string | null;
+      /** jump 排队时的可寻址句柄；直发 / create 时省略。 */
+      queuedMessageId?: string;
       /** create + useWorktree 成功时为新 session 的 worktree 绝对路径;其余情况 undefined。 */
       worktreePath?: string | null;
+      model?: string;
+      effort?: SendToSessionCreateDefaults['effort'] | null;
+      fastMode?: boolean;
+      providerId?: string | null;
     }
   | {
       ok: false;
@@ -1291,6 +1540,9 @@ type SendToSessionInternalResult =
         | 'DELETED'
         | 'BUSY'
         | 'AGENT_NOT_READY'
+        | 'UNSUPPORTED_CAPABILITY'
+        | 'BUDGET_MODEL_REQUIRES_API_MODE'
+        | 'PROVIDER_ROUTE_UNAVAILABLE'
         // create 分支专用:dispatcher 无 session 上下文时无法继承配置新建。
         | 'LEAD_NOT_SUPPORTED'
         // create + useWorktree 专用:workingDir 不是 git 仓库 / git 未装 / worktree 创建失败。
@@ -1302,6 +1554,95 @@ type SendToSessionInternalResult =
 
 /** 暴露给 xdt-helper MCP provider 的协同控制面，必须复用 IPC 同源业务路径。 */
 interface OrcaCollabService {
+  listSessionQueue: (
+    sessionId: string,
+  ) => Promise<
+    | { ok: true; messages: SessionQueueInspectionEntry[] }
+    | { ok: false; errorCode: 'NOT_FOUND' | 'HOST_NOT_READY' | 'INTERNAL'; message: string }
+  >;
+  listSessionQueuedCounts: (
+    sessionIds: string[],
+  ) => Promise<
+    | { ok: true; counts: Record<string, number> }
+    | { ok: false; errorCode: 'HOST_NOT_READY' | 'INTERNAL'; message: string }
+  >;
+  updateSessionQueuedMessage: (params: {
+    callerSessionId: string;
+    targetSessionId: string;
+    queuedMessageId: string;
+    message: string;
+  }) => Promise<
+    | { ok: true; queuedMessageId: string }
+    | {
+        ok: false;
+        errorCode:
+          | 'NOT_FOUND'
+          | 'QUEUED_MESSAGE_NOT_FOUND'
+          | 'MESSAGE_CONSUMING'
+          | 'NOT_AUTHORIZED'
+          | 'INVALID_ARGS'
+          | 'HOST_NOT_READY'
+          | 'INTERNAL';
+        message: string;
+      }
+  >;
+  cancelSessionQueuedMessage: (params: {
+    callerSessionId: string;
+    targetSessionId: string;
+    queuedMessageId: string;
+  }) => Promise<
+    | { ok: true; queuedMessageId: string }
+    | {
+        ok: false;
+        errorCode:
+          | 'NOT_FOUND'
+          | 'QUEUED_MESSAGE_NOT_FOUND'
+          | 'MESSAGE_CONSUMING'
+          | 'NOT_AUTHORIZED'
+          | 'INVALID_ARGS'
+          | 'HOST_NOT_READY'
+          | 'INTERNAL';
+        message: string;
+      }
+  >;
+  steerSession: (params: {
+    callerSessionId: string;
+    targetSessionId: string;
+    message: string;
+  }) => Promise<
+    | { ok: true; queuedMessageId: string }
+    | {
+        ok: false;
+        errorCode:
+          | 'NOT_FOUND'
+          | 'NO_ACTIVE_TURN'
+          | 'UNSUPPORTED_CAPABILITY'
+          | 'INPUT_LOCKED'
+          | 'DELIVERY_FAILED'
+          | 'HOST_NOT_READY'
+          | 'INTERNAL';
+        message: string;
+      }
+  >;
+  stopSessionTurn: (params: { targetSessionId: string }) => Promise<
+    | {
+        ok: true;
+        status: 'no-active-turn' | 'waiting-for-safe-point' | 'requested' | 'unconfirmed';
+        turnGeneration?: number;
+        reason?: string;
+      }
+    | {
+        ok: false;
+        errorCode: 'NOT_FOUND' | 'UNSUPPORTED_CAPABILITY' | 'HOST_NOT_READY' | 'INTERNAL';
+        message: string;
+      }
+  >;
+  getSessionRuntime: (params: {
+    targetSessionId: string;
+  }) => Promise<
+    | { ok: true; runtime: Awaited<ReturnType<typeof readCanonicalSessionActivity>> }
+    | { ok: false; errorCode: 'NOT_FOUND' | 'HOST_NOT_READY' | 'INTERNAL'; message: string }
+  >;
   sendToSession: (params: {
     /** 省略 → create 新 session;提供 → jump 到该既有 session。 */
     targetSessionId?: string;
@@ -1314,6 +1655,8 @@ interface OrcaCollabService {
     useWorktree?: boolean;
     /** create 分支可选:新 session 的工作目录覆盖(绝对路径,须已存在;jump 忽略)。#811 */
     workingDir?: string;
+    /** create 分支可选:显式执行配置；未提供的字段继续继承 dispatcher。jump 忽略。 */
+    execution?: SendToSessionExecutionOverrides;
     /** Host-owned create defaults for non-session callers such as scheduler script tasks. */
     createDefaults?: SendToSessionCreateDefaults;
   }) => Promise<SendToSessionInternalResult>;
@@ -1325,20 +1668,28 @@ interface OrcaCollabService {
     workerSessionId: string;
     workerId: string;
     dispatched: boolean;
+    uiAssignmentSnapshotBeforeMs: number;
+    workerPermissionMode: OrcaWorkerPermissionMode;
     dispatchOutcome?: CollabDispatchOutcome;
   }>;
   disableOrca: (leadSessionId: string) => Promise<{ ok: true }>;
   /** start_team 只建立 team，不隐式创建 worker。 */
   startTeam: (params: {
     leadSessionId: string;
-  }) => Promise<{ ok: true; teamId: string } | { ok: false; errorCode: string; message: string }>;
+    workerPermissionMode?: OrcaWorkerPermissionMode;
+  }) => Promise<
+    | { ok: true; teamId: string; workerPermissionMode: OrcaWorkerPermissionMode; reused?: boolean }
+    | { ok: false; errorCode: string; message: string }
+  >;
   createWorker: (params: {
     leadSessionId: string;
     role: string;
     agent: AgentKind;
     model?: string;
+    providerId?: string;
     effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
     fast?: boolean;
+    workerPermissionMode?: OrcaWorkerPermissionMode;
     label: string;
     initialTask?: string;
   }) => Promise<
@@ -1389,11 +1740,7 @@ interface OrcaCollabService {
   getWorkspaceInfo: (params: { leadSessionId: string }) => Promise<
     | {
         ok: true;
-        workflow: {
-          workflow_id: string;
-          lead_session_id: string;
-          status: string;
-        } | null;
+        workflow: { workflow_id: string; lead_session_id: string; status: string } | null;
         ui_capacity: number;
         worker_count: number;
         workers: Array<{
@@ -1491,14 +1838,27 @@ interface OrcaCollabService {
   }) => Promise<
     { ok: true; workerId?: string } | { ok: false; errorCode: string; message: string }
   >;
-  listAvailableModels: (params: {
-    agent?: AgentKind;
-  }) => Promise<
+  listAvailableModels: (params: { agent?: AgentKind }) => Promise<
     | {
         ok: true;
-        codex?: Array<{ id: string; label: string }>;
-        claude_code?: Array<{ id: string; label: string }>;
-        pi?: Array<{ id: string; label: string }>;
+        codex?: Array<{
+          id: string;
+          label: string;
+          providers?: Array<{ id: string; name: string }>;
+          defaultProviderId?: string | null;
+        }>;
+        claude_code?: Array<{
+          id: string;
+          label: string;
+          providers?: Array<{ id: string; name: string }>;
+          defaultProviderId?: string | null;
+        }>;
+        pi?: Array<{
+          id: string;
+          label: string;
+          providers?: Array<{ id: string; name: string }>;
+          defaultProviderId?: string | null;
+        }>;
       }
     | { ok: false; errorCode: string; message: string }
   >;
@@ -1514,6 +1874,10 @@ interface EnableOrcaOptions {
   fast?: boolean;
   /** 显式选定的模型来源;语义见 OrcaWorkerCreateParams.providerId。 */
   providerId?: string | null;
+  /** Worker 创建默认权限；缺省沿用当前偏好，显式值会更新偏好。 */
+  workerPermissionMode?: OrcaWorkerPermissionMode;
+  /** 新建 Lead 专用：先建 Worker，等首条 Lead 输入 accepted 且可查询后再派任务。 */
+  deferDelegateTask?: boolean;
 }
 
 let orcaCollabServiceHolder: OrcaCollabService | null = null;
@@ -1730,6 +2094,11 @@ const renameSessionsConfirmBridge = new RenameSessionsConfirmBridge({
     desktopConfirmImNotifier(sessionId, '「批量重命名任务」的确认卡'),
 });
 
+const orcaWorkerPermissionConfirmBridge = new OrcaWorkerPermissionConfirmBridge({
+  broadcast: (channel, payload) => broadcastToAllWindows(channel, payload),
+  logger: log,
+});
+
 /**
  * ghost_call 过户 workdir 外文件的确认桥(kind='ghost_grant_confirm')。
  * 单例挂在 cindy-brain 模块里(ghost.ts 经 getGhostGrantConfirmBridge 消费),
@@ -1785,30 +2154,15 @@ initGhostSetupCoordinator({
   bridge: ghostSetupInteractionBridge,
   assess: (ghostId) => getGhostSetupAssessment(ghostId),
   validateTarget: (ghostId, tool, workingDir) => {
-    const ghost = getGhostManager()
-      .list()
-      .find((candidate) => candidate.manifest.id === ghostId);
-    if (!ghost || !isGhostAvailableForActiveSession(ghostId)) {
-      return {
-        ok: false,
-        errorCode: 'GHOST_NOT_FOUND',
-        message: t('newChat.pluginSetup.targetNotFound'),
-      };
-    }
-    if (!ghost.enabled) {
-      return {
-        ok: false,
-        errorCode: 'GHOST_ASLEEP',
-        message: t('newChat.pluginSetup.targetDisabled'),
-      };
-    }
-    if (isGhostDisabledForWorkdir(ghostId, workingDir)) {
-      return {
-        ok: false,
-        errorCode: 'GHOST_DISABLED_IN_WORKDIR',
-        message: t('newChat.pluginSetup.targetDisabledInWorkdir'),
-      };
-    }
+    // Coordinator 的 UI 只消费 TARGET_UNAVAILABLE 状态；这里的 message 会随
+    // ensureReady 结果回到模型，因此与 ghost_info / ghost_call 共用同一口径。
+    const visibility = classifyGhostVisibility(ghostId, workingDir ?? null, {
+      listGhosts: () => getGhostManager().list(),
+      isAvailableForActiveSession: isGhostAvailableForActiveSession,
+      isDisabledForWorkdir: isGhostDisabledForWorkdir,
+    });
+    if (!visibility.ok) return visibility;
+    const ghost = visibility.ghost;
     if (tool && !(ghost.manifest.tools ?? []).some((candidate) => candidate.name === tool)) {
       return {
         ok: false,
@@ -1878,6 +2232,9 @@ function getPendingInteractionsForSession(sessionId: string): PendingInteraction
   out.push(
     ...issueConfirmBridge.pendingSnapshots(sessionId).map(({ request }) => ({ request })),
     ...renameSessionsConfirmBridge.pendingSnapshots(sessionId).map(({ request }) => ({ request })),
+    ...orcaWorkerPermissionConfirmBridge
+      .pendingSnapshots(sessionId)
+      .map(({ request }) => ({ request })),
     ...ghostGrantConfirmBridge.pendingSnapshots(sessionId).map(({ request }) => ({ request })),
     ...ghostSetupInteractionBridge.pendingSnapshots(sessionId).map(({ request }) => ({ request })),
   );
@@ -1931,6 +2288,28 @@ function dismissRendererInteraction(
   });
 }
 
+function persistInteractionDecision(
+  sessionId: string,
+  persistId: string | undefined,
+  kind: PendingInteractionEntry['kind'],
+  request: RecoverableInteractionSnapshot,
+  decision: InteractionDecision | Record<string, unknown>,
+): void {
+  if (kind !== 'ask_user_question' && kind !== 'plan_review') return;
+  onInteractionResolved(
+    sessionId,
+    persistId,
+    kind,
+    request as {
+      requestId?: unknown;
+      questions?: unknown;
+      plan?: unknown;
+      planFilePath?: unknown;
+    },
+    decision as Record<string, unknown>,
+  );
+}
+
 function resolvePendingInteraction(requestId: string, decision: InteractionDecision): boolean {
   const resolver = pendingInteractionResolvers.get(requestId);
   if (!resolver) return false;
@@ -1955,24 +2334,19 @@ function resolvePendingInteraction(requestId: string, decision: InteractionDecis
     decision.behavior === 'deny' &&
     (decision.dismissed === true ||
       !(typeof decision.reason === 'string' && decision.reason.trim().length > 0));
-  if (plannedNoFollowUpTurn) {
+  const askUserNoFollowUpTurn =
+    resolver.kind === 'ask_user_question' &&
+    (decision.kind !== 'ask_user_question' || decision.dismissed === true);
+  if (plannedNoFollowUpTurn || askUserNoFollowUpTurn) {
     agentInputCoordinatorHolder?.onInteractionResolved(resolver.sessionId);
   }
-  // 被控端权威落库 ask/plan 的 answered/approved/revised 状态(含答案/编辑后 plan/feedback)。
-  if (resolver.kind === 'ask_user_question' || resolver.kind === 'plan_review') {
-    onInteractionResolved(
-      resolver.sessionId,
-      resolver.persistId,
-      resolver.kind,
-      resolver.request as {
-        requestId?: unknown;
-        questions?: unknown;
-        plan?: unknown;
-        planFilePath?: unknown;
-      },
-      (decision ?? {}) as Record<string, unknown>,
-    );
-  }
+  persistInteractionDecision(
+    resolver.sessionId,
+    resolver.persistId,
+    resolver.kind,
+    resolver.request,
+    decision,
+  );
   // (Option B)ask_user_question 答完 → 即时改写该会话的 goal 目标(仅首轮澄清,controller 内 guard)。
   // 连同本次问题(含选项)一并交出,让 controller 用确定性标记甄别这是不是"目标澄清问题"。
   if (
@@ -2012,7 +2386,7 @@ function defaultDecisionForPending(
   reason: string,
 ): InteractionDecision {
   if (kind === 'ask_user_question') {
-    return { kind: 'ask_user_question', answers: {} };
+    return { kind: 'ask_user_question', answers: {}, dismissed: true };
   }
   if (kind === 'plan_review') {
     // dismissed: 系统性 deny(session_closed / session_aborted / 超时清理等),
@@ -2029,7 +2403,9 @@ function cleanupPendingAgentInteractionsForSession(sessionId: string, reason: st
   for (const [requestId, entry] of entries) {
     clearPendingInteraction(requestId);
     handleAgentIslandInteractionDismissed(sessionId, requestId);
-    entry.resolve(defaultDecisionForPending(entry.kind, reason));
+    const decision = defaultDecisionForPending(entry.kind, reason);
+    entry.resolve(decision);
+    persistInteractionDecision(sessionId, entry.persistId, entry.kind, entry.request, decision);
     dismissRendererInteraction(entry, requestId, reason, 'deny');
   }
   ghostSetupInteractionBridge.cleanupForSession(
@@ -2047,6 +2423,10 @@ function cleanupPendingInteractionsForSession(sessionId: string, reason: string)
     reason === 'session_closed' ? 'session_closed' : 'session_aborted',
   );
   renameSessionsConfirmBridge.cleanupForSession(
+    sessionId,
+    reason === 'session_closed' ? 'session_closed' : 'session_aborted',
+  );
+  orcaWorkerPermissionConfirmBridge.cleanupForSession(
     sessionId,
     reason === 'session_closed' ? 'session_closed' : 'session_aborted',
   );
@@ -2075,9 +2455,7 @@ function cleanupPendingInteractionsForSession(sessionId: string, reason: string)
  * 给 feishu /ctr 接管 in-turn session 用 —— attached=true 路径里 setInteractionListener
  * 覆盖之前调一次, 把 desktop 卡片"原地搬到飞书"。
  */
-export function takePendingInteractionsForSession(
-  sessionId: string,
-): Array<{
+export function takePendingInteractionsForSession(sessionId: string): Array<{
   requestId: string;
   request: InteractionRequest;
   resolve: (decision: InteractionDecision) => void;
@@ -2213,6 +2591,23 @@ async function readSessionModelForUsage(sessionId: string): Promise<string> {
  * 只在第一次 isRunning:true 时写入,避免后续 progress status 在用户切模型后覆盖本轮归因。
  */
 const turnModelPromiseBySession = new Map<string, Promise<string>>();
+/** Pi request pricing variant captured at product-turn start. */
+const turnPiFastModeBySession = new Map<string, boolean>();
+
+/**
+ * Zero-value marker for a future subscription turn that was deliberately not
+ * priceable. daily_model_usage has no money-kind column, so approximate=true
+ * distinguishes this from legacy zero rows that history may still estimate.
+ */
+function unpricedSubscriptionValueMarker(): RegionalMoney {
+  return {
+    amount: 0,
+    currency: currentLedgerCurrency(),
+    approximate: true,
+    kind: 'value-estimate',
+    estimateReasons: ['subscription-value', 'reference-price'],
+  };
+}
 /**
  * claude/codex 失败 turn 的记账交接: is_error 收尾时 terminal error 事件先到,
  * 边界块在 error 上就 consume 掉本轮 assistant persistId;配对的 done 稍后才进
@@ -2286,6 +2681,36 @@ export async function withSendToSessionLock<T>(
 }
 
 let agentInputCoordinatorHolder: AgentInputCoordinator | null = null;
+let contextOverflowRolloverHolder: ReturnType<typeof createContextOverflowRollover> | null = null;
+const overflowSuppressedBroadcasts = new Map<
+  string,
+  { sessionId: string; event: AgentEvent; persistId?: string; resolvedContent?: unknown }
+>();
+
+function getWiredSessionCloseReason(session: WiredSession) {
+  return getMakerIfReady()?.getSessionCloseReason(session) ?? 'unexpected';
+}
+
+/**
+ * Preserve only the narrow provider-rebuild handoff window for an interrupted
+ * Codex reconnect stall. Every check is deliberately instance- and token-
+ * scoped so a user close, a later retry, or an already-running callback cannot
+ * resurrect the old business session.
+ */
+function shouldPreserveCodexReconnectStalledAutoResume(
+  session: WiredSession,
+  closeReason: ReturnType<typeof getWiredSessionCloseReason>,
+): boolean {
+  const attemptToken = pendingCodexReconnectStalledRebuilds.get(session);
+  if (attemptToken === undefined) return false;
+  if (closeReason !== 'unexpected') return false;
+  if (!interruptedTurnAutoResumeGuard.isCurrentAttempt(session.id, attemptToken)) return false;
+  if (!autoResumeBookkeeping.isCurrentAttempt(session.id, attemptToken)) return false;
+  const coordinator = agentInputCoordinatorHolder;
+  if (!coordinator || !coordinator.isAutoResumePending(session.id)) return false;
+  if (coordinator.getAutoResumeAttemptToken(session.id) !== attemptToken) return false;
+  return autoResumeBookkeeping.hasWaitingSchedule(session.id, attemptToken);
+}
 
 /**
  * GoalController 已确认当前 turn 归自己所有后调用：复用输入协调器的 Stop 边界中断
@@ -2327,6 +2752,26 @@ let pendingAgentSwitchApplyHolder:
 let cancelPendingAgentSwitchHolder: ((sessionId: string) => void) | null = null;
 let gitSnapshotCoordinator: GitSnapshotCoordinator | null = null;
 const sessionTurnActivityTracker = new SessionTurnActivityTracker();
+const reviewRunOwner: ReviewRunOwner = { instanceId: randomUUID(), processId: process.pid };
+configureTempAttachmentOwner(reviewRunOwner);
+const ensureReviewOwnerLivenessReady = createRetryableReviewStartup(async () => {
+  const handle = await startReviewOwnerLiveness();
+  reviewRunOwner.liveness = handle.identity;
+});
+const sessionTurnLeaseTracker = new SessionTurnLeaseTracker({
+  getDbClient,
+  owner: reviewRunOwner,
+  createTurnId: randomUUID,
+  now: Date.now,
+  warn: (message, fields) => log.warn(message, fields),
+});
+const silentStopTurnLeaseGate = new SilentStopTurnLeaseGate();
+function providerTurnLeaseId(sessionInstanceId: string, turnGeneration: number): string {
+  return `${sessionInstanceId}:${turnGeneration}`;
+}
+const productTurnWallClockTracker = new ProductTurnWallClockTracker();
+const productTurnUsageTargetTracker = new ProductTurnUsageTargetTracker();
+const claudeOutputLagTimingGuard = new ClaudeOutputLagTimingGuard();
 
 /**
  * Own the session input boundary while rewind stops an active turn and changes
@@ -2453,6 +2898,11 @@ export async function acquirePendingAgentSwitchForDirectSend(
   signal?: AbortSignal,
 ): Promise<() => void> {
   return pendingAgentSwitchApplyHolder?.(sessionId, signal) ?? (() => {});
+}
+
+/** 直发路径在 createSession / 重读 live session 之前关掉不健康原生会话。 */
+export async function prepareUnhealthySessionForSend(sessionId: string): Promise<void> {
+  await contextOverflowRolloverHolder?.prepareUnhealthySession(sessionId);
 }
 
 /** Later successful model/provider picks supersede an earlier cross-engine intent. */
@@ -2650,7 +3100,10 @@ function handleAgentIslandEventAfterBroadcast(
     const service = getAgentIslandService();
     if (!service) return;
     const meta = sessionMetaForIsland(session);
-    if (isRemoteAuthRetryErrorEvent(session, event)) {
+    if (
+      isRemoteAuthRetryErrorEvent(session, event) ||
+      isGatewayProxyTokenRecoveryErrorEvent(session.id, event)
+    ) {
       service.deferRemoteAuthRetryError(meta, event);
       return;
     }
@@ -2696,10 +3149,7 @@ function surfaceSuppressedAutoResumeErrorInAgentIsland(
     const meta = wired ? sessionMetaForIsland(wired) : { sessionId };
     service.handleAgentEvent(
       meta,
-      redactEventForRenderer({
-        type: 'error',
-        data: { ...detail, isTerminal: true },
-      }),
+      redactEventForRenderer({ type: 'error', data: { ...detail, isTerminal: true } }),
     );
   } catch (error) {
     log.warn('Agent Island suppressed auto-resume error restore failed', {
@@ -2724,6 +3174,16 @@ function isRemoteAuthRetryErrorEvent(
     /authentication_error|invalid.*api.key|401/i.test(
       typeof data?.message === 'string' ? data.message : '',
     )
+  );
+}
+
+function isGatewayProxyTokenRecoveryErrorEvent(sessionId: string, event: AgentEvent): boolean {
+  if (event.type !== 'error' || !isTerminalTurnErrorEvent(event)) return false;
+  const data = event.data as { message?: unknown; reason?: unknown } | undefined;
+  return (
+    isCindyGatewayProviderId(getSessionProvider(sessionId)) &&
+    (data?.reason === GATEWAY_PROXY_TOKEN_INVALID_REASON ||
+      isGatewayProxyTokenInvalidError(typeof data?.message === 'string' ? data.message : ''))
   );
 }
 
@@ -2890,32 +3350,6 @@ function rollbackAgentIslandUserPrompt(
   }
 }
 
-function extractAgentIslandPromptText(content: unknown): string | null {
-  if (typeof content === 'string') return content.trim() || null;
-  if (Array.isArray(content)) return extractAgentIslandPromptTextFromBlocks(content);
-  if (!content || typeof content !== 'object') return null;
-  const record = content as { content?: unknown; text?: unknown };
-  if (typeof record.content === 'string') return record.content.trim() || null;
-  if (Array.isArray(record.content)) return extractAgentIslandPromptTextFromBlocks(record.content);
-  if (typeof record.text === 'string') return record.text.trim() || null;
-  return null;
-}
-
-function extractAgentIslandPromptTextFromBlocks(blocks: unknown[]): string | null {
-  const text = blocks
-    .map((block) => {
-      if (typeof block === 'string') return block;
-      if (!block || typeof block !== 'object') return '';
-      const record = block as { type?: unknown; text?: unknown };
-      return record.type === 'text' && typeof record.text === 'string' ? record.text : '';
-    })
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join('\n')
-    .trim();
-  return text || null;
-}
-
 /**
  * 当前是否有任意一个 session 正在跑 turn。
  * 给 WindowControls 关闭按钮用: 无 in-flight 直接进 closing overlay, 有 in-flight 弹确认框。
@@ -3044,11 +3478,6 @@ export function installDesktopInteractionListener(session: {
         planFilePath?: unknown;
       },
     );
-    broadcastToAllWindows(MAKER_PUSH.INTERACTION_REQUEST, {
-      sessionId: session.id,
-      request: req,
-      persistId: interactionPersistId,
-    });
     return new Promise<InteractionDecision>((resolve) => {
       const entry: PendingInteractionEntry = {
         sessionId: session.id,
@@ -3066,7 +3495,14 @@ export function installDesktopInteractionListener(session: {
           dismissRendererInteraction(pending, req.requestId, 'timeout', 'deny');
         }, PERMISSION_INTERACTION_TIMEOUT_MS);
       }
+      // 必须先登记 pending,再广播。否则 renderer / device-link 回得太快会打到
+      // 「no pending resolver」,确认卡看起来没反应,Codex 最终却记成用户拒绝。
       pendingInteractionResolvers.set(req.requestId, entry);
+      broadcastToAllWindows(MAKER_PUSH.INTERACTION_REQUEST, {
+        sessionId: session.id,
+        request: req,
+        persistId: interactionPersistId,
+      });
       handleAgentIslandInteractionAfterBroadcast(
         session as { id: string; agentKind?: unknown; workDir?: unknown; workspaceKind?: unknown },
         req,
@@ -3103,10 +3539,31 @@ export function installDesktopInteractionListener(session: {
  * (skip / exhausted / send 失败)补发被推迟的 idle + coordinator done 信号,
  * 让 renderer 正确显示 stopped、scheduler/hook runner 收到 done 并 finish。
  */
-function settleSilentStopDone(
+async function settleSilentStopDone(
   sessionId: string,
   reason: 'exhausted' | 'skip' | 'send-failed',
-): void {
+  turnLeaseId: string,
+): Promise<void> {
+  silentStopTurnLeaseGate.settle(sessionId, turnLeaseId);
+  try {
+    if (!(await sessionTurnLeaseTracker.markTurnEndedAndCheckIdle(sessionId, turnLeaseId))) {
+      log.debug('ignored stale silent-stop settle after a newer turn started', {
+        sessionId,
+        turnLeaseId,
+      });
+      return;
+    }
+  } catch (error) {
+    log.warn('silent-stop turn lease settle failed closed', {
+      sessionId,
+      turnLeaseId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  void finalizeTurnChangeSet(sessionId, null, 'complete');
+  productTurnWallClockTracker.clear(sessionId);
+  productTurnUsageTargetTracker.clear(sessionId);
   sessionTurnActivityTracker.scheduleIdleAfterTerminalBroadcast(sessionId);
   noteClaudeSessionTurnState(sessionId, false);
   agentInputCoordinatorHolder?.onTurnEvent(sessionId, 'done');
@@ -3154,18 +3611,29 @@ async function surfaceSilentStopExhaustedBanner(sessionId: string): Promise<void
 async function handleSilentStopTurnEnd(
   session: NonNullable<ReturnType<Maker['getSession']>>,
   doneAt: number,
+  turnLeaseId: string,
   turnOrigin?: SendOrigin,
 ): Promise<void> {
+  if (!silentStopTurnLeaseGate.claim(session.id, turnLeaseId)) {
+    log.debug('ignored superseded silent-stop decision timer', {
+      sessionId: session.id,
+      turnLeaseId,
+    });
+    return;
+  }
   if (agentInputCoordinatorHolder?.hasPendingQueuedWork(session.id)) {
     log.debug('silent-stop auto-resume skipped — coordinator has queued work', {
       sessionId: session.id,
     });
-    settleSilentStopDone(session.id, 'skip');
+    await settleSilentStopDone(session.id, 'skip', turnLeaseId);
     return;
   }
   const decision = silentStopAutoResumeGuard.onSilentStop(session.id, doneAt);
   if (decision.action === 'resume') {
     try {
+      // The next Claude running boundary belongs to the same user-visible turn.
+      // Mark it before send(), which may synchronously emit status events.
+      productTurnWallClockTracker.preserveForContinuation(session.id);
       const clientId = randomUUID();
       const sendResult = await session.send(
         { type: 'user', content: SILENT_STOP_RESUME_PROMPT },
@@ -3211,7 +3679,7 @@ async function handleSilentStopTurnEnd(
           reason: outcome.reason,
         });
         await surfaceSilentStopExhaustedBanner(session.id);
-        settleSilentStopDone(session.id, 'exhausted');
+        await settleSilentStopDone(session.id, 'exhausted', turnLeaseId);
       } else {
         log.info('silent-stop auto-resume dispatched', { sessionId: session.id });
       }
@@ -3222,17 +3690,41 @@ async function handleSilentStopTurnEnd(
         error: err instanceof Error ? err.message : String(err),
       });
       await surfaceSilentStopExhaustedBanner(session.id);
-      settleSilentStopDone(session.id, 'exhausted');
+      await settleSilentStopDone(session.id, 'exhausted', turnLeaseId);
     }
     return;
   }
   if (decision.action === 'exhausted') {
     await surfaceSilentStopExhaustedBanner(session.id);
-    settleSilentStopDone(session.id, 'exhausted');
+    await settleSilentStopDone(session.id, 'exhausted', turnLeaseId);
   }
   if (decision.action === 'skip') {
-    settleSilentStopDone(session.id, 'skip');
+    await settleSilentStopDone(session.id, 'skip', turnLeaseId);
   }
+}
+
+function isFencedStaleProductTerminal(event: AgentEvent): boolean {
+  if (event.type === 'done') return true;
+  if (isTerminalTurnErrorEvent(event)) return true;
+  if (event.type !== 'status') return false;
+  const data = event.data as { isRunning?: unknown } | null | undefined;
+  return data?.isRunning === false;
+}
+
+function isFencedStaleSessionTerminal(
+  sessionId: string,
+  event: AgentEvent,
+): boolean {
+  if (isTurnContinuationBoundaryEvent(event) || event.turnScope === 'background') {
+    return false;
+  }
+  return (
+    isFencedStaleProductTerminal(event) &&
+    agentInputCoordinatorHolder?.isFencedStaleTerminal(sessionId, {
+      sessionTurnGeneration: event.sessionTurnGeneration,
+      sessionInstanceId: event.sessionInstanceId,
+    }) === true
+  );
 }
 
 export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void {
@@ -3254,6 +3746,51 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   const registration: WiredSessionRegistration = { session, disposers: [] };
   wiredSessionsById.set(session.id, registration);
 
+  session.setTurnLifecycleObserver({
+    beforeProviderStart: async (turnGeneration) => {
+      if (session.remoteHostId) return;
+      silentStopTurnLeaseGate.supersede(session.id);
+      await sessionTurnLeaseTracker.markTurnStarted(
+        session.id,
+        providerTurnLeaseId(session.instanceId, turnGeneration),
+      );
+    },
+    onUndispatched: async (turnGeneration) => {
+      if (session.remoteHostId) return;
+      await sessionTurnLeaseTracker.markTurnEnded(
+        session.id,
+        providerTurnLeaseId(session.instanceId, turnGeneration),
+      );
+    },
+    onTerminal: ({ turnGeneration, event, isCurrentGeneration }) => {
+      if (session.remoteHostId) return;
+      const turnLeaseId = providerTurnLeaseId(session.instanceId, turnGeneration);
+      const isSilentStop =
+        event.type === 'done' &&
+        (event.data as { silentStop?: unknown } | null | undefined)?.silentStop === true;
+      if (isSilentStop && isCurrentGeneration) {
+        // The provider turn ended, but the product turn remains occupied while
+        // the bounded auto-resume decision runs. Its exact lease is either
+        // replaced by the next provider generation or released by settle.
+        const scheduled = silentStopTurnLeaseGate.schedule(session.id, event, turnLeaseId);
+        if (!scheduled) {
+          log.debug('ignored duplicate silent-stop terminal for the current turn', {
+            sessionId: session.id,
+            turnLeaseId,
+          });
+        }
+        return;
+      }
+      if (isCurrentGeneration) silentStopTurnLeaseGate.supersede(session.id);
+      void sessionTurnLeaseTracker.markTurnEnded(session.id, turnLeaseId);
+    },
+  });
+  registration.disposers.push(() => {
+    session.setTurnLifecycleObserver(null);
+    silentStopTurnLeaseGate.supersedeOwnedBy(session.id, `${session.instanceId}:`);
+    void sessionTurnLeaseTracker.markTurnEnded(session.id);
+  });
+
   // session-agent-switch:登记本会话当前引擎,broadcaster / user 行落库据此逐行
   // stamp messages.agent_kind(切换后历史行的 agent_meta 必须按写入时引擎解析)。
   noteSessionAgentKind(session.id, makerToDbAgentKind(session.agentKind));
@@ -3267,9 +3804,12 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   registration.disposers.push(() => {
     ghostSessionTap.dispose();
     installInteractionLifecycleObserver(session, null);
+    clearPendingTurnChangeSets(session.id);
   });
   registration.disposers.push(
     session.onEvent((event: AgentEvent) => {
+      if (isFencedStaleSessionTerminal(session.id, event)) return;
+      noteTurnDiffEvent(session.id, event, session.remoteHostId !== null);
       ghostSessionTap.handleEvent(
         event as { type: string; data?: unknown; source?: string; turnOrigin?: { kind?: string } },
       );
@@ -3280,6 +3820,26 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   // 让 renderer chat store 不必扫所有 vendor-raw 找它。
   registration.disposers.push(
     session.onEvent((event: AgentEvent) => {
+      // Exact patches are main-owned durable data. They have a dedicated summary push and
+      // on-demand detail IPC; forwarding the raw diff through maker:event would duplicate a
+      // potentially multi-megabyte payload to every renderer and device-link controller.
+      if (event.type === 'turn_diff') return;
+      if (
+        event.turnScope === 'background' &&
+        Object.prototype.hasOwnProperty.call(event, 'backgroundTurnStartedAt') &&
+        backgroundTurnPredatesSessionClear(session.id, event.backgroundTurnStartedAt)
+      ) {
+        return;
+      }
+      if (isFencedStaleSessionTerminal(session.id, event)) {
+        log.debug('ignored stale terminal after leftover turn reclaim', {
+          sessionId: session.id,
+          eventType: event.type,
+          sessionTurnGeneration: event.sessionTurnGeneration ?? null,
+          sessionInstanceId: event.sessionInstanceId ?? null,
+        });
+        return;
+      }
       // 自动续跑的 pending 不能只靠 status(isRunning=true) 清理：Pi/Claude 的
       // terminal-only 路径可能首个事件就是 error。Session 已把 host-owned token
       // 盖到事件上，首个匹配 token 的事件即视为 provider accepted。
@@ -3297,10 +3857,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             event.data && typeof event.data === 'object' && !Array.isArray(event.data)
               ? (event.data as Record<string, unknown>)
               : {};
-          attributedEvent = {
-            ...event,
-            data: { ...eventData, reason },
-          };
+          attributedEvent = { ...event, data: { ...eventData, reason } };
           log.warn('Claude Opus plan error normalized for renderer', {
             sessionId: session.id,
             model: session.model,
@@ -3315,11 +3872,17 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           handleAgentIslandInteractionDismissed(session.id, data.requestId);
           const entry = clearPendingInteraction(data.requestId);
           if (entry) {
-            entry.resolve(
-              defaultDecisionForPending(
-                entry.kind,
-                typeof data.reason === 'string' ? data.reason : 'dismissed',
-              ),
+            const decision = defaultDecisionForPending(
+              entry.kind,
+              typeof data.reason === 'string' ? data.reason : 'dismissed',
+            );
+            entry.resolve(decision);
+            persistInteractionDecision(
+              session.id,
+              entry.persistId,
+              entry.kind,
+              entry.request,
+              decision,
             );
           }
         }
@@ -3358,7 +3921,17 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       let pendingCodexAccountUsageSnapshot: unknown | null = null;
       let shouldMarkTurnStatusIdleAfterBroadcast = false;
       let shouldMarkTurnTerminalIdleAfterBroadcast = false;
+      let completedTurnWallClockMs: number | undefined;
       const isContinuationBoundary = isTurnContinuationBoundaryEvent(event);
+      // 探针:continuation 边界命中会跳过 status idle / ended 写 / tracker idle,
+      // 若 claim 悬挂会导致 UI 永久「正在生成」。区分「claim 悬挂」与「done 未到达」。
+      if (isContinuationBoundary && (event.type === 'done' || event.type === 'status')) {
+        log.debug('turn continuation boundary event skipped from turn-finalize', {
+          sessionId: session.id,
+          eventType: event.type,
+          turnContinuationId: event.turnContinuationId,
+        });
+      }
       if (event.type === 'account_usage' && event.source === 'codex' && !session.remoteHostId) {
         pendingCodexAccountUsageSnapshot = event.data;
       }
@@ -3369,14 +3942,17 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           contextTokens?: number;
           contextWindow?: number;
         };
-        if (data.isRunning === true) {
+        // Idle compact / late background work may still send isRunning for UI
+        // copy. It must not latch the product turn tracker or idle bookkeeping.
+        if (data.isRunning === true && event.turnScope !== 'background') {
           // replacement 已进入 vendor 后，running 是新 attempt 的权威起点。不要依赖
           // sendToAgent 返回后的 onDispatched 回调：provider 可同步发事件并先清 activeTurn。
           autoResumeBookkeeping.discardReplacementProvenByProviderEvent(session.id);
           // 新 turn 启动: 上一轮未配对的失败记账交接 id 已无归属, 丢弃防错配。
           pendingFailedTurnAssistantPersistId.delete(session.id);
           // 记录 turn 开始时刻，供 onTurnErrorEvent 判断 error 是否属于 /clear 之前的旧 turn。
-          noteTurnStarted(session.id);
+          noteTurnStarted(session.id, event.turnAttemptToken);
+          noteSubagentObservationTurnStarted(session.id);
           // silent-stop 守卫:新 turn 开始 → 清 pendingResume + 记录时刻(陈旧判定)。
           silentStopAutoResumeGuard.noteTurnStarted(session.id);
           interruptedTurnAutoResumeGuard.noteTurnStarted(session.id, {
@@ -3385,6 +3961,10 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             clearPending: typeof event.turnAttemptToken === 'number',
           });
           const wasInTurn = sessionTurnActivityTracker.isSessionInTurn(session.id);
+          if (!wasInTurn && event.source === 'claude-code') {
+            const startedProductTurn = productTurnWallClockTracker.start(session.id);
+            if (startedProductTurn) productTurnUsageTargetTracker.clear(session.id);
+          }
           sessionTurnActivityTracker.setSessionInTurn(session.id, data.isRunning);
           if (!wasInTurn) advanceSessionTurnBoundaryGeneration(session.id);
           // 后台活动检测:turn 开始 → 该会话的 API 流量回归主线,后台横幅熄灭。
@@ -3400,6 +3980,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             // 「疑似中断」纯读判定(设计总述见 localDb/sessionActiveTurn.ts 文件头)。
             // SSH remote 会话同样记录:session 行在本地 DB、事件流走本进程,只是
             // agent 跑在远端;device-link 被控会话不进本进程 maker-core,天然不经过。
+            clearPromptPredictionSessionStopped(session.id);
             markSessionTurnStarted(session.id);
           }
           if (
@@ -3408,7 +3989,14 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           ) {
             turnModelPromiseBySession.set(session.id, readSessionModelForUsage(session.id));
           }
-        } else if (data.isRunning === false && !isContinuationBoundary) {
+          if (event.source === 'pi' && !turnPiFastModeBySession.has(session.id)) {
+            turnPiFastModeBySession.set(session.id, getSessionFastMode(session.id));
+          }
+        } else if (
+          data.isRunning === false &&
+          !isContinuationBoundary &&
+          event.turnScope !== 'background'
+        ) {
           shouldMarkTurnStatusIdleAfterBroadcast = true;
         }
         if (
@@ -3423,15 +4011,39 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         }
       }
       if (event.type === 'done') {
-        // turn 正常收尾但一路没有实质产出时,上一条重连记录同样不能停在"结果未回填":
-        // 成功路径已在产出事件里 settle 成 succeeded(此处 no-op),走到这里就是没产出。
         const doneAttemptToken = event.turnAttemptToken;
         if (typeof doneAttemptToken === 'number' && !isContinuationBoundary) {
           autoResumeBookkeeping.settleOutcome(session.id, doneAttemptToken, 'failed');
           interruptedTurnAutoResumeGuard.noteAttemptSettled(session.id, doneAttemptToken);
         }
-        const isSilentStopDone =
+        const rawTurn = (event.data as { raw?: { id?: unknown; status?: unknown } } | null)?.raw;
+        const carriesSilentStop =
           (event.data as { silentStop?: boolean } | null | undefined)?.silentStop === true;
+        const silentStopTurnLeaseId = carriesSilentStop
+          ? silentStopTurnLeaseGate.turnLeaseIdForEvent(event)
+          : undefined;
+        if (carriesSilentStop && !silentStopTurnLeaseId) {
+          log.debug('ignored stale silent-stop terminal from an older turn', {
+            sessionId: session.id,
+          });
+          return;
+        }
+        const isSilentStopDone = carriesSilentStop;
+        if (event.source === 'claude-code' && !isContinuationBoundary && !isSilentStopDone) {
+          completedTurnWallClockMs = productTurnWallClockTracker.finish(session.id);
+        }
+        if (!isContinuationBoundary && !isSilentStopDone) {
+          shouldMarkTurnTerminalIdleAfterBroadcast = true;
+        }
+        if (!isContinuationBoundary && !isSilentStopDone) {
+          finalizeTurnChangeSet(
+            session.id,
+            typeof rawTurn?.id === 'string' ? rawTurn.id : null,
+            rawTurn && rawTurn.status !== 'completed' ? 'partial' : 'complete',
+          );
+        }
+        // turn 正常收尾但一路没有实质产出时,上一条重连记录同样不能停在"结果未回填":
+        // 成功路径已在产出事件里 settle 成 succeeded(此处 no-op),走到这里就是没产出。
         // silent-stop done:自动续跑会在 1.5s 后启动新 turn(或弹耗尽横幅),
         // 不标 idle/不触发 goal idle/不通知 coordinator done——避免 renderer
         // 在 500ms 完成去抖窗口内显示假完成通知,下一个 turn 开始后又跳回 running。
@@ -3443,8 +4055,10 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           // 兜底: 有些 vendor 的 done 不必先发 status:isRunning=false。
           // 但 idle 恢复不能挡在 EVENT broadcast 前，否则隐藏窗口可能在 done
           // 还没进入 renderer 时就重新被 Chromium 节流。
-          shouldMarkTurnTerminalIdleAfterBroadcast = true;
-          agentInputCoordinatorHolder?.onTurnEvent(session.id, 'done');
+          agentInputCoordinatorHolder?.onTurnEvent(session.id, 'done', undefined, undefined, {
+            sessionTurnGeneration: event.sessionTurnGeneration,
+            sessionInstanceId: event.sessionInstanceId,
+          });
         } else {
           // silent-stop 自动续跑:translator 判定本 turn 被上游空内容消息静默收尾时在
           // done.data 附加 silentStop 标记(见 maker-core translator)。延迟一拍再决策,
@@ -3460,14 +4074,21 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           const silentStopDoneAt = Date.now();
           const silentStopTurnOrigin = event.turnOrigin;
           setTimeout(() => {
-            void handleSilentStopTurnEnd(session, silentStopDoneAt, silentStopTurnOrigin);
+            void handleSilentStopTurnEnd(
+              session,
+              silentStopDoneAt,
+              silentStopTurnLeaseId!,
+              silentStopTurnOrigin,
+            );
           }, 1_500);
         }
       }
       // 提前声明在终止型 error 块与 done/terminal 边界块两处均需使用的持久化条件标志。
       let isPlannedUpgradeClose = false;
       let isRemoteAuthRetry = false;
+      let isGatewayProxyTokenRecovery = false;
       if (isTerminalTurnErrorEvent(event)) {
+        finalizeTurnChangeSet(session.id, null, 'partial');
         // **任何**终态失败都先把上一条重连记录钉成失败 —— 不管这次错误本身是否值得自愈。
         // 只在"命中白名单、准备再接管"时才 settle 的话,非白名单的终态(认证 / 计费 /
         // invalid-request)会让记录悬空,随后一个无关 turn 的首个产出事件就把它标成
@@ -3483,6 +4104,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         shouldMarkTurnTerminalIdleAfterBroadcast = true;
         if (event.source === 'claude-code' || event.source === 'codex' || event.source === 'pi') {
           turnModelPromiseBySession.delete(session.id);
+          if (event.source === 'pi') turnPiFastModeBySession.delete(session.id);
         }
         const errData =
           attributedEvent.type === 'error'
@@ -3504,6 +4126,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         // sdkError === 'authentication_failed' 以及 message 命中 authentication_error /
         // invalid api key / 401 的情形。本地会话（无 remoteHostId）无 auto-retry，不跳过。
         isRemoteAuthRetry = isRemoteAuthRetryErrorEvent(session, event);
+        isGatewayProxyTokenRecovery = isGatewayProxyTokenRecoveryErrorEvent(session.id, event);
         if (!isPlannedUpgradeClose) {
           agentInputCoordinatorHolder?.onTurnEvent(
             session.id,
@@ -3521,6 +4144,10 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
                 ? { errorStatus: errData.errorStatus }
                 : {}),
             },
+            {
+              sessionTurnGeneration: event.sessionTurnGeneration,
+              sessionInstanceId: event.sessionInstanceId,
+            },
           );
         }
       }
@@ -3532,7 +4159,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       const eventAgentMeta = (event as { agentMeta?: AgentMeta | null }).agentMeta ?? null;
       // 跟踪会话最近一次非空 agentMeta(镜像 renderer state.lastAgentMeta),给 interaction
       // 边界 flush 当兜底锚点,保 agent_meta 不丢(rewind/fork)。
-      if (eventAgentMeta) noteAgentMeta(session.id, eventAgentMeta);
+      if (eventAgentMeta && event.turnScope !== 'background')
+        noteAgentMeta(session.id, eventAgentMeta);
       let persistId: string | undefined;
       // tool_result 家族:main 解析出的权威内容,盖进 payload 让 renderer 即时显示
       // (Option C:内容重排状态机只在 main 一份,与落库同源同值)。
@@ -3541,7 +4169,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       // 连续失败计数归零；人工介入周期的硬总上限不归零，保证始终有限。
       // 刻意只认这两类事件:thinking / status / 空消息都不算产出;guard 侧是 O(1)、
       // 无 IO、无日志,放在热路径安全。
-      if (isSubstantiveProgressEvent(event)) {
+      // 晚到 background 事件仍需广播和持久化,但不能给当前中断回合充值。
+      if (event.turnScope !== 'background' && isSubstantiveProgressEvent(event)) {
         const progressAttemptToken = event.turnAttemptToken;
         const accepted = interruptedTurnAutoResumeGuard.noteProgress(
           session.id,
@@ -3568,17 +4197,21 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       } else if (event.type === 'tool_use') {
         // tool_use 边界:先 flush 在飞 assistant(保证 assistant 行先于其 tool_use 入队
         // 落库),再落 tool_use 本身,拿回 persistId 盖进 payload。两者都只入队、不阻塞。
-        flushAssistantBlock(session.id, eventAgentMeta);
+        if (event.turnScope !== 'background') flushAssistantBlock(session.id, eventAgentMeta);
         persistId = onToolUseEvent(
           session.id,
           event.data as { toolUseId?: unknown; toolName?: unknown; input?: unknown },
           eventAgentMeta,
+          event.turnScope === 'background' ? 'background' : 'turn',
+          event.backgroundTurnStartedAt,
+          event.turnAttemptToken,
         );
       } else if (event.type === 'tool_result') {
         const r = onToolResultEvent(
           session.id,
           event.data as { summary?: unknown; toolUseIds?: unknown },
           eventAgentMeta,
+          event.turnScope === 'background' ? 'background' : 'turn',
         );
         persistId = r?.persistId;
         resolvedContent = r?.content;
@@ -3587,6 +4220,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           session.id,
           event.data as { toolUseId?: unknown; fullText?: unknown },
           eventAgentMeta,
+          event.turnScope === 'background' ? 'background' : 'turn',
         );
         persistId = r?.persistId;
         resolvedContent = r?.content;
@@ -3604,16 +4238,69 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           eventAgentMeta,
         );
       }
+      if (event.type === 'agent_task_update') {
+        onAgentTaskUpdateEvent(session.id, event.data);
+        // Subagent workspace is an observer only: normalize the existing
+        // harness event into Cindy's durable record on the same FIFO as chat
+        // messages. No launch/control path or provider payload is modified.
+        const source =
+          event.source === 'claude-code' || event.source === 'codex' || event.source === 'pi'
+            ? event.source
+            : undefined;
+        const observedAt = Date.now();
+        const generationStamp = captureSubagentObservationGeneration({
+          sessionId: session.id,
+          data: event.data,
+          source,
+        });
+        if (generationStamp)
+          void enqueueSubagentObservationWrite({
+            sessionId: session.id,
+            stamp: generationStamp,
+            enqueue: () =>
+              enqueueDurableWrite(`subagent_update:${session.id}`, async (ownerScope) => {
+                const persisted = await persistSubagentTaskUpdate(
+                  session.id,
+                  event.data,
+                  source,
+                  observedAt,
+                );
+                if (persisted) {
+                  broadcastSubagentRunsChanged({ sessionId: session.id, ...persisted }, ownerScope);
+                }
+                return persisted;
+              }),
+          }).catch((error) => {
+            log.warn('Subagent workspace persistence failed', {
+              sessionId: session.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+      }
       // 先 broadcast 保 UI 实时性,再 flush(flush 只入队、不阻塞)。
       // Keep the raw event for main-side coordination/persistence, but only
       // cross renderer/device-link boundaries with the redacted copy.
-      broadcastToAllWindows(MAKER_PUSH.EVENT, {
-        sessionId: session.id,
-        event: broadcastEvent,
-        persistId,
-        resolvedContent,
-      });
-      handleAgentIslandEventAfterBroadcast(session, broadcastEvent);
+      const suppressOverflowBroadcast =
+        !session.remoteHostId &&
+        event.type === 'error' &&
+        isTerminalTurnErrorEvent(event) &&
+        isContextOverflowErrorData(event.data);
+      if (suppressOverflowBroadcast) {
+        overflowSuppressedBroadcasts.set(session.id, {
+          sessionId: session.id,
+          event: broadcastEvent,
+          persistId,
+          resolvedContent,
+        });
+      } else {
+        broadcastToAllWindows(MAKER_PUSH.EVENT, {
+          sessionId: session.id,
+          event: broadcastEvent,
+          persistId,
+          resolvedContent,
+        });
+        handleAgentIslandEventAfterBroadcast(session, broadcastEvent);
+      }
       if (shouldMarkTurnTerminalIdleAfterBroadcast) {
         sessionTurnActivityTracker.scheduleIdleAfterTerminalBroadcast(session.id);
         // #9 idle 兜底:正常 done、终止型 error（含 abort）统一在 tracker 已置 idle 后
@@ -3678,6 +4365,16 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           }
           pendingFailedTurnAssistantPersistId.delete(session.id);
         }
+        if (event.type === 'done' && event.source === 'claude-code') {
+          if (isContinuationBoundary) {
+            productTurnUsageTargetTracker.remember(session.id, turnAssistantPersistId);
+          } else {
+            turnAssistantPersistId = productTurnUsageTargetTracker.finish(
+              session.id,
+              turnAssistantPersistId,
+            );
+          }
+        }
         flushOrphanToolResults(session.id, eventAgentMeta);
         if (turnBoundaryAssistantPersistId) {
           // 在同一 durable FIFO 内先盖 turn seal、再复用 local-db:messages:created 广播
@@ -3710,10 +4407,59 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           event.type === 'error' &&
           (agentInputCoordinatorHolder?.isAutoResumePending(session.id) === true ||
             agentInputCoordinatorHolder?.isAutoResumeDeferred(session.id) === true);
-        if (
+        const overflowClaim =
+          event.type === 'error' &&
+          !session.remoteHostId &&
+          isTerminalTurnErrorEvent(event) &&
+          !isPlannedUpgradeClose &&
+          !isRemoteAuthRetry &&
+          !isGatewayProxyTokenRecovery &&
+          !autoResumeSuppressesPersist &&
+          isContextOverflowErrorData(attributedEvent.data)
+            ? (contextOverflowRolloverHolder?.claim(session.id) ?? 'idle')
+            : 'idle';
+        if (overflowClaim === 'claimed') {
+          const overflowErrorData = attributedEvent.data;
+          const surfaceOverflowFailure = (): void => {
+            const stashed = overflowSuppressedBroadcasts.get(session.id);
+            overflowSuppressedBroadcasts.delete(session.id);
+            if (stashed) {
+              broadcastToAllWindows(MAKER_PUSH.EVENT, stashed);
+              handleAgentIslandEventAfterBroadcast(session, stashed.event);
+            }
+            onTurnErrorEvent(
+              session.id,
+              overflowErrorData as {
+                message?: unknown;
+                reason?: unknown;
+                sdkError?: unknown;
+              } | null,
+              eventAgentMeta,
+            );
+          };
+          void contextOverflowRolloverHolder
+            ?.tryRecover(session.id, overflowErrorData)
+            .then((recovered) => {
+              if (recovered) {
+                overflowSuppressedBroadcasts.delete(session.id);
+                return;
+              }
+              surfaceOverflowFailure();
+            })
+            .catch((error) => {
+              log.warn('context overflow rollover rejected', {
+                sessionId: session.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+              surfaceOverflowFailure();
+            });
+        } else if (overflowClaim === 'in-flight') {
+          // 同一 turn 的重复终态 error：继续压住，避免污染历史。
+        } else if (
           event.type === 'error' &&
           !isPlannedUpgradeClose &&
           !isRemoteAuthRetry &&
+          !isGatewayProxyTokenRecovery &&
           !autoResumeSuppressesPersist
         ) {
           onTurnErrorEvent(
@@ -3745,7 +4491,10 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         // _turnStartedAtBySession 之前保存一份，让 deferred 路径能正确做 /clear 竞态 cap。
         // 自愈压住 error 行时同理:补落发生在 resetTurnPersistState 之后(退避 3–20 秒,
         // 或决策推迟的那一小段),不先存一份会让 /clear 竞态 cap 判错。
-        if (event.type === 'error' && (isRemoteAuthRetry || autoResumeSuppressesPersist)) {
+        if (
+          event.type === 'error' &&
+          (isRemoteAuthRetry || isGatewayProxyTokenRecovery || autoResumeSuppressesPersist)
+        ) {
           saveTurnStartedAtForDeferred(session.id);
         }
         // turn 收尾打标:本 turn 已知持久化(assistant flush / orphan tool_result /
@@ -3755,6 +4504,23 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         // A claim-bearing done seals this SDK segment, but the product turn is
         // still running and may emit another continuation segment. Reset the
         // per-SDK-turn persistence maps while deferring the logical turn marker.
+        // 没有 done 的终态 error(Codex 在 terminal error 后显式压掉迟到的
+        // turnCompleted,persistCodexPlanOnDone 永远不会跑到):本 turn 的计划行
+        // 既没有章也没有 turnCompleted:false,面板会把全勾完的失败计划当旧数据
+        // 兜底退场。在这里补失败印记——只盖 turn 存活标记,不动步骤状态。
+        if (
+          !isContinuationBoundary &&
+          event.source === 'codex' &&
+          event.type !== 'done' &&
+          isTerminalTurnErrorEvent(event)
+        ) {
+          const errorTurnId =
+            typeof (event.data as { raw?: { id?: unknown } } | null | undefined)?.raw?.id ===
+            'string'
+              ? ((event.data as { raw?: { id?: unknown } }).raw!.id as string)
+              : null;
+          persistCodexPlanOnTerminalError(session.id, errorTurnId);
+        }
         if (!isContinuationBoundary && event.source === 'codex' && event.type === 'done') {
           // Renderer applies this terminal snapshot immediately. Persist the
           // same state before sealing the persist queue and clearing the
@@ -3763,17 +4529,17 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           persistCodexPlanOnDone(
             session.id,
             event.data as
-              | {
-                  plan?: unknown;
-                  raw?: { id?: unknown; status?: unknown };
-                }
-              | null
-              | undefined,
+              { plan?: unknown; raw?: { id?: unknown; status?: unknown } } | null | undefined,
           );
         }
         if (!isContinuationBoundary) {
           markTurnEndedAfterPersistDrain(session.id);
+          // 逻辑 turn 结束:跨段存活的计划行引用到此回收(continuation boundary
+          // 上必须保留,否则最终 done 找不到计划行 → 无章无失败印记 → 胶囊永久
+          // 钉住,review P1-1)。
+          clearCodexPlanRowsForSession(session.id);
         }
+        preserveTurnPersistStateForBackground(session.id);
         resetTurnPersistState(session.id);
         // sidebar-card-mode: 摘要触发挪到本轮 assistant 块 flush 入队之后(原先在
         // done 早段、flush 之前触发,流式轮次会读到上一轮文本)。只在正常 done 触发。
@@ -3783,6 +4549,10 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         if (event.type === 'done' && !isContinuationBoundary) {
           void (async () => {
             await drainPersistQueue();
+            // 列表预览与置顶卡片摘要解耦:无论置顶区是不是卡片、这条有没有置顶,
+            // 都要把最近一条可见消息立刻写回 session.preview。摘要生成失败也不能
+            // 让侧栏停在进入本轮前的旧句子。
+            await refreshSessionListPreview(session.id);
             // force:turn-done 是权威刷新点(本轮 assistant 已落库),必须以最新内容覆盖
             // 任何 pin 触发 / 上一轮残留的摘要——绕过 in-flight 早返与 20s 节流
             // (codex review:pin during running turn 会让卡片停在部分/旧摘要)。
@@ -3798,23 +4568,47 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           const doneResult = (event.data as { result?: unknown } | null)?.result;
           const replyText = typeof doneResult === 'string' ? doneResult : '';
           if (replyText.length > 0 && hasEnabledGhostAssistantHook()) {
-            runGhostAssistantReplyHook(session.id, turnAssistantPersistId, replyText);
+            const turnModel =
+              turnModelPromiseBySession.get(session.id) ??
+              Promise.resolve(session.model || 'unknown');
+            const assistantPersistId = turnAssistantPersistId;
+            withGhostAssistantHookModel(turnModel, () => {
+              runGhostAssistantReplyHook(session.id, assistantPersistId, replyText);
+            });
           }
         }
         // Worker turn 结束后交给 OrcaTeamService 处理 DB status、广播与 auto-bridge。
         if (!isContinuationBoundary) {
           void (async () => {
             try {
-              const doneData = event.data as { result?: unknown } | null;
+              const doneData = event.data as {
+                result?: unknown;
+                message?: unknown;
+                sdkError?: unknown;
+                reason?: unknown;
+                error?: { message?: unknown };
+              } | null;
               const finalText =
                 typeof doneData?.result === 'string' && doneData.result.length > 0
                   ? doneData.result
                   : '';
+              const diagnostic = isTerminalTurnErrorEvent(event)
+                ? [
+                    doneData?.message,
+                    doneData?.sdkError,
+                    doneData?.reason,
+                    doneData?.error?.message,
+                  ].find(
+                    (value): value is string =>
+                      typeof value === 'string' && value.trim().length > 0,
+                  )
+                : undefined;
               await workerTurnStartSequencer.waitForStart(session.id);
               await orcaTeamServiceForEvents?.handleWorkerTerminalTurn({
                 sessionId: session.id,
                 status: isTerminalTurnErrorEvent(event) ? 'error' : 'done',
                 finalText,
+                diagnostic,
               });
             } catch {
               /* non-fatal */
@@ -3823,10 +4617,22 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         }
       }
       if (pendingContextSnapshot) {
+        const verifiedWindow = lookupVerifiedContextWindow(
+          (agentKind, modelId, providerId) =>
+            resolveVerifiedContextWindow(
+              getActiveCatalog(),
+              dbToMakerAgentKind(agentKind),
+              providerId,
+              modelId,
+            ),
+          session.model,
+          getSessionProvider(session.id),
+          session.agentKind,
+        );
         recordSessionContextSnapshot(
           session.id,
           pendingContextSnapshot.contextTokens,
-          pendingContextSnapshot.contextWindow,
+          verifiedWindow ?? pendingContextSnapshot.contextWindow,
         );
       }
       if (pendingCodexAccountUsageSnapshot) {
@@ -3848,6 +4654,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         const doneData = event.data as
           | {
               total_cost_usd?: unknown;
+              duration_ms?: unknown;
+              duration_api_ms?: unknown;
               usage?: {
                 input_tokens?: number;
                 output_tokens?: number;
@@ -3855,22 +4663,75 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
                 cache_creation_input_tokens?: number;
               };
               modelUsage?: Record<string, unknown>;
+              usageSegments?: unknown;
+              usageSegmentsComplete?: unknown;
+              modelUsageCumulativeStartsAtZero?: unknown;
+              assistant_message_id?: unknown;
+              is_error?: unknown;
             }
           | undefined;
         const cumulative = doneData?.total_cost_usd;
         const modelUsage = doneData?.modelUsage;
+        // Missing request boundaries are an explicit pricing failure, including
+        // older remote payloads. Flat aggregate arithmetic may look safe, but
+        // the request's Fast/Batch variant is also unknown.
+        const claudeUsageSegments = normalizeTurnUsageSegments(doneData?.usageSegments);
+        const claudeUsageSegmentsComplete =
+          doneData?.usageSegmentsComplete === true && (claudeUsageSegments?.length ?? 0) > 0;
+        const claudeTurnDurationMs =
+          completedTurnWallClockMs ??
+          (typeof doneData?.duration_ms === 'number' ? doneData.duration_ms : undefined);
         let modelUsageDeltas: ModelUsageDeltaEntry[] | undefined;
         if (modelUsage && typeof modelUsage === 'object') {
+          const observedByModel = claudeUsageSegmentsComplete
+            ? (() => {
+                const grouped = new Map<string, ReturnType<typeof sumTurnUsageSegments>>();
+                for (const segment of claudeUsageSegments ?? []) {
+                  const model = normalizeModelIdForPricing(segment.model);
+                  const previous = grouped.get(model) ?? {
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    cacheReadTokens: 0,
+                    cacheCreateTokens: 0,
+                  };
+                  grouped.set(model, {
+                    inputTokens: previous.inputTokens + segment.inputTokens,
+                    outputTokens: previous.outputTokens + segment.outputTokens,
+                    cacheReadTokens: previous.cacheReadTokens + segment.cacheReadTokens,
+                    cacheCreateTokens: previous.cacheCreateTokens + segment.cacheCreateTokens,
+                  });
+                }
+                return grouped;
+              })()
+            : undefined;
           const { next, deltas } = computeModelUsageDeltas(
             lastReportedModelUsageBySession.get(session.id),
             modelUsage,
+            observedByModel,
+            {
+              cumulativeStartsAtZero: doneData?.modelUsageCumulativeStartsAtZero === true,
+            },
           );
           lastReportedModelUsageBySession.set(session.id, next);
           modelUsageDeltas = deltas;
         }
+        const outputLagTiming = claudeOutputLagTimingGuard.evaluate(
+          session.id,
+          modelUsageDeltas ?? [],
+          !isContinuationBoundary,
+          typeof doneData?.assistant_message_id === 'string'
+            ? doneData.assistant_message_id
+            : undefined,
+          doneData?.is_error !== true,
+        );
+        const claudeGenerationDurationMs = outputLagTiming.suppressTiming
+          ? undefined
+          : typeof doneData?.duration_api_ms === 'number'
+            ? doneData.duration_api_ms
+            : undefined;
         // total_cost_usd 累计基线: 主路径不靠它算钱, 但仍跟住, 以便万一某轮缺 modelUsage
         // 走兜底时累计差才准。先取"更新前"基线给兜底用, 再写入本轮累计。
-        const prevReportedCost = lastReportedCostUsdBySession.get(session.id) ?? 0;
+        const prevReportedCost = lastReportedCostUsdBySession.get(session.id);
         if (typeof cumulative === 'number' && cumulative >= 0) {
           lastReportedCostUsdBySession.set(session.id, cumulative);
         }
@@ -3878,7 +4739,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         // 判定主线被上游静默替换(如 fable-5 高负载被路由到 opus-4-8),把标记挂到本轮
         // 收尾 assistant 的 agent_meta 上(AssistantMessage 渲染降级提示行)。
         // fire-and-forget,与记账 sink 互不阻塞;判定纯函数见 shared/modelMismatch.ts。
-        if (modelUsageDeltas && detectOutputLag(modelUsageDeltas)) {
+        if (modelUsageDeltas && outputLagTiming.detected) {
           // 上游在 done 时点还没结算本轮输出(实测 Vertex),这一轮的费用会偏低、下一轮偏高。
           // 总量不丢,只是归属错位;不做纠正的理由见 usage/modelUsageDelta 文件头。
           log.warn(
@@ -3913,10 +4774,13 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               /* 模型解析失败:跳过降级检测,非致命 */
             });
         }
-        if (modelUsageDeltas && modelUsageDeltas.length > 0) {
+        if (
+          (modelUsageDeltas && modelUsageDeltas.length > 0) ||
+          (claudeUsageSegments?.length ?? 0) > 0
+        ) {
           // 主路径: 逐模型 HYBRID 定价 (Anthropic→SDK, 非 Anthropic→gateway), 四个 sink
           // 由同一份解析结果驱动。价格表走 main 端内存 + 磁盘缓存, stale 快返并后台刷新。
-          const deltas = modelUsageDeltas;
+          const deltas = modelUsageDeltas ?? [];
           void (async () => {
             const sessionProviderForBilling = getSessionProvider(session.id);
             const observedClaudeRoute =
@@ -3949,34 +4813,61 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             const { turnMoney, estimatedTurnMoney, perModel } = resolveClaudeTurnCostSinks(
               deltas,
               pricing,
-              {
-                providerId: sessionProviderForBilling,
-                billingRoute,
-                region: CURRENT_CINDY_REGION,
-              },
+              { providerId: sessionProviderForBilling, billingRoute, region: CURRENT_CINDY_REGION },
+              claudeUsageSegments,
+              claudeUsageSegmentsComplete,
             );
-            // 按模型记账 (首页仪表盘"按模型拆分"): 写归一化裸 id, 与 codex 行 / 价格表对齐。
+            const resolvedUsageDeltas: ModelUsageDeltaEntry[] = perModel.map((item) => ({
+              model: item.model,
+              costUsdDelta: item.money?.kind === 'actual-cost' ? item.money.amount : 0,
+              inputTokensDelta: item.deltas.inputTokens,
+              outputTokensDelta: item.deltas.outputTokens,
+              cacheReadTokensDelta: item.deltas.cacheReadTokens,
+              cacheCreateTokensDelta: item.deltas.cacheCreateTokens,
+            }));
+            // 按模型记账 (首页仪表盘"按模型拆分"): 保留 provider/SKU 前缀，
+            // `codex/` 等预算路由必须精确命中自己的报价，不能回落到裸模型的另一折扣。
             // 订阅轮打 #billing=subscription 标记(Claude 订阅:Anthropic 模型 + cost=0),
             // 或 bridge 订阅轮(chatgpt// xai/ 前缀,source==='subscription');两类均需触发
             // rebroadcastTodaySpend 刷新首页仪表盘。
             const modelUsageWrites: Promise<unknown>[] = [];
+            const subscriptionTurnEstimates: RegionalMoney[] = [];
             let hasSubscriptionValueRow = false;
             for (const m of perModel) {
               const isClaudeSubscriptionValueRow =
                 isClaudeSubscriptionSession && !m.money && isAnthropicModel(m.model);
               const isBridgeSubscriptionRow =
-                m.source === 'subscription' && isSubscriptionDirectModel(m.model);
+                m.source === 'subscription' && isSubscriptionDirectRoute(m.model);
+              const subscriptionEstimate =
+                isClaudeSubscriptionValueRow || isBridgeSubscriptionRow
+                  ? computePriceQuoteTurnMoney(
+                      m.deltas,
+                      getSubscriptionValuePriceFor('claude-code', m.model, pricing),
+                      currentLedgerCurrency(),
+                      m.segments,
+                    )
+                  : null;
+              if (subscriptionEstimate?.amount) {
+                subscriptionTurnEstimates.push(subscriptionEstimate);
+              }
               if (isClaudeSubscriptionValueRow || isBridgeSubscriptionRow)
                 hasSubscriptionValueRow = true;
+              const modelRowMoney =
+                m.money?.kind === 'actual-cost'
+                  ? m.money
+                  : isClaudeSubscriptionValueRow || isBridgeSubscriptionRow
+                    ? (subscriptionEstimate ?? unpricedSubscriptionValueMarker())
+                    : null;
               modelUsageWrites.push(
                 recordModelTurnUsage({
                   agentKind: 'claude-code',
-                  model: isClaudeSubscriptionValueRow
-                    ? claudeSubscriptionUsageModelKey(m.model)
-                    : m.model,
-                  // daily_model_usage does not persist RegionalMoney.kind. Keep reference estimates
-                  // out of this actual-cost row so they cannot be reconstructed as real API spend.
-                  money: m.money?.kind === 'actual-cost' ? m.money : null,
+                  model:
+                    isClaudeSubscriptionValueRow || isBridgeSubscriptionRow
+                      ? claudeSubscriptionUsageModelKey(m.model)
+                      : m.model,
+                  // The subscription suffix lets the existing schema reconstruct this amount as
+                  // value-estimate, keeping it out of daily_spend and actual API totals.
+                  money: modelRowMoney,
                   inputTokensDelta: m.deltas.inputTokens,
                   outputTokensDelta: m.deltas.outputTokens,
                   cacheReadTokensDelta: m.deltas.cacheReadTokens,
@@ -3996,9 +4887,11 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               // 传 perModel → 落「按模型成本明细」(含 subagent 跑的模型, 如 Haiku)。
               const turnUsageDetails = buildClaudeTurnUsageDetails(
                 doneData?.usage,
-                deltas,
+                resolvedUsageDeltas,
                 'unknown',
                 perModel,
+                claudeGenerationDurationMs,
+                claudeTurnDurationMs,
               );
               recordTurnSpend(turnMoney);
               recordSessionTurnSpend(session.id, turnMoney);
@@ -4025,31 +4918,16 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               const estimatedValues: RegionalMoney[] = estimatedTurnMoney
                 ? [estimatedTurnMoney]
                 : [];
-              for (const m of perModel) {
-                if (m.source !== 'subscription') continue;
-                const quote = getSubscriptionDirectValuePrice(m.model, 'claude-code', pricing);
-                const value = computePriceQuoteTurnMoney(
-                  m.deltas,
-                  quote ?? undefined,
-                  currentLedgerCurrency(),
-                );
-                if (value?.amount) estimatedValues.push(value);
-              }
-              if (isClaudeSubscriptionSession) {
-                const claudeEstimated = estimateClaudeSubscriptionTurnValue(
-                  perModel,
-                  currentLedgerCurrency(),
-                  pricing,
-                );
-                if (claudeEstimated?.amount) estimatedValues.push(claudeEstimated);
-              }
+              estimatedValues.push(...subscriptionTurnEstimates);
               const turnEstimatedValue =
                 estimatedValues.length > 0 ? addRegionalMoney(estimatedValues) : null;
               const turnUsageDetails = buildClaudeTurnUsageDetails(
                 doneData?.usage,
-                deltas,
+                resolvedUsageDeltas,
                 'unknown',
                 perModel,
+                claudeGenerationDurationMs,
+                claudeTurnDurationMs,
               );
               if (turnEstimatedValue && turnEstimatedValue.amount > 0) {
                 const changedScheduleId = await recordSchedulerTurnCost({
@@ -4072,9 +4950,13 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             }
           })();
         } else if (typeof cumulative === 'number' && cumulative >= 0) {
-          // 窄兜底: 罕见地 done 只带 total_cost_usd、没 modelUsage —— 拆不了 daily_model_usage,
-          // 但至少用累计差把总额 / session / message 记上, 别漏整轮 (review #4)。
-          const rawDelta = Math.max(0, cumulative - prevReportedCost);
+          // 窄兜底: 罕见地 done 只带 total_cost_usd、没 modelUsage / request segments ——
+          // 拆不了 daily_model_usage, 只在已有累计基线后用 cost delta 记总额。
+          // The first cumulative snapshot after restart/reattach may contain
+          // the whole provider process lifetime. With neither modelUsage nor
+          // request segments, only establish the baseline.
+          const rawDelta =
+            prevReportedCost === undefined ? 0 : Math.max(0, cumulative - prevReportedCost);
           void (async () => {
             let resolvedModel = 'unknown';
             try {
@@ -4083,14 +4965,19 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             } catch {
               /* non-fatal: 保留 SDK 原始 cost */
             }
+            // `doneData.usage` can be the same process-lifetime cumulative snapshot as
+            // `total_cost_usd`. Without model deltas or request segments it is not a reliable
+            // per-turn token fact, so retain only model/timing metadata in this fallback.
             const turnUsageDetails = buildClaudeTurnUsageDetails(
-              doneData?.usage,
+              undefined,
               undefined,
               resolvedModel,
+              undefined,
+              claudeGenerationDurationMs,
+              claudeTurnDurationMs,
             );
-            // 本分支有三个"记不了钱"的出口(本轮 cost 未增长 / 订阅直连 / 订阅与网关路由),
-            // 账本口径一个字不改,但都把本轮 token 明细落下来 —— 钱算不出来不代表用量
-            // 算不出来,UI 那一格据此退回显示 token 而不是空着。
+            // 本分支有三个"记不了钱"的出口(本轮 cost 未增长 / 订阅直连 / 非明确
+            // provider-api 路由)。只保留可证明的模型与时长；进程累计 usage 不能冒充本轮 token。
             const recordUsageOnly = async () => {
               if (!turnAssistantPersistId) return;
               await recordTurnUsageOnMessage({
@@ -4122,11 +5009,14 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             // sessions.total_cost_usd(与主路径 resolveTurnCost 的 subscription gate 同口径,
             // 避免把订阅 SDK 自报 cost 误记进计费)。但显式 provider-api 是权威路由:
             // 自定义 API 供应商可能供应带订阅前缀的模型 id,不能按前缀把真实费用判掉。
-            if (route !== 'provider-api' && isSubscriptionDirectModel(resolvedModel)) {
+            if (route !== 'provider-api' && isSubscriptionDirectRoute(resolvedModel)) {
               await recordUsageOnly();
               return;
             }
-            if (route === 'subscription' || route === 'xd-gateway') {
+            // A cumulative SDK dollar value is authoritative only for an
+            // explicitly selected provider API. Remote/unknown routing cannot
+            // be attributed to this local account and must stay usage-only.
+            if (route !== 'provider-api') {
               await recordUsageOnly();
               return;
             }
@@ -4154,6 +5044,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         void modelPromise
           .then((m) => {
             if (m && m.startsWith(CHATGPT_MODEL_PREFIX)) triggerCodexAccountUsageRefresh();
+            if (m && isExclusiveXaiModelId(m)) triggerXaiSubscriptionUsageRefresh();
           })
           .catch(() => {
             /* 模型解析失败: 跳过, 非致命 */
@@ -4179,8 +5070,9 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         const usage = (event.data as { usage?: unknown } | undefined)?.usage;
         if (usage) recordCodexTurnUsage(usage);
         // 按模型记账: codex done.data.usage 是 **per-turn 增量语义** (maker-core
-        // codexDoneUsage 契约: promptTokens=本 turn 未命中输入, completionTokens=输出+推理
-        // 合并, cachedTokens=命中缓存; 整 turn 没收到 tokenUsage/updated 时全 0)。
+        // codexDoneUsage 契约: promptTokens=本 turn 未命中输入, completionTokens=完整输出
+        // (reasoningTokens 只是其中的诊断子集), cachedTokens=命中缓存;
+        // 整 turn 没收到 tokenUsage/updated 时全 0。
         // 直接入库, 不做 delta 化 —— 历史上 promptTokens 曾是 contextTokens 快照、这里
         // 做过 per-session delta 化, 语义改为 per-turn 后那套逻辑会把后小于前的 turn 记 0。
         if (usage && typeof usage === 'object') {
@@ -4189,10 +5081,20 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             completionTokens?: number;
             reasoningTokens?: number;
             cachedTokens?: number;
+            segments?: unknown;
+            durationMs?: number;
+            turnDurationMs?: number;
           };
           const promptTokens = Number(u.promptTokens) || 0;
           const completionTokens = Number(u.completionTokens) || 0;
           const cachedTokens = Number(u.cachedTokens) || 0;
+          const codexUsageSegments = normalizeTurnUsageSegments(u.segments);
+          const codexSegmentTotals = sumTurnUsageSegments(codexUsageSegments);
+          const codexSegmentsReliable =
+            codexUsageSegments.length > 0 &&
+            codexSegmentTotals.inputTokens === promptTokens &&
+            codexSegmentTotals.outputTokens === completionTokens &&
+            codexSegmentTotals.cacheReadTokens === cachedTokens;
           void recordSessionTurnTokens(session.id, promptTokens + completionTokens + cachedTokens);
           // 先落 daily_model_usage token 行, 再等价格表补 API cost。首页 usage push 会在
           // ~2s 后刷新, 不能让冷价格表 / 离线 fetch 把模型 token 行延后到刷新之后。
@@ -4202,8 +5104,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             let turnModel = 'unknown';
             try {
               turnModel = await modelPromise;
-              // 价格查表用归一化裸 id, 与 daily_model_usage 的 key 一致
-              // (codex 当前不带 [1m], 归一化防御未来变体后缀导致查表 miss)。
+              // 只剥上下文后缀，保留 provider/SKU 前缀；`codex/gpt-*` 与裸
+              // `gpt-*` 是不同售价和折扣，不能互相回落。
               pricingModel = normalizeModelIdForPricing(turnModel);
             } catch {
               // 模型读取失败时仍记录 token, 聚合 UI 会归到 unknown。
@@ -4213,7 +5115,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               pricingModel.startsWith('codex/');
             const isCodexXaiProviderRoute =
               (sessionProvider == null || sessionProvider === 'xai') &&
-              pricingModel.startsWith(XAI_MODEL_PREFIX);
+              isExclusiveXaiModelId(pricingModel);
             const isCodexOpenAiProviderRoute =
               sessionProvider == null || sessionProvider === 'openai';
             const hasGatewayKey = Boolean(readClaudeApiKey());
@@ -4254,6 +5156,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             await recordModelTurnUsage({
               agentKind: 'codex',
               model: modelUsageKey,
+              money: isSubscriptionValue ? unpricedSubscriptionValueMarker() : undefined,
               inputTokensDelta: promptTokens,
               outputTokensDelta: completionTokens,
               cacheReadTokensDelta: cachedTokens,
@@ -4275,6 +5178,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               cacheReadTokens: cachedTokens,
               cacheCreateTokens: 0,
               model: turnModel,
+              durationMs: u.durationMs,
+              turnDurationMs: u.turnDurationMs,
             });
             const recordCodexUsageOnly = async () => {
               if (!turnAssistantPersistId) return;
@@ -4315,11 +5220,12 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
                 codexUsageToTokens(u),
                 price ?? undefined,
                 currentLedgerCurrency(),
+                u.segments !== undefined && codexSegmentsReliable ? codexUsageSegments : [],
               );
               // Only Gateway sale prices are actual API spend. Third-party/user reference quotes
               // are value estimates and daily_model_usage cannot preserve RegionalMoney.kind, so
               // writing them into #billing=api would later reconstruct an estimate as actual cost.
-              if (!isSubscriptionValue && money && price?.source === 'gateway') {
+              if (money && (isSubscriptionValue || price?.source === 'gateway')) {
                 await recordModelTurnUsage({
                   agentKind: 'codex',
                   model: modelUsageKey,
@@ -4361,10 +5267,14 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         void modelPromise
           .then((model) => {
             const hasGatewayKey = Boolean(readClaudeApiKey());
+            if (!isRemoteCodexSession && isExclusiveXaiModelId(model)) {
+              triggerXaiSubscriptionUsageRefresh();
+              return;
+            }
             if (
               !isRemoteCodexSession &&
               !isCustomProviderRoute &&
-              !model.startsWith(XAI_MODEL_PREFIX) &&
+              !isExclusiveXaiModelId(model) &&
               (codexAuthInjection === 'env-key' ||
                 model.startsWith('codex/') ||
                 (sessionProvider === 'xd' && hasGatewayKey))
@@ -4385,6 +5295,14 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       // usage 事实无论价格是否可解析都持久化，保证新模型也能看到 cache 命中明细。
       if (event.type === 'done' && event.source === 'pi') {
         const sessionProvider = getSessionProvider(session.id);
+        // New Pi payloads carry the tariff on every request segment. Keep the
+        // turn-start snapshot only as a compatibility fallback for older or
+        // incomplete payloads that have no explicit priceVariant.
+        const piPriceVariant =
+          (turnPiFastModeBySession.get(session.id) ?? getSessionFastMode(session.id))
+            ? 'priority'
+            : 'standard';
+        turnPiFastModeBySession.delete(session.id);
         const modelPromise =
           turnModelPromiseBySession.get(session.id) ?? readSessionModelForUsage(session.id);
         turnModelPromiseBySession.delete(session.id);
@@ -4398,6 +5316,24 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               cacheCreationTokens?: number;
             },
           );
+          const piUsageSegments = normalizeTurnUsageSegments(
+            (rawUsage as { segments?: unknown }).segments,
+          ).map((segment) => ({
+            ...segment,
+            // Parent requests use this session's bridge preference. Delegated
+            // child requests have an independent process and are standard
+            // unless their own payload explicitly reports another variant.
+            priceVariant:
+              segment.priceVariant ?? (segment.id?.startsWith('pi:') ? piPriceVariant : 'standard'),
+          }));
+          const piSegmentTotals = sumTurnUsageSegments(piUsageSegments);
+          const piSegmentsReliable =
+            (rawUsage as { segmentsComplete?: unknown }).segmentsComplete === true &&
+            piUsageSegments.length > 0 &&
+            piSegmentTotals.inputTokens === tokens.inputTokens &&
+            piSegmentTotals.outputTokens === tokens.outputTokens &&
+            piSegmentTotals.cacheReadTokens === tokens.cacheReadTokens &&
+            piSegmentTotals.cacheCreateTokens === tokens.cacheCreateTokens;
           const totalTokens =
             tokens.inputTokens +
             tokens.outputTokens +
@@ -4412,6 +5348,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               // 模型读取失败仍持久化 token/cache，模型显示为 unknown。
             }
             const pricingModel = normalizeModelIdForPricing(turnModel);
+            const isCustomProviderRoute = isUserProviderSession(session.id);
             const effectiveProvider =
               sessionProvider ??
               (pricingModel.startsWith(CHATGPT_MODEL_PREFIX)
@@ -4423,71 +5360,153 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               effectiveProvider === 'openai' ||
               effectiveProvider === 'anthropic' ||
               effectiveProvider === 'xai' ||
-              isSubscriptionDirectModel(pricingModel);
-            const turnUsageDetails = buildTurnUsageDetails({
-              ...tokens,
-              model: turnModel,
-            });
+              (!isCustomProviderRoute && isSubscriptionDirectRoute(pricingModel));
+            const billingRoute: BillingRoute = isCustomProviderRoute
+              ? 'provider-api'
+              : isSubscriptionValue
+                ? 'subscription'
+                : 'xd-gateway';
+            const effectiveSegments = piSegmentsReliable ? piUsageSegments : [];
+            const groupedSegments = new Map<
+              string,
+              { segments: typeof effectiveSegments; tokens: typeof tokens; sdkCostUsd: number }
+            >();
+            for (const segment of effectiveSegments) {
+              const model = normalizeModelIdForPricing(segment.model ?? turnModel);
+              const group = groupedSegments.get(model) ?? {
+                segments: [],
+                tokens: {
+                  inputTokens: 0,
+                  outputTokens: 0,
+                  cacheReadTokens: 0,
+                  cacheCreateTokens: 0,
+                },
+                sdkCostUsd: 0,
+              };
+              group.segments.push(segment);
+              group.tokens.inputTokens += segment.inputTokens;
+              group.tokens.outputTokens += segment.outputTokens;
+              group.tokens.cacheReadTokens += segment.cacheReadTokens;
+              group.tokens.cacheCreateTokens += segment.cacheCreateTokens;
+              group.sdkCostUsd += segment.costUsd ?? 0;
+              groupedSegments.set(model, group);
+            }
+            // An explicitly incomplete segment payload must not be collapsed
+            // into one synthetic request for pricing. Keep the aggregate token
+            // fact under the selected model while leaving money unavailable.
+            if (groupedSegments.size === 0) {
+              groupedSegments.set(pricingModel, { segments: [], tokens, sdkCostUsd: 0 });
+            }
 
-            // Pi 也必须进 daily_model_usage，否则首页仪表盘会把 Pi 的
-            // token/cache 全部漏掉。先落 usage 事实，价格解析失败也不影响。
-            const modelUsageKey = isSubscriptionValue
-              ? piSubscriptionUsageModelKey(pricingModel)
-              : pricingModel;
-            await recordModelTurnUsage({
-              agentKind: 'pi',
-              model: modelUsageKey,
-              inputTokensDelta: tokens.inputTokens,
-              outputTokensDelta: tokens.outputTokens,
-              cacheReadTokensDelta: tokens.cacheReadTokens,
-              cacheCreateTokensDelta: tokens.cacheCreateTokens,
+            const durationMs =
+              typeof (rawUsage as { durationMs?: unknown }).durationMs === 'number'
+                ? (rawUsage as { durationMs: number }).durationMs
+                : undefined;
+            const turnDurationMs =
+              typeof (rawUsage as { turnDurationMs?: unknown }).turnDurationMs === 'number'
+                ? (rawUsage as { turnDurationMs: number }).turnDurationMs
+                : undefined;
+            const usageOnlyDetails = buildTurnUsageDetails({
+              ...tokens,
+              model: groupedSegments.size === 1 ? [...groupedSegments.keys()][0] : undefined,
+              models: [...groupedSegments.keys()],
+              durationMs,
+              turnDurationMs,
             });
-            void rebroadcastTodaySpend();
 
             try {
-              // 自定义(source:'user')provider——本地 Ollama / 用户自付费兼容端点——即便
-              // 模型 id 与 XD 目录重名,也不能套用 XD 网关定价当作 Cindy 消费入账;只记 token
-              // (上方已入库),不写 money(codex review)。仅 xd / 默认网关与订阅路由计费。
-              const isCustomProviderRoute = isUserProviderSession(session.id);
               const pricing =
-                isSubscriptionValue || isCustomProviderRoute
-                  ? null
-                  : await getGatewayModelPricingForModel();
-              const price =
-                effectiveProvider === 'openai' ||
-                effectiveProvider === 'anthropic' ||
-                effectiveProvider === 'xai'
-                  ? getModelPriceQuote(null, effectiveProvider, pricingModel)
-                  : isSubscriptionDirectModel(pricingModel)
-                    ? getSubscriptionDirectValuePrice(pricingModel)
-                    : isCustomProviderRoute
-                      ? null
-                      : getModelPriceQuote(pricing, 'xd', pricingModel);
-              const money = computePriceQuoteTurnMoney(
-                tokens,
-                price ?? undefined,
-                currentLedgerCurrency(),
-              );
-              if (money && money.amount > 0) {
-                if (!isSubscriptionValue) {
-                  // token 已在上方入库；这里只补真实 API/gateway 费用，
-                  // 避免重复累加 token。订阅价值则由 #billing=subscription 读时估算。
-                  await recordModelTurnUsage({
+                billingRoute === 'xd-gateway'
+                  ? await getGatewayModelPricingForModel()
+                  : getReferenceModelPricing();
+              const actualMonies: RegionalMoney[] = [];
+              const estimatedMonies: RegionalMoney[] = [];
+              const perModelCost: Array<{ model: string; money: RegionalMoney }> = [];
+              const modelWrites: Promise<unknown>[] = [];
+              for (const [model, group] of groupedSegments) {
+                // Missing/incomplete request boundaries are explicitly unpriceable. A provider-
+                // reported request cost may still win in resolveTurnCost; token × quote must not
+                // collapse the whole turn into one synthetic long-context request.
+                const pricingSegments = piSegmentsReliable ? group.segments : [];
+                let money: RegionalMoney | null = null;
+                if (billingRoute === 'subscription') {
+                  const quote = getSubscriptionValuePriceFor('pi', model, pricing);
+                  money = computePriceQuoteTurnMoney(
+                    group.tokens,
+                    quote ?? undefined,
+                    currentLedgerCurrency(),
+                    pricingSegments,
+                  );
+                } else {
+                  money = resolveTurnCost({
+                    rawModel: model,
+                    tokens: group.tokens,
+                    // Pi computes usage.cost from its local model catalog. For
+                    // BYOM/provider-api routes that is a reference estimate,
+                    // not a provider invoice. Let the provider quote path mark
+                    // it as value-estimate instead of recording it as actual.
+                    sdkCostDelta: billingRoute === 'provider-api' ? undefined : group.sdkCostUsd,
+                    pricing,
+                    context: {
+                      providerId: sessionProvider,
+                      billingRoute,
+                      region: CURRENT_CINDY_REGION,
+                    },
+                    segments: pricingSegments,
+                  }).money;
+                }
+                if (money?.amount) {
+                  perModelCost.push({ model, money });
+                  (money.kind === 'actual-cost' ? actualMonies : estimatedMonies).push(money);
+                }
+                const modelUsageKey = isSubscriptionValue
+                  ? piSubscriptionUsageModelKey(model)
+                  : model;
+                const modelRowMoney =
+                  money?.kind === 'actual-cost'
+                    ? money
+                    : isSubscriptionValue
+                      ? (money ?? unpricedSubscriptionValueMarker())
+                      : null;
+                modelWrites.push(
+                  recordModelTurnUsage({
                     agentKind: 'pi',
                     model: modelUsageKey,
-                    money,
-                    inputTokensDelta: 0,
-                    outputTokensDelta: 0,
-                    cacheReadTokensDelta: 0,
-                    cacheCreateTokensDelta: 0,
-                  });
-                  void recordTurnSpend(money);
-                  void recordSessionTurnSpend(session.id, money);
-                }
+                    // daily_model_usage has no money-kind column. Subscription
+                    // rows recover value-estimate from their suffix; other
+                    // reference estimates must stay message-only or they would
+                    // be reconstructed later as actual spend.
+                    money: modelRowMoney,
+                    inputTokensDelta: group.tokens.inputTokens,
+                    outputTokensDelta: group.tokens.outputTokens,
+                    cacheReadTokensDelta: group.tokens.cacheReadTokens,
+                    cacheCreateTokensDelta: group.tokens.cacheCreateTokens,
+                  }),
+                );
+              }
+              await Promise.allSettled(modelWrites);
+              void rebroadcastTodaySpend();
+              const actualMoney = actualMonies.length > 0 ? addRegionalMoney(actualMonies) : null;
+              const estimatedMoney =
+                estimatedMonies.length > 0 ? addRegionalMoney(estimatedMonies) : null;
+              const messageMoney = actualMoney ?? estimatedMoney;
+              const turnUsageDetails = buildTurnUsageDetails({
+                ...tokens,
+                model: groupedSegments.size === 1 ? [...groupedSegments.keys()][0] : undefined,
+                models: [...groupedSegments.keys()],
+                perModelCost,
+                durationMs,
+                turnDurationMs,
+              });
+              if (actualMoney) {
+                void recordTurnSpend(actualMoney);
+                void recordSessionTurnSpend(session.id, actualMoney);
+              }
+              if (messageMoney) {
                 const changedScheduleId = await recordSchedulerTurnCost({
                   sessionId: session.id,
                   clientId: turnAssistantPersistId,
-                  money,
+                  money: messageMoney,
                   turnUsageDetails,
                   turnOrigin: event.turnOrigin,
                 });
@@ -4500,12 +5519,25 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
                 });
               }
             } catch {
-              // 价格读取失败不能连带丢失 token/cache 事实。
-              if (turnAssistantPersistId && turnUsageDetails) {
+              // Price/catalog failure must not lose token/cache facts.
+              const writes = [...groupedSegments].map(([model, group]) =>
+                recordModelTurnUsage({
+                  agentKind: 'pi',
+                  model: isSubscriptionValue ? piSubscriptionUsageModelKey(model) : model,
+                  money: isSubscriptionValue ? unpricedSubscriptionValueMarker() : undefined,
+                  inputTokensDelta: group.tokens.inputTokens,
+                  outputTokensDelta: group.tokens.outputTokens,
+                  cacheReadTokensDelta: group.tokens.cacheReadTokens,
+                  cacheCreateTokensDelta: group.tokens.cacheCreateTokens,
+                }),
+              );
+              await Promise.allSettled(writes);
+              void rebroadcastTodaySpend();
+              if (turnAssistantPersistId && usageOnlyDetails) {
                 await recordTurnUsageOnMessage({
                   sessionId: session.id,
                   clientId: turnAssistantPersistId,
-                  turnUsageDetails,
+                  turnUsageDetails: usageOnlyDetails,
                 });
               }
             }
@@ -4514,11 +5546,11 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               triggerCodexAccountUsageRefresh();
             } else if (effectiveProvider === 'anthropic') {
               triggerClaudeSubscriptionUsageRefresh();
+            } else if (effectiveProvider === 'xai') {
+              triggerXaiSubscriptionUsageRefresh();
             } else if (effectiveProvider === 'xd' || effectiveProvider == null) {
               void triggerClaudeAccountUsageRefresh();
             }
-            // xAI 没有独立订阅窗口端点；Responses bridge 从响应 headers 实时更新
-            // useXaiRateLimit 消费的快照，无需额外网络请求。
           })();
         }
       }
@@ -4544,15 +5576,42 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           session.id,
           session,
         );
+        const closeReason = getWiredSessionCloseReason(session);
+        const preserveAutoResumeIntent = shouldPreserveCodexReconnectStalledAutoResume(
+          session,
+          closeReason,
+        );
+        pendingCodexReconnectStalledRebuilds.delete(session);
         try {
           cleanupPendingInteractionsForSession(session.id, 'session_closed');
-          // 会话关闭同样是"终止":退避窗口有 3–20 秒,期间会话可能被独立关掉(切 agent、
-          // 远端断开、宿主回收)。只清 coordinator 不够 —— 排期中的定时器与悬空的重连记录
-          // 都还活着,前者会到点往已关闭的会话补发消息(coordinator 关闭路径保留 recovery,
-          // 补发会把用户关掉的会话重新拉起来),后者会把结果错绑到下一个会话实例(codex P1)。
-          interruptedTurnAutoResumeGuard.noteSessionReset(session.id);
-          autoResumeBookkeeping.teardown(session.id);
-          agentInputCoordinatorHolder?.onSessionClosed(session.id);
+          if (preserveAutoResumeIntent) {
+            log.info(
+              'preserving scheduled Codex reconnect-stall auto-resume across provider rebuild',
+              {
+                sessionId: session.id,
+                attemptToken: agentInputCoordinatorHolder?.getAutoResumeAttemptToken(session.id),
+                closeReason,
+              },
+            );
+          } else {
+            // 会话关闭同样是"终止":退避窗口有 3–20 秒,期间会话可能被独立关掉(切 agent、
+            // 远端断开、宿主回收)。只清 coordinator 不够 —— 排期中的定时器与悬空的重连记录
+            // 都还活着,前者会到点往已关闭的会话补发消息(coordinator 关闭路径保留 recovery,
+            // 补发会把用户关掉的会话重新拉起来),后者会把结果错绑到下一个会话实例(codex P1)。
+            interruptedTurnAutoResumeGuard.noteSessionReset(session.id);
+            autoResumeBookkeeping.teardown(session.id);
+          }
+          // rehydrate / 凭证切换 close-rebuild 窗口:同一逻辑会话进程内重建,
+          // 协调器状态应连续。窗口内保留 input boundary(不 abort,避免取消
+          // 驱动本次重建的 signal → #1930 cancelled-before-dispatch),但
+          // **其余清理必须照常执行**(activeTurn / steer / queue 状态不能残留,
+          // 否则 rebuild 失败或 close 后不 rebuild 时 coordinator 残留旧状态
+          // 阻塞后续发送)。其余清理(凭证切换 / git snapshot / Orca hydration
+          // 标记 / wiring teardown)照常。
+          agentInputCoordinatorHolder?.onSessionClosed(session.id, {
+            preserveInputBoundary: rehydrateCloseSuppression.isSuppressed(session.id),
+            preserveAutoResumeIntent,
+          });
           // 会话关闭:兑现延迟凭证切换(直接写 route),并唤醒被它挡住的等待者。
           pendingCredentialSwitchHolder?.onSessionClosed(session.id);
           deferredCodexRestartHolder?.onSessionSettled();
@@ -4564,9 +5623,19 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           lastReportedCostUsdBySession.delete(session.id);
           lastReportedModelUsageBySession.delete(session.id);
           turnModelPromiseBySession.delete(session.id);
+          turnPiFastModeBySession.delete(session.id);
+          productTurnWallClockTracker.clear(session.id);
+          productTurnUsageTargetTracker.clear(session.id);
+          claudeOutputLagTimingGuard.clear(session.id);
           // 后台活动检测:会话进程已关闭(closeSession / 删除),清账并广播横幅熄灭。
           clearClaudeSessionBackgroundActivity(session.id);
           clearSessionPersistState(session.id);
+          const subagentRewindStateCleared = clearSubagentObservationRewindState(session.id);
+          if (!subagentRewindStateCleared) {
+            log.warn('session close deferred active Subagent Rewind cleanup', {
+              sessionId: session.id,
+            });
+          }
           // 进程关闭 ≠ 通知作废:临时会话调度(非 heartbeat / 非 persistentSession)在 run
           // 终态后立刻 closeSession,此刻完成卡片刚在灵动岛上弹出来。硬删条目会让它当场
           // 消失,所以这条路径保留仍在展示的卡片,由 dwell 到期或用户 ack 收掉。
@@ -4635,6 +5704,44 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
  */
 export const wireSessionToIpcExternal = wireSessionToIpc;
 
+type SendToSessionDispatchSession = {
+  id: string;
+  agentKind: AgentKind;
+  workDir: string;
+  remoteHostId: string | null;
+  send(message: UserMessage | string, opts?: SessionSendOptions): Promise<SessionSendResult>;
+};
+
+/** Starts exact turn capture at the accepted, durable user-message boundary. */
+export async function beginTurnChangeSetAtDispatch(
+  session: SendToSessionDispatchSession,
+  anchorClientId: string,
+): Promise<void> {
+  await waitForTurnChangeSetSeal(session.id);
+  await finalizeTurnChangeSet(session.id, null, 'partial');
+  await waitForTurnChangeSetSeal(session.id);
+  await beginTurnChangeSet({
+    sessionId: session.id,
+    anchorClientId,
+    provider: session.agentKind,
+    cwd: session.workDir,
+    remote: session.remoteHostId !== null,
+  });
+}
+
+async function confirmReviewExternalArtifacts(
+  event: IpcMainInvokeEvent,
+  items: ReviewArtifactConfirmationItem[],
+): Promise<boolean> {
+  const options = buildReviewArtifactConfirmationDialog(items, t);
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const result =
+    owner && !owner.isDestroyed()
+      ? await dialog.showMessageBox(owner, options)
+      : await dialog.showMessageBox(options);
+  return result.response === 1;
+}
+
 export interface RegisterMakerIpcOptions {
   onAnySessionTurnKeepaliveChange?: (isRunning: boolean) => void;
   /** 由 bootstrap 注入，避免 maker-ipc → model-access → maker-host 的循环依赖。 */
@@ -4645,8 +5752,40 @@ export interface RegisterMakerIpcOptions {
   onProviderModelAutoRefreshConfigured(): void;
 }
 
+let disposePiPackagesChangedBroadcast: (() => void) | null = null;
+
+/**
+ * Register before the first BrowserWindow: modelVisibilityPrefs mirrors its initial snapshot as
+ * soon as the Renderer selects an owner, before the splash-gated Maker IPC bundle is available.
+ */
+export function registerModelVisibilitySyncIpc(): void {
+  ipcMain.handle(
+    MAKER_INVOKE.MODEL_VISIBILITY_SYNC,
+    async (event, dataOwnerId: unknown, ownerGeneration: unknown, map: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      syncModelVisibilityMirrorForOwner(
+        map,
+        { dataOwnerId, ownerGeneration },
+        getActiveDataOwnerPushStamp(),
+        isAppSessionBoundaryPending(),
+        () => {
+          broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
+        },
+      );
+    },
+  );
+}
+
 export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions): void {
   log.info('registering maker:* IPC handlers');
+  disposePiPackagesChangedBroadcast?.();
+  disposePiPackagesChangedBroadcast = onPiPackagesChanged(() => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+        win.webContents.send(MAKER_PUSH.PI_PACKAGES_CHANGED);
+      }
+    }
+  });
   getAgentIslandService()?.setPermissionResolver(resolvePendingPermissionFromAgentIsland);
   sessionTurnActivityTracker.setTurnKeepaliveChangeListener(
     options.onAnySessionTurnKeepaliveChange ?? null,
@@ -4654,9 +5793,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   gitSnapshotCoordinator = createGitSnapshotCoordinator(maker);
   // 接上 DB 改名通知(用户手动改名后自动起名收手)与拦截意识探针(装了
   // will-user-message 钩子时不把用户原话送去标题模型)。
-  registerSessionAutoTitleHooks({
-    isUserMessageScreeningActive: hasEnabledUserMessageHookGhost,
-  });
+  registerSessionAutoTitleHooks({ isUserMessageScreeningActive: hasEnabledUserMessageHookGhost });
 
   // device-link busy presence:把「本机是否有 turn 在跑」探针注入 device-link host,
   // 它每 5s 取一次、翻转才上报,让控制端设备列表显示 busy 三态(规则 2:回调注入解耦)。
@@ -4665,6 +5802,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // device-link 参数级收敛:远程 create-session 的 workingDir / worktree:create 的 baseRepo
   // 必须是本机当前可访问的目录,挡掉控制端用任意路径越权起进程或执行 git。
   setDeviceLinkRemoteWorkingDirGuard(checkRemoteWorkingDir);
+  setDeviceLinkRemoteReviewInputGuard(assertReviewExternalInputAllowed);
 
   // device-link 远程 set-* 持久化回流:effort/permission/fastMode/extraDirs 等
   // runtime-only handler 经这个注入写被控端 DB + 广播 patched。SET_MODEL 是例外:
@@ -4689,7 +5827,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // ── newMakerDraft 缓存同步 ──────────────────────────────────────────────
   // Renderer push (fire-and-forget) → main 内存缓存; collab spawn worker 时
   // 读这份缓存决定 model/effort/fastMode。startup 立刻推一次 + 用户每次改 New
-  // Maker 偏好时增量推, payload 形态严格按 newMakerDefaultsCache.NewMakerDraftSnapshot。
+  // Maker 偏好时增量推（含每个 vendor 的显式模型选择状态），payload 形态严格按
+  // newMakerDefaultsCache.NewMakerDraftSnapshot。
   // 校验失败 (payload 不是 object / 缺字段) → no-op, 缓存维持上一次值, 避免脏数据污染。
   ipcMain.on(MAKER_SEND.SYNC_NEW_MAKER_DRAFT, (_e, payload: unknown) => {
     if (!payload || typeof payload !== 'object') return;
@@ -4705,6 +5844,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return;
     setNewMakerDraftCache({
       lastByVendor: p.lastByVendor,
+      ...(p.modelChosenByVendor && typeof p.modelChosenByVendor === 'object'
+        ? { modelChosenByVendor: p.modelChosenByVendor }
+        : {}),
       fastModeByModel: p.fastModeByModel,
       effortByModel: p.effortByModel,
       // worktree 勾选记忆(vendor 无关根字段):旧 renderer 不推此字段 → false 兜底。
@@ -4712,6 +5854,25 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     });
     broadcastNewMakerDraftChanged();
   });
+
+  // Worker 创建偏好与模型默认值同样以 renderer localStorage 为真源。main 只保留
+  // 权限模式镜像，供 Orca UI / MCP 创建路径读取。
+  ipcMain.on(
+    MAKER_SEND.SYNC_WORKER_CREATION_PREFS,
+    createWorkerCreationPrefsSyncHandler({
+      assertTrustedSender: (event) =>
+        assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+      setWorkerPermissionMode: (workerPermissionMode) =>
+        setWorkerCreationPrefsCache({ workerPermissionMode }),
+    }),
+  );
+
+  const applyWorkerPermissionModePreference = (
+    workerPermissionMode: OrcaWorkerPermissionMode,
+  ): void => {
+    setWorkerCreationPrefsCache({ workerPermissionMode });
+    broadcastToAllWindows(MAKER_PUSH.WORKER_CREATION_PREFS_APPLY, { workerPermissionMode });
+  };
 
   // device-link:被控端 providerModelMemory(草稿列表行的真实读源)全量镜像给 main。旧的
   // newMakerDraft.effortByModel 已不再写非选中模型,故必须把这一层也同步出去,控制端才能完整镜像
@@ -4727,6 +5888,88 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   ipcMain.handle(MAKER_INVOKE.LIST_AVAILABLE_AGENTS, () => {
     return maker.listAvailableAgents();
   });
+
+  ipcMain.handle(MAKER_INVOKE.TURN_CHANGE_SETS_LIST, async (event, sessionId: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 256) {
+      throwIpcError('INVALID_PARAMS', 'Invalid sessionId');
+    }
+    return listTurnChangeSets(sessionId);
+  });
+
+  ipcMain.handle(
+    MAKER_INVOKE.TURN_CHANGE_SETS_GET,
+    async (event, sessionId: unknown, ids: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 256) {
+        throwIpcError('INVALID_PARAMS', 'Invalid sessionId');
+      }
+      if (
+        !Array.isArray(ids) ||
+        ids.length > TURN_CHANGE_SET_DETAIL_ID_LIMIT ||
+        ids.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 256)
+      ) {
+        throwIpcError('INVALID_PARAMS', 'Invalid turn change-set ids');
+      }
+      return getTurnChangeSets(sessionId, ids as string[]);
+    },
+  );
+
+  ipcMain.handle(
+    MAKER_INVOKE.TURN_CHANGE_SET_APPLY,
+    async (event, sessionId: unknown, id: unknown, action: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      const ownerScope = captureDataOwnerBroadcastScope();
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 256) {
+        throwIpcError('INVALID_PARAMS', 'Invalid sessionId');
+      }
+      if (typeof id !== 'string' || id.length === 0 || id.length > 256) {
+        throwIpcError('INVALID_PARAMS', 'Invalid turn change-set id');
+      }
+      if (action !== 'undo' && action !== 'reapply') {
+        throwIpcError('INVALID_PARAMS', 'Invalid turn change-set action');
+      }
+      const meta = await maker.getSessionMeta(sessionId);
+      if (!meta) throwIpcError('NOT_FOUND', 'Task not found.');
+      if (meta.remoteHostId) {
+        throwIpcError('UNSUPPORTED_CAPABILITY', 'Remote workspace restore is not available.');
+      }
+      const normalizedWorkDir = normalizeTurnChangeSetWorkspaceKey(meta.workDir);
+      const workspaceIsBusy = (): boolean =>
+        maker.listActiveSessions().some((session) => {
+          if (session.remoteHostId) return false;
+          const currentWorkDir = normalizeTurnChangeSetWorkspaceKey(session.workDir);
+          return (
+            currentWorkDir === normalizedWorkDir &&
+            (session.isTurnRunning() || getClaudeSessionBackgroundActivity(session.id))
+          );
+        });
+      if (workspaceIsBusy() || isSessionTurnPendingCompletion(sessionId)) {
+        throwIpcError('SESSION_RUNNING', 'Wait for the current response to finish.');
+      }
+      await waitForTurnChangeSetSeal(sessionId);
+      if (workspaceIsBusy() || isSessionTurnPendingCompletion(sessionId)) {
+        throwIpcError('SESSION_RUNNING', 'Wait for the current response to finish.');
+      }
+      try {
+        return await applyTurnChangeSetAction(sessionId, id, action, ownerScope);
+      } catch (error) {
+        if (!(error instanceof TurnChangeSetActionError)) {
+          log.warn('turn change-set action failed', { sessionId, id, action, error });
+          throwIpcError('INTERNAL', 'The recorded changes could not be applied.');
+        }
+        if (error.kind === 'not-found') throwIpcError('NOT_FOUND', error.message);
+        if (error.kind === 'busy') throwIpcError('SESSION_RUNNING', error.message);
+        if (error.kind === 'wrong-state') throwIpcError('PRECONDITION_FAILED', error.message);
+        if (error.kind === 'git-missing') {
+          throwIpcError('TURN_CHANGE_GIT_UNAVAILABLE', error.message);
+        }
+        if (error.kind === 'unsupported') throwIpcError('UNSUPPORTED_CAPABILITY', error.message);
+        if (error.kind === 'conflict') throwIpcError('STALE_DIFF', error.message);
+        throwIpcError('INTERNAL', error.message);
+      }
+    },
+  );
 
   ipcMain.handle(MAKER_INVOKE.ANY_SESSION_IN_TURN, () => {
     return anySessionInTurn(maker);
@@ -4766,6 +6009,106 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // 当前 turn 与其他后台任务不受影响 —— 与上面的会话级止损入口互补。
   registerStopAgentTaskHandler(createElectronIpcHandlerRegistry(), {
     getLiveSession: (sessionId) => maker.getSession(sessionId) ?? undefined,
+    stopDetachedTask: async (sessionId, taskId) => {
+      const agentHome = path.join(app.getPath('userData'), 'pi-agent-home');
+      const runRoot = piSubagentRunRoot(agentHome, sessionId);
+      // This fallback enumerates durable runs out of a `pi-agent-home` shared
+      // with any concurrent dev / packaged / --passive instance, so it reaches
+      // runs another live window is driving. Both Subagent stop buttons land
+      // here when no handle is loaded, so it needs the same gate as
+      // CONTROL_PI_SUBAGENT: discover first, refuse before writing anything.
+      const run = (await listPiSubagentRuns(runRoot)).find(
+        (candidate) => candidate.taskId === taskId || candidate.runId === taskId,
+      );
+      if (!run) return false;
+      // A terminal run has nothing to write, so gating it would only turn an
+      // idempotent stop into an error. Refuse only where a control would land.
+      if (!isPiSubagentTerminal(run.state) && !canHostControlPiSubagentRun(run, process.pid)) {
+        throwIpcError(
+          'PRECONDITION_FAILED',
+          'This Subagent run belongs to another running Cindy instance. Control it from that window.',
+        );
+      }
+      return (await controlPiSubagentRuns(runRoot, run.runId, 'stop')) > 0;
+    },
+  });
+
+  ipcMain.handle(MAKER_INVOKE.CONTROL_PI_SUBAGENT, async (event, input: unknown) => {
+    if (!isDeviceLinkInvoke()) assertTrustedAppRendererEvent(event);
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throwIpcError('INVALID_PARAMS', 'PI Subagent control input required');
+    }
+    const body = input as Record<string, unknown>;
+    if (typeof body.sessionId !== 'string' || !body.sessionId) {
+      throwIpcError('INVALID_PARAMS', 'sessionId required');
+    }
+    if (typeof body.taskId !== 'string' || !body.taskId) {
+      throwIpcError('INVALID_PARAMS', 'taskId required');
+    }
+    if (
+      body.action !== 'stop' &&
+      body.action !== 'steer' &&
+      body.action !== 'follow_up' &&
+      body.action !== 'resume'
+    ) {
+      throwIpcError('INVALID_PARAMS', 'action must be stop, steer, follow_up, or resume');
+    }
+    if (
+      body.action !== 'stop' &&
+      (typeof body.message !== 'string' || !body.message.trim() || body.message.length > 32_000)
+    ) {
+      throwIpcError('INVALID_PARAMS', 'message must contain 1..32000 characters');
+    }
+    const agentHome = path.join(app.getPath('userData'), 'pi-agent-home');
+    const runRoot = piSubagentRunRoot(agentHome, body.sessionId);
+    const runs = await listPiSubagentRuns(runRoot);
+    const run = runs.find(
+      (candidate) => candidate.taskId === body.taskId || candidate.runId === body.taskId,
+    );
+    if (!run) throwIpcError('NOT_FOUND', 'PI Subagent run not found');
+    if (body.childId !== undefined && (typeof body.childId !== 'string' || !body.childId)) {
+      throwIpcError('INVALID_PARAMS', 'childId must be a non-empty string');
+    }
+    const childId = typeof body.childId === 'string' ? body.childId : undefined;
+    if (childId && !run.tasks.some((task) => task.childId === childId)) {
+      throwIpcError('NOT_FOUND', 'PI Subagent child not found');
+    }
+    const terminal = isPiSubagentTerminal(run.state);
+    if (body.action === 'resume') {
+      const live = maker.getSession(body.sessionId);
+      if (!terminal || live?.agentKind !== 'pi') {
+        throwIpcError(
+          'UNSUPPORTED_CAPABILITY',
+          'Resume requires a loaded parent PI task and a terminal run.',
+        );
+      }
+      await live.resumeBackgroundTask(run.taskId, body.message as string, childId);
+      return { ok: true, controlled: 1 };
+    }
+    if (terminal) {
+      throwIpcError('UNSUPPORTED_CAPABILITY', 'PI Subagent control requires an active run');
+    }
+    // `pi-agent-home` is shared with any concurrent dev / packaged / --passive
+    // instance, so this run may be driven by another live window. Stop, steer
+    // and follow-up all write into the runner's mailbox, so refuse before the
+    // write and tell the user where the run actually lives. Orphaned and
+    // unattributable runs stay controllable on purpose — that is the only way
+    // to stop work left behind by a crashed instance.
+    if (!canHostControlPiSubagentRun(run, process.pid)) {
+      throwIpcError(
+        'PRECONDITION_FAILED',
+        'This Subagent run belongs to another running Cindy instance. Control it from that window.',
+      );
+    }
+    const controlled = await controlPiSubagentRuns(
+      runRoot,
+      run.runId,
+      body.action,
+      body.action === 'stop'
+        ? { ...(childId ? { childId } : {}) }
+        : { message: body.message as string, ...(childId ? { childId } : {}) },
+    );
+    return { ok: controlled > 0, controlled };
   });
 
   // 会话仍在运行的后台任务快照(只读)。renderer 挂载 / reloadMessages 清空
@@ -4773,7 +6116,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   ipcMain.handle(MAKER_INVOKE.LIST_SESSION_BACKGROUND_TASKS, (_e, sessionId: unknown) => {
     if (typeof sessionId !== 'string') throwIpcError('INVALID_PARAMS', 'sessionId required');
     const live = maker.getSession(sessionId);
-    return { tasks: live ? live.listBackgroundTasks() : [] };
+    // pendingContinuations:「任务已终态、wake turn 尚未启动或仍在跑」的
+    // continuation claim 数。tasks 在任务终态后立即不含该任务,renderer 的
+    // 唤醒桥接对账不能拿空 tasks 当「无后续」—— 必须本字段为 0 才允许收口。
+    return {
+      tasks: live ? live.listBackgroundTasks() : [],
+      pendingContinuations: live ? live.countPendingWakeContinuations() : 0,
+    };
   });
 
   // workflow 逐 agent 进度树(只读)。从活跃会话拿 workDir + sdkSessionId → 推导 Claude Code
@@ -4844,6 +6193,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // v2 因果能力：同引擎 no-op 返回 revision，后续 SET_MODEL 在 session 锁内 CAS。
       // 新 desktop 控制端据此与只有基础切换能力的旧 host 做安全兼容门控。
       supportsSessionAgentSwitchCas: true,
+      // 新控制端只有看到此位才允许给被控端 Orca Team 选择 Worker Full access。
+      // 旧 desktop 缺省为 false，避免显式 bypassPermissions 被旧 handler 静默忽略。
+      supportsOrcaWorkerPermissionMode: true,
+      // 新控制端只有看到此位，才会让被控端延后 UI initial_task 并在 Lead 首条
+      // 输入 accepted 且历史可查询后走 WORKER_DISPATCH_UI_ASSIGNMENT；旧端继续即时派发。
+      supportsDeferredOrcaUiAssignment: true,
       // 调度更新支持 intervalMs:null 的显式清空表达(IPC 入口归一化成引擎的
       // 「带 key 的 undefined」)。旧 desktop 缺省为 false——旧引擎会把 null 当
       // 已设间隔算出 now+null 立即触发,mobile 必须据此回退旧 wire 形态(省略
@@ -4853,7 +6208,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   });
 
   // device-link 远程草稿镜像(只读):返回某 vendor 在 New Maker 草稿里的当前完整选择
-  // (model/effort/fast/permission/source)。控制端经隧道调用 → seed 远程项目草稿。
+  // (model/effort/fast/permission/source/是否显式选过模型)。控制端经隧道调用 → seed 远程项目草稿。
   // 缓存未就绪 / 该 vendor 无草稿 model → 返回 {},控制端按 capabilities 默认兜底。
   ipcMain.handle(MAKER_INVOKE.GET_NEW_MAKER_DEFAULTS, (_e, agentKind: unknown) => {
     return getRemoteNewMakerDefaults(requireAgentKind(agentKind));
@@ -4871,6 +6226,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       modelId?: unknown;
       effort?: unknown;
       fast?: unknown;
+      thinking?: unknown;
       active?: unknown;
       markModelChoice?: unknown;
     };
@@ -4892,6 +6248,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (p.fast !== undefined && typeof p.fast !== 'boolean') {
       throwIpcError('INVALID_PARAMS', 'fast must be boolean');
     }
+    if (p.thinking !== undefined && typeof p.thinking !== 'boolean') {
+      throwIpcError('INVALID_PARAMS', 'thinking must be boolean');
+    }
     if (p.markModelChoice !== undefined && typeof p.markModelChoice !== 'boolean') {
       throwIpcError('INVALID_PARAMS', 'markModelChoice must be boolean');
     }
@@ -4903,6 +6262,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       ...(p.markModelChoice === false ? { markModelChoice: false } : {}),
       ...(p.effort !== undefined ? { effort: p.effort } : {}),
       ...(p.fast !== undefined ? { fast: p.fast } : {}),
+      ...(p.thinking !== undefined ? { thinking: p.thinking } : {}),
     });
   });
 
@@ -4923,9 +6283,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   registerNewMakerWorktreeBranchPreferenceHandler(createElectronIpcHandlerRegistry(), {
     isDeviceLinkInvoke,
     assertTrustedCaller: (event) =>
-      assertTrustedAppRendererEvent(
-        event as Parameters<typeof assertTrustedAppRendererEvent>[0],
-      ),
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
     getPreference: getNewMakerWorktreeBranchPreference,
     applyPreference: applyNewMakerWorktreeBranchPreference,
     broadcast: broadcastToAllWindows,
@@ -5021,12 +6379,25 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         refreshAnthropic: refreshAnthropicModelsFromHttp,
         refreshOpenAi: () =>
           maker.refreshAgentLocalModels('codex', { credentialMode: 'oauth-bearer' }),
-        refreshXaiCatalog: async () => {
-          await refreshActiveCatalogFromSource();
-        },
+        refreshXai: refreshXaiModelsFromHttp,
+        refreshXaiMedia: refreshXaiMediaModels,
       }),
   });
   options.onProviderModelAutoRefreshConfigured();
+
+  registerLocalModelHandlers(createElectronIpcHandlerRegistry(), {
+    assertTrustedSender: (event) =>
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+    refreshCatalog: () => refreshCustomProvidersIntoCatalog(),
+    broadcastChanged: () => broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {}),
+    broadcastStatus: (status) => broadcastToAllWindows(MAKER_PUSH.LOCAL_MODEL_STATUS, status),
+    broadcastPullProgress: (progress) =>
+      broadcastToAllWindows(MAKER_PUSH.LOCAL_MODEL_PULL_PROGRESS, progress),
+    broadcastInstallProgress: (progress) =>
+      broadcastToAllWindows(MAKER_PUSH.LOCAL_MODEL_INSTALL_PROGRESS, progress),
+    currentOwnerSession: () => getActiveAppSession(),
+    userDataDir: app.getPath('userData'),
+  });
 
   registerProviderHandlers(createElectronIpcHandlerRegistry(), {
     listProviders: (opts) => getDesktopProviderService().listProviders(opts),
@@ -5095,17 +6466,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       const provider = getActiveCatalog().providers.find((p) => p.id === providerId);
       const oauth = provider?.auth.oauth;
       if (!provider || !oauth) throw new Error(`provider '${providerId}' has no oauth descriptor`);
+      const storageProviderId =
+        provider.source === 'user' ? storedCustomProviderId(providerId) : providerId;
       let rollbackCredentials: (() => boolean) | undefined;
-      const result = await runGenericOAuthLogin({ id: provider.id, name: provider.name }, oauth, {
-        onProgress: (progress) =>
-          broadcastToAllWindows(MAKER_PUSH.PROVIDER_OAUTH_PROGRESS, {
-            providerId,
-            ...progress,
-          }),
-        onCredentialPersisted: (rollback) => {
-          rollbackCredentials = rollback;
+      const result = await runGenericOAuthLogin(
+        { id: storageProviderId, name: provider.name },
+        oauth,
+        {
+          onProgress: (progress) =>
+            broadcastToAllWindows(MAKER_PUSH.PROVIDER_OAUTH_PROGRESS, { providerId, ...progress }),
+          onCredentialPersisted: (rollback) => {
+            rollbackCredentials = rollback;
+          },
         },
-      });
+      );
       if (result.ok && isCurrent()) {
         // 授权成功后按 agent 自动发现模型（与内置订阅体验统一,用户不必手填模型）:
         // 发现端点 = 描述符显式声明 ?? 由该 runtime 的 baseUrl 推导（…/v1/models）。
@@ -5126,17 +6500,24 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             // 去重键含 agent:发现请求头按 wire 分派(cc 带 anthropic-version),同 URL 不同 wire 不能共用响应。
             const key = `${agent}\n${url}`;
             if (!fetched.has(key))
-              fetched.set(key, await discoverGenericOAuthModels(providerId, oauth, url, agent));
+              fetched.set(
+                key,
+                await discoverGenericOAuthModels(storageProviderId, oauth, url, agent),
+              );
             if (!isCurrent()) break;
             const models = fetched.get(key);
             if (!models || models.length === 0) continue;
             if (provider.source === 'user') {
-              const cfg = await getCustomProvider(providerId);
+              const cfg = await getCustomProvider(storageProviderId);
               if (!isCurrent()) break;
               if (cfg) {
                 const nextCfg = mergeDiscoveredModelsIntoConfig(cfg, agent, models);
                 if (nextCfg) {
-                  const applied = await updateCustomProviderIfUnchanged(providerId, cfg, nextCfg);
+                  const applied = await updateCustomProviderIfUnchanged(
+                    storageProviderId,
+                    cfg,
+                    nextCfg,
+                  );
                   if (!isCurrent()) break;
                   if (applied) customChanged = true;
                 }
@@ -5170,21 +6551,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         }
         if (isCurrent()) broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
       }
-      return {
-        ...result,
-        ...(rollbackCredentials ? { rollbackCredentials } : {}),
-      };
+      return { ...result, ...(rollbackCredentials ? { rollbackCredentials } : {}) };
     },
     readCustomProviderKeyForMutation,
     storeCustomProviderKey,
     removeCustomProviderKey,
     oauthLogout: async (providerId) => {
-      if (!logoutGenericOAuth(providerId)) {
+      if (!logoutGenericOAuth(storedCustomProviderId(providerId))) {
         throw new Error('failed to remove generic OAuth credentials');
       }
     },
-    oauthCancel: (providerId) => cancelGenericOAuthLogin(providerId),
-    removeOAuthCredentials: (providerId) => removeGenericOAuthCredentialsReversibly(providerId),
+    oauthCancel: (providerId) => cancelGenericOAuthLogin(storedCustomProviderId(providerId)),
+    removeOAuthCredentials: (providerId) =>
+      removeGenericOAuthCredentialsReversibly(storedCustomProviderId(providerId)),
   });
 
   // 自定义 MCP 服务器 CRUD —— CRUD 成功后刷新三个 agent 的 mcpProviders 数组
@@ -5277,51 +6656,247 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     // senderWebContentsId 由 main 从 event.sender 填入(覆盖 renderer 传入的任何值),
     // 供需要"只回发起窗口"的命令(/issue)做定向 send。
-    const c = {
-      ...((ctx ?? {}) as DesktopCommandContext),
-      senderWebContentsId: e.sender.id,
-    };
+    const c = { ...((ctx ?? {}) as DesktopCommandContext), senderWebContentsId: e.sender.id };
     await getDesktopCommandRegistry().execute(name, c);
   });
 
-  ipcMain.handle(MAKER_INVOKE.LIST_AGENT_COMMANDS, (_e, agentKind: unknown) => {
-    try {
-      return { success: true, commands: maker.listAgentCommands(requireAgentKind(agentKind)) };
-    } catch (err) {
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : String(err),
-        commands: [],
-      };
-    }
-  });
+  ipcMain.handle(
+    MAKER_INVOKE.LIST_AGENT_COMMANDS,
+    async (event, agentKind: unknown, rawParams?: unknown) => {
+      assertAgentCommandListIpcCaller(event, {
+        isDeviceLinkInvoke,
+        assertTrustedSender: (sourceEvent) =>
+          assertTrustedAppRendererEvent(
+            sourceEvent as Parameters<typeof assertTrustedAppRendererEvent>[0],
+          ),
+      });
+      try {
+        const kind = requireAgentKind(agentKind);
+        const params = rawParams === undefined ? {} : requireObject(rawParams);
+        if (params.sessionId !== undefined && typeof params.sessionId !== 'string') {
+          throwIpcError('INVALID_PARAMS', 'sessionId must be a string');
+        }
+        if (
+          params.allowManagedPiPackagePreview !== undefined &&
+          typeof params.allowManagedPiPackagePreview !== 'boolean'
+        ) {
+          throwIpcError('INVALID_PARAMS', 'allowManagedPiPackagePreview must be a boolean');
+        }
+        const sessionId =
+          typeof params.sessionId === 'string' && params.sessionId.trim()
+            ? params.sessionId.trim()
+            : undefined;
+        const sessionMeta = sessionId ? await maker.getSessionMeta(sessionId) : null;
+        const builtins = maker.listAgentCommands(kind);
+        const mayListPackageCommands = shouldListPiPackageCommands(
+          kind,
+          sessionId !== undefined,
+          sessionMeta,
+          params.allowManagedPiPackagePreview !== false,
+        );
+        let packageCommands: Array<{ name: string; description: string }> = [];
+        let runtimeStatus:
+          import('../../shared/piPackages.js').PiPackageCommandRuntimeStatus | undefined;
+        if (mayListPackageCommands && sessionId) {
+          const manifest = maker.getSessionRuntimeCapabilities(sessionId);
+          runtimeStatus =
+            manifest?.status === 'loaded'
+              ? 'loaded'
+              : manifest?.status === 'failed'
+                ? 'failed'
+                : manifest?.status === 'unknown'
+                  ? 'unknown'
+                  : 'pending';
+          const managedNames = new Set(manifest?.managedPackageCommandNames ?? []);
+          if (manifest?.status === 'loaded') {
+            packageCommands = manifest.commands.flatMap((command) =>
+              managedNames.has(command.name) && !command.name.startsWith('skill:')
+                ? [
+                    {
+                      name: command.name,
+                      description: command.description ?? `Pi extension command: ${command.name}`,
+                    },
+                  ]
+                : [],
+            );
+          } else if (!manifest) {
+            // An empty local Pi task may have a persisted session row before its
+            // process starts. Keep inspected Prompt templates visible; send waits
+            // for this task's get_commands catalog before allowing execution.
+            packageCommands = await listManagedPiPromptCommands();
+          }
+        } else if (mayListPackageCommands) {
+          // Before a task exists, only prompt templates are statically knowable.
+          // Extension commands appear after that exact Pi runtime confirms them.
+          packageCommands = await listManagedPiPromptCommands();
+        }
+        const commands = mergePiPackageCommands(kind, builtins, packageCommands);
+        return { success: true, commands, ...(runtimeStatus ? { runtimeStatus } : {}) };
+      } catch (err) {
+        return toAgentCommandListFailure(err, {
+          reportError: (error) => {
+            log.warn('Agent command list failed', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          },
+        });
+      }
+    },
+  );
 
   ipcMain.handle(
     MAKER_INVOKE.LIST_AGENT_SKILLS,
-    async (_e, agentKind: unknown, params: unknown) => {
+    async (event, agentKind: unknown, params: unknown) => {
+      assertAgentSkillListIpcCaller(event, {
+        isDeviceLinkInvoke,
+        assertTrustedSender: (sourceEvent) =>
+          assertTrustedAppRendererEvent(
+            sourceEvent as Parameters<typeof assertTrustedAppRendererEvent>[0],
+          ),
+      });
       try {
         const kind = requireAgentKind(agentKind);
-        const skillParams = (params ?? {}) as { workingDir?: string; forceReload?: boolean };
+        const skillParams = (params ?? {}) as {
+          workingDir?: string;
+          forceReload?: boolean;
+          sessionId?: string;
+        };
         const linksChanged = await prepareProjectSkillLinksFailSoft(skillParams?.workingDir);
         if (kind === 'codex' && linksChanged) {
           skillParams.forceReload = true;
         }
         if (kind === 'codex') {
           await desktopCodexAuthAdapter.ensureGlobalCodexAssets();
-        } else if (kind === 'claude-code') {
+        } else {
+          // Pi scans ~/.agents/skills directly. Refresh the managed projection here so a
+          // Codex-only skill added after Cindy startup is visible without using another agent
+          // or restarting the app first. Claude keeps the same shared-root refresh semantics.
           await desktopClaudeAuthAdapter.ensureSharedGlobalSkills();
         }
         const result = await maker.listAgentSkills(kind, skillParams);
         return { success: true, ...result };
       } catch (err) {
-        return {
-          success: false,
-          error: err instanceof Error ? err.message : String(err),
-          skills: [],
-        };
+        return toAgentSkillListFailure(err, {
+          reportError: (error) => {
+            log.warn('Agent skill list failed', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          },
+        });
       }
     },
   );
+
+  ipcMain.handle(MAKER_INVOKE.PI_PACKAGES_LIST, async (event) => {
+    assertTrustedAppRendererEvent(event);
+    return runPiPackageListIpcBoundary(
+      () => listPiPackages(),
+      t('settings.piPackages.loadFailed'),
+      (error) => {
+        log.warn('Pi extension list failed', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      },
+    );
+  });
+
+  ipcMain.handle(MAKER_INVOKE.PI_PACKAGES_MUTATE, async (event, raw: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    const payload = requireObject(raw);
+    const action = requireEnum(
+      payload.action,
+      ['install', 'remove', 'update', 'set-enabled'] as const,
+      'action',
+    );
+    if (typeof payload.source !== 'string' || payload.source.length > 2_048) {
+      throwIpcError('INVALID_PARAMS', 'invalid Pi extension source');
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'confirmed')) {
+      throwIpcError('INVALID_PARAMS', 'Renderer confirmation is not accepted');
+    }
+    if (payload.enabled !== undefined && typeof payload.enabled !== 'boolean') {
+      throwIpcError('INVALID_PARAMS', 'enabled must be a boolean');
+    }
+    const request: PiPackageMutationRequest = {
+      action,
+      source: payload.source,
+      ...(typeof payload.enabled === 'boolean' ? { enabled: payload.enabled } : {}),
+    };
+    return runPiPackageMutationIpcBoundary(
+      async () => {
+        if (!piPackageMutationNeedsGrant(request)) return mutatePiPackage(request);
+
+        const enableIdentity =
+          request.action === 'set-enabled' && request.enabled === true
+            ? await capturePiPackageEnableIdentity(request.source)
+            : undefined;
+        const grantBinding = enableIdentity
+          ? { expectedPackageFingerprint: enableIdentity.expectedPackageFingerprint }
+          : undefined;
+
+        const source = escapePiPackageNativeDialogText(request.source);
+        const copy =
+          request.action === 'set-enabled'
+            ? {
+                title: t('settings.piPackages.extensionApprovalTitle'),
+                message: enableIdentity?.displayLabel ?? '',
+                detail: t('settings.piPackages.extensionApprovalDescription'),
+                confirm: t('settings.piPackages.approveAndEnable'),
+              }
+            : request.action === 'remove'
+              ? {
+                  title: t('settings.piPackages.uninstallTitle'),
+                  message: t('settings.piPackages.uninstallTitle'),
+                  detail: t('settings.piPackages.uninstallDescription').replace('{{name}}', source),
+                  confirm: t('settings.piPackages.confirmUninstall'),
+                }
+              : request.action === 'update'
+                ? {
+                    title: t('settings.piPackages.updateConfirmTitle'),
+                    message: t('settings.piPackages.updateConfirmTitle'),
+                    detail: t('settings.piPackages.updateConfirmDescription').replace(
+                      '{{source}}',
+                      source,
+                    ),
+                    confirm: t('settings.piPackages.confirmUpdate'),
+                  }
+                : {
+                    title: t('settings.piPackages.confirmTitle'),
+                    message: t('settings.piPackages.confirmTitle'),
+                    detail: t('settings.piPackages.confirmDescription').replace(
+                      '{{source}}',
+                      source,
+                    ),
+                    confirm: t('settings.piPackages.confirmInstall'),
+                  };
+        const owner = BrowserWindow.fromWebContents(event.sender);
+        const options = {
+          type: 'warning' as const,
+          title: copy.title,
+          message: copy.message,
+          detail: copy.detail,
+          buttons: [copy.confirm, t('settings.piPackages.cancel')],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+        };
+        const decision = owner
+          ? await dialog.showMessageBox(owner, options)
+          : await dialog.showMessageBox(options);
+        if (decision.response !== 0) {
+          throwIpcError('MUTATION_CANCELLED', 'Pi extension mutation cancelled');
+        }
+        return mutatePiPackage(request, issuePiPackageMutationGrant(request, grantBinding));
+      },
+      t('settings.piPackages.operationFailed'),
+      (error) => {
+        log.warn('Pi extension mutation failed', {
+          action: request.action,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      },
+    );
+  });
 
   ipcMain.handle(
     MAKER_INVOKE.SCAN_AT_RESOURCES,
@@ -5362,11 +6937,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           projectAgents,
           resourceParams.cap,
         );
-        return {
-          success: true,
-          items: merged.items,
-          truncated: result.truncated || merged.capped,
-        };
+        return { success: true, items: merged.items, truncated: result.truncated || merged.capped };
       } catch (err) {
         return {
           success: false,
@@ -5433,6 +7004,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       const agentKind = p.agentKind !== undefined ? requireAgentKind(p.agentKind) : undefined;
       if (agentKind === undefined || agentKind === 'codex') {
         await desktopCodexAuthAdapter.ensureGlobalCodexAssets();
+      } else if (agentKind === 'pi') {
+        await desktopClaudeAuthAdapter.ensureSharedGlobalSkills();
       }
       const opts = {
         ...(agentKind !== undefined ? { agentKind } : {}),
@@ -5508,6 +7081,51 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     log.info('project-context inject skipped', { workDir: o.workingDir, reason: result.reason });
     return false;
+  }
+
+  /**
+   * Review isolation is persisted by sessions.source, not trusted to whichever
+   * renderer happens to reconstruct CreateOpts after a restart. Every local
+   * create/resume funnel passes bootstrapSession, so this is the single place
+   * that restores the host-owned read-only purpose before any prompt injection.
+   */
+  async function applyPersistedReviewMode(o: CreateOpts): Promise<void> {
+    let isReview = o.reviewMode === true;
+    if (!isReview && typeof o.id === 'string' && o.id) {
+      const [row] = await getDbClient()
+        .drizzle.select({ source: sessions.source, remoteHostId: sessions.remoteHostId })
+        .from(sessions)
+        .where(eq(sessions.id, o.id))
+        .limit(1);
+      isReview = row?.source === 'review';
+      if (isReview && row?.remoteHostId) {
+        throwIpcError('UNSUPPORTED_CAPABILITY', 'Review tasks are local-only in this version');
+      }
+    }
+    if (!isReview) return;
+    if (o.remoteHostId) {
+      throwIpcError('UNSUPPORTED_CAPABILITY', 'Review tasks are local-only in this version');
+    }
+    enforceReviewCreateOptions(o);
+  }
+
+  async function readSessionSource(sessionId: string): Promise<string | null> {
+    const [row] = await getDbClient()
+      .drizzle.select({ source: sessions.source })
+      .from(sessions)
+      .where(eq(sessions.id, sessionId))
+      .limit(1);
+    return row?.source ?? null;
+  }
+
+  async function assertReviewExternalInputAllowed(sessionId: string): Promise<void> {
+    await assertReviewSessionExternalInputAllowed(sessionId, readSessionSource);
+  }
+
+  async function assertReviewSettingsUnlocked(sessionId: string): Promise<void> {
+    if ((await readSessionSource(sessionId)) === 'review') {
+      throwIpcError('UNSUPPORTED_CAPABILITY', 'Review task settings are fixed to the source task');
+    }
   }
 
   function orcaSessionStatus(sessionId: string): string {
@@ -5610,6 +7228,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     orcaRole: CreateOpts['orcaRole'],
   ): Promise<void> {
     if (orcaRole !== 'lead' && orcaRole !== 'worker') return;
+    await assertReviewSettingsUnlocked(sessionId);
     if (orcaRole === 'worker') {
       markKnownOrcaWorkerSession(sessionId);
       clearSuppressedOrcaWorkerAgentIslandSession(sessionId);
@@ -5675,7 +7294,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             ? `model "${model}" is not an agent chat model`
             : verdict.reason === 'model-retired'
               ? `model "${model}" has been retired from the catalog`
-              : `model "${model}" is disabled in settings`,
+              : verdict.reason === 'exclusive-source-unavailable'
+                ? `model "${model}" requires SuperGrok (xAI) and cannot use the default gateway`
+                : `model "${model}" is disabled in settings`,
       );
     }
     return verdict.kind === 'reroute' ? verdict.providerId : undefined;
@@ -5687,8 +7308,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     didInjectProjectContext: boolean;
   }> {
     await options.waitForAccountProviderModelsReady();
-    const didInjectOrcaInstructions = applyOrcaInstructions(o);
-    const didInjectProjectContext = await applyProjectContextInjection(o);
+    await applyPersistedReviewMode(o);
+    const didInjectOrcaInstructions = o.reviewMode === true ? false : applyOrcaInstructions(o);
+    const didInjectProjectContext =
+      o.reviewMode === true ? false : await applyProjectContextInjection(o);
 
     if (o.extraDirs && o.extraDirs.length > 0) {
       const validation = await validateExtraDirs(o.extraDirs, o.workingDir);
@@ -5696,6 +7319,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
 
     await hydrateProviderIdBeforeSessionStart(o);
+    await ensureManagedOllamaReadyForSession({
+      providerId: o.providerId,
+      remoteHostId: o.remoteHostId ?? null,
+      userDataDir: app.getPath('userData'),
+    });
     // 停用轴准入(PR #744 review):**新建**会话不得路由到用户停用的模型 / 来源。
     // renderer 选择器已过滤,但 create-session 在 device-link allowlist 内,老控制端
     // 可直接点名 —— main 必须自己裁决。resume 豁免(运行中的会话不打断)只给
@@ -5722,7 +7350,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       if (!verifiedResume) {
         const reroute = await assertModelRouteUsable(o.agentKind, o.model, o.providerId ?? null);
-        if (reroute && !o.providerId) o.providerId = reroute;
+        if (reroute && shouldApplyExclusiveProviderRerouteLive(o.providerId)) {
+          o.providerId = reroute;
+        }
+      } else if (shouldApplyExclusiveProviderRerouteLive(o.providerId)) {
+        const pin = await pinExclusiveSessionProvider(o.agentKind, o.model, o.providerId ?? null);
+        if (pin) o.providerId = pin;
       }
     }
     const session = await maker.createSession(o);
@@ -5960,9 +7593,52 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return;
     }
 
-    // pi 无远端(SSH)支持:capabilities 已拒 remote session,这里兜底跳过。
-    if (ensureAgentKind === 'pi') return;
+    // pi 远端:走通用 silent install(probe 远端 pi 二进制,缺/版本不符则安装)。
     await ensureRemoteAgentInstalledOrInstall(remoteHostIdToEnsure, ensureAgentKind);
+    // pi-manager 预上传(前置检查点,而非 transport 创建深处 —— R1 生命周期 H3 /
+    // R2 安装 M3)。失败不阻断(transport 内还会再 ensure),但提前暴露问题。
+    // 注(轮 28 LOW-2):host 不 ready 时此段静默跳过是**有意**的 —— 上方
+    // ensureRemoteAgentInstalledOrInstall 已对不 ready 抛 SSH_NOT_CONNECTED,
+    // 这里只是 best-effort 增强(与 claude-code 分支的立即 throw 语义对齐点
+    // 不同:pi 的 agent 二进制检查已兜底)。
+    if (ensureAgentKind === 'pi') {
+      const host = getRemoteSshPool().get(remoteHostIdToEnsure);
+      if (host?.getStatus() === 'ready') {
+        try {
+          // 轮 28 MEDIUM:pi-manager bundle 安装/升级进度转发 silent install
+          // toast —— 否则 preflight 的 daemon 安装静默(与 ensureRemoteAgent
+          // 的 toast 对齐)。
+          await ensurePiManagerInstalled(host, log, (event) => {
+            const hostId = remoteHostIdToEnsure;
+            if (event.kind === 'error') {
+              broadcastSilentInstallStatus({
+                hostId,
+                agentKind: 'pi',
+                phase: 'failed',
+                message: event.message,
+              });
+            } else if (event.kind === 'ready') {
+              broadcastSilentInstallStatus({ hostId, agentKind: 'pi', phase: 'done' });
+            } else {
+              // install-upload 是 pi-manager 专属 kind, SILENT_INSTALL_STATUS 的
+              // eventKind union 不含它(轮 32 MEDIUM 类型对齐) —— 归入 install-log
+              // (renderer phaseText 对未知 kind 保持上次文案, 映射后走通用阶段)。
+              broadcastSilentInstallStatus({
+                hostId,
+                agentKind: 'pi',
+                phase: 'progress',
+                eventKind: event.kind === 'install-upload' ? 'install-log' : event.kind,
+              });
+            }
+          });
+        } catch (err) {
+          log.warn('pi-manager preflight install failed (transport will retry)', {
+            hostId: remoteHostIdToEnsure,
+            error: String((err as Error)?.message ?? err),
+          });
+        }
+      }
+    }
 
     // codex 远端 daemon 的 MCP 注入 (cindy_orca / orca_worker_bridge 等经 SSH
     // remote-forward 直连本机 HTTP bridge):转发 / config.toml / daemon env
@@ -6032,18 +7708,25 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // **任一** agent 的在途流量 — 隧道是 codex 与 CC 共用的网络通路, gate
   // 必须两个通道都看 (R3 review P1), 不能沿用 MCP ensure 的 codex-only
   // 判定 (那边 daemon 重启只影响 codex, 语义不同)。
+  // 轮 42 P2(codex-connector):pi 纳入 —— 远端 pi 会话经 getRemotePiAgentProxyEnv
+  // 注入 HTTPS_PROXY/HTTP_PROXY 走同一 SSH 代理隧道, 在途 pi turn 也要防
+  // Settings 改代理时重建/停隧道打断其网络路径(旧注释「pi 走 responses-bridge
+  // 不经代理隧道」已过时, 轮 42 起远端 pi 注入 proxy env)。
   function remoteAgentHasLiveTurn(hostId: string): boolean {
     return maker
       .listActiveSessions()
       .some(
         (s) =>
           s.remoteHostId === hostId &&
-          (s.agentKind === 'codex' || s.agentKind === 'claude-code') &&
+          (s.agentKind === 'codex' || s.agentKind === 'claude-code' || s.agentKind === 'pi') &&
           (agentInputCoordinatorHolder?.hasActiveTurnForRewind(s.id) ?? false),
       );
   }
   setAgentProxyLiveTurnChecker(remoteAgentHasLiveTurn);
 
+  // 注(轮 28 LOW-3):pi 会话**不需要** detach —— MCP bridge 变更由
+  // invalidatePiEnvironment 的 generation-lease 机制处理(活动会话继续用旧桥,
+  // 新会话重建到新桥), 与 codex 的 detach 语义等价。
   async function detachIdleRemoteCodexSessionsOnHost(
     hostId: string,
     reason: string,
@@ -6121,57 +7804,629 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   };
 
   const makerSessionRegistry = createElectronIpcHandlerRegistry();
-  registerMakerSessionCreateHandler(
-    makerSessionRegistry,
-    {
-      // CREATE_SESSION 同样先走 remote ensure:remote draft (尤其 collab
-      // lead) 的 SSH 重连 / agent 安装 / codex daemon MCP 注入必须先于
-      // bootstrap, 否则 lead 首个 turn 没有 cindy_orca, 与 orca 架构文档的
-      // "session start/resume 前置" 契约不符。本地会话 ensure 内部直接返回。
-      bootstrapSession: async (co) => {
-        await ensureRemoteReadyForSessionStart({ createOpts: co });
-        const result = await bootstrapSession(co);
-        // maker:create-session 是手机 / device-link 的创建入口，不经过
-        // local-db:sessions:create，因此后者维护 recent_workdirs 的逻辑不会运行。
-        // worktree 两步流此时 co.workingDir 已是隔离目录；picker 需要记住用户选的
-        // 项目根，而不是 auto-* 运行目录。worktreeStore 以同一预生成 sessionId
-        // 保存了权威 baseRepo。先完成 best-effort upsert 再让 handler 广播 created，
-        // 这样 renderer 收到广播重拉 recent 表时不会撞到写入竞态。
-        if (co.workspaceKind !== 'dialogue' && !co.remoteHostId) {
-          const recentProjectDir = worktreeStore.get(result.session.id)?.baseRepo
-            ?? getManagedWorktreeBasePath(co.workingDir)
-            ?? co.workingDir;
-          await upsertRecentWorkdir(recentProjectDir);
-        }
-        return result;
-      },
-      markOrcaRoleIfNeeded,
-      markKnownNonOrcaIfApplicable,
-      allocateDialogueWorkspace: ensureDialogueWorkspaceDir,
-      createSessionId: createId,
-      now: Date.now,
-      withSessionLock: withSendToSessionLock,
-      sendWorkerReadyMessage: (session) => {
-        // Orca worker 首次创建时发一条初始化消息，强制 codex 写 rollout 文件，
-        // 避免 app 重启后 thread/resume 因 rollout 缺失而失败。
-        observeFireAndForgetSendOutcome(
-          session.send({ type: 'user', content: ORCA_WORKER_READY_MESSAGE }, { planMode: false }),
-          {
-            owner: 'orca-worker-ready',
-            entrypoint: 'CREATE_SESSION',
-            sessionId: session.id,
-            agentKind: session.agentKind,
-            action: 'worker-ready-placeholder',
-            context: `CREATE_SESSION/${session.id}/worker-ready-placeholder`,
-          },
-        );
-      },
-      broadcastSessionCreated,
-      logCreateSession: (fields) => log.info('create-session invoked', fields),
-      warnStderr: (agentKind, line) => log.warn(`[${agentKind}/stderr] ${line}`),
+  registerMakerSessionCreateHandler(makerSessionRegistry, {
+    // CREATE_SESSION 同样先走 remote ensure:remote draft (尤其 collab
+    // lead) 的 SSH 重连 / agent 安装 / codex daemon MCP 注入必须先于
+    // bootstrap, 否则 lead 首个 turn 没有 cindy_orca, 与 orca 架构文档的
+    // "session start/resume 前置" 契约不符。本地会话 ensure 内部直接返回。
+    bootstrapSession: async (co) => {
+      await ensureRemoteReadyForSessionStart({ createOpts: co });
+      const result = await bootstrapSession(co);
+      // maker:create-session 是手机 / device-link 的创建入口，不经过
+      // local-db:sessions:create，因此后者维护 recent_workdirs 的逻辑不会运行。
+      // worktree 两步流此时 co.workingDir 已是隔离目录；picker 需要记住用户选的
+      // 项目根，而不是 auto-* 运行目录。worktreeStore 以同一预生成 sessionId
+      // 保存了权威 baseRepo。先完成 best-effort upsert 再让 handler 广播 created，
+      // 这样 renderer 收到广播重拉 recent 表时不会撞到写入竞态。
+      if (co.workspaceKind !== 'dialogue' && !co.remoteHostId) {
+        const recentProjectDir =
+          worktreeStore.get(result.session.id)?.baseRepo ??
+          getManagedWorktreeBasePath(co.workingDir) ??
+          co.workingDir;
+        await upsertRecentWorkdir(recentProjectDir);
+      }
+      return result;
     },
-  );
+    markOrcaRoleIfNeeded,
+    markKnownNonOrcaIfApplicable,
+    allocateDialogueWorkspace: ensureDialogueWorkspaceDir,
+    createSessionId: createId,
+    now: Date.now,
+    withSessionLock: withSendToSessionLock,
+    sendWorkerReadyMessage: (session) => {
+      // Orca worker 首次创建时发一条初始化消息，强制 codex 写 rollout 文件，
+      // 避免 app 重启后 thread/resume 因 rollout 缺失而失败。
+      observeFireAndForgetSendOutcome(
+        session.send({ type: 'user', content: ORCA_WORKER_READY_MESSAGE }, { planMode: false }),
+        {
+          owner: 'orca-worker-ready',
+          entrypoint: 'CREATE_SESSION',
+          sessionId: session.id,
+          agentKind: session.agentKind,
+          action: 'worker-ready-placeholder',
+          context: `CREATE_SESSION/${session.id}/worker-ready-placeholder`,
+        },
+      );
+    },
+    broadcastSessionCreated,
+    logCreateSession: (fields) => log.info('create-session invoked', fields),
+    warnStderr: (agentKind, line) => log.warn(`[${agentKind}/stderr] ${line}`),
+  });
 
+  const reconcileInterruptedReviews = async (): Promise<void> => {
+    const dbClient = getDbClient();
+    const db = dbClient.drizzle;
+    const [rows, sourceLeases] = await Promise.all([
+      db
+        .select({
+          sessionId: messages.sessionId,
+          clientId: messages.clientId,
+          agentMeta: messages.agentMeta,
+        })
+        .from(messages)
+        .where(
+          and(
+            eq(messages.role, 'assistant'),
+            isNull(messages.rewindAt),
+            sql`${messages.agentMeta} LIKE '%"reviewRun"%'`,
+          ),
+        ),
+      listPersistedReviewSourceLeases(dbClient),
+    ]);
+    const interruptedAt = Date.now();
+    for (const row of rows) {
+      const reviewRun = readReviewRunFromAgentMeta(row.agentMeta);
+      if (!reviewRun || !(await shouldFailInterruptedReview(reviewRun, reviewRunOwner))) continue;
+      const failed: ReviewRunMeta = {
+        ...reviewRun,
+        status: 'failed',
+        completedAt: interruptedAt,
+        failureCode: 'interrupted',
+      };
+      await updateMessageContent(row.sessionId, row.clientId, '');
+      await patchMessageAgentMeta(row.sessionId, row.clientId, { reviewRun: failed });
+      await broadcastMessageAgentMetaUpdate(row.sessionId, row.clientId);
+    }
+    for (const row of sourceLeases) {
+      if (!row.lease) {
+        await discardInvalidReviewSourceLease(dbClient, row);
+        log.warn('discarded malformed Review source lease', {
+          sourceSessionId: row.sourceSessionId,
+          leaseRowId: row.id,
+        });
+        continue;
+      }
+      if (!(await hasReviewOwnerProcessEnded(row.lease.owner, reviewRunOwner))) continue;
+      await releaseReviewSourceLease(dbClient, {
+        sourceSessionId: row.sourceSessionId,
+        runId: row.lease.runId,
+        owner: row.lease.owner,
+      });
+    }
+  };
+  const sourceHasPersistedRunningReview = async (sourceSessionId: string): Promise<boolean> => {
+    const rows = await getDbClient()
+      .drizzle.select({ agentMeta: messages.agentMeta })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.sessionId, sourceSessionId),
+          eq(messages.role, 'assistant'),
+          isNull(messages.rewindAt),
+          sql`${messages.agentMeta} LIKE '%"reviewRun"%'`,
+        ),
+      );
+    return rows.some((row) => readReviewRunFromAgentMeta(row.agentMeta)?.status === 'running');
+  };
+  const sourceHasActiveTurn = async (sourceSessionId: string): Promise<boolean> => {
+    if (
+      maker.getSession(sourceSessionId)?.isTurnRunning() ||
+      sessionTurnActivityTracker.isSessionInTurn(sourceSessionId)
+    ) {
+      return true;
+    }
+    return sessionTurnLeaseTracker.isTurnActive(sourceSessionId);
+  };
+  const ensureReviewStartupReady = createRetryableReviewStartup(async () => {
+    try {
+      await ensureReviewOwnerLivenessReady();
+      await Promise.all([
+        reconcileInterruptedReviews(),
+        sessionTurnLeaseTracker.reconcileStaleLeases(),
+        cleanupOrphanedReviewArtifactSnapshots({ currentOwner: reviewRunOwner }),
+        cleanupOrphanedTempAttachments({ currentOwner: reviewRunOwner }),
+      ]);
+    } catch (error) {
+      log.error('failed to prepare Review runtime state', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  });
+  // Registration happens before the renderer can invoke /review. Keep a
+  // rejection observer here so a startup database failure is logged without
+  // becoming an unhandled promise. A rejected attempt is forgotten so a later
+  // START_REVIEW can retry the full reconciliation and still fail closed.
+  void ensureReviewStartupReady().catch(() => {});
+
+  const readLatestReviewerResult = async (reviewerSessionId: string): Promise<string> => {
+    const rows = await getDbClient()
+      .drizzle.select({ content: messages.content })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.sessionId, reviewerSessionId),
+          eq(messages.role, 'assistant'),
+          isNull(messages.rewindAt),
+        ),
+      )
+      .orderBy(desc(messages.createdAt), desc(messages.id))
+      .limit(8);
+    for (const row of rows) {
+      const text = visibleMessageTextForConversationSearch('assistant', row.content);
+      if (text) return text;
+    }
+    return '';
+  };
+
+  registerReviewStartHandler(makerSessionRegistry, {
+    assertCaller: (event) =>
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+    waitUntilReady: async () => {
+      await ensureReviewStartupReady();
+      // A supported shared-userData peer can exit after this instance starts.
+      // Recheck ownership immediately before each run so its stale card can be
+      // failed, while a still-live peer remains protected by the DB-backed gate.
+      await reconcileInterruptedReviews();
+    },
+    createRunId: randomUUID,
+    createReviewerSessionId: randomUUID,
+    owner: reviewRunOwner,
+    now: Date.now,
+    acquireSourceLease: (input) => tryAcquireReviewSourceLease(getDbClient(), input),
+    releaseSourceLease: async (input) => {
+      await releaseReviewSourceLease(getDbClient(), input);
+    },
+    prepareRun: async ({ event, request, reviewerSessionId }) => {
+      const db = getDbClient().drizzle;
+      const [source] = await db
+        .select({
+          id: sessions.id,
+          title: sessions.title,
+          workingDir: sessions.workingDir,
+          workspaceKind: sessions.workspaceKind,
+          model: sessions.model,
+          effort: sessions.effort,
+          fastMode: sessions.fastMode,
+          providerId: sessions.providerId,
+          agentKind: sessions.agentKind,
+          source: sessions.source,
+          remoteHostId: sessions.remoteHostId,
+          status: sessions.status,
+        })
+        .from(sessions)
+        .where(eq(sessions.id, request.sourceSessionId))
+        .limit(1);
+      if (!source || source.status !== 'active') {
+        throwIpcError('NOT_FOUND', 'Source task not found');
+      }
+      if (await sourceHasPersistedRunningReview(source.id)) {
+        throwIpcError('SESSION_RUNNING', 'This task already has a review in progress');
+      }
+      if (source.source === 'review') {
+        throwIpcError('INVALID_PARAMS', 'A review task cannot start another review');
+      }
+      if (source.remoteHostId) {
+        throwIpcError('UNSUPPORTED_CAPABILITY', 'Review is local-only in this version');
+      }
+      if (!source.workingDir) {
+        throwIpcError('INVALID_PARAMS', 'The source task has no working directory to review');
+      }
+      const sourceWorkingDir = source.workingDir;
+      if (await sourceHasActiveTurn(source.id)) {
+        throwIpcError(
+          'SESSION_RUNNING',
+          'Wait for the current task turn to finish before reviewing',
+        );
+      }
+
+      let evidence: Awaited<ReturnType<typeof loadReviewEvidence>>;
+      let sourceArtifactFingerprint = '';
+      let authorizedArtifactPaths: string[] = [];
+      let cleanupPreparedArtifacts: (() => Promise<void>) | null = null;
+      try {
+        const historicalAttachments = await listReviewHistoricalAttachments(source.id);
+        const explicitArtifactGrant = await authorizeReviewExplicitArtifacts({
+          workingDir: sourceWorkingDir,
+          focus: request.focus,
+          attachments: [...request.attachments, ...historicalAttachments],
+          resolvePath: resolveReviewArtifactPath,
+          confirm: (items) => confirmReviewExternalArtifacts(event as IpcMainInvokeEvent, items),
+        });
+        authorizedArtifactPaths = explicitArtifactGrant.paths;
+        const prepared = await prepareStableReviewArtifactSnapshots({
+          workingDir: sourceWorkingDir,
+          grant: explicitArtifactGrant,
+          owner: reviewRunOwner,
+          prepare: (snapshotGrant) =>
+            loadReviewEvidence({
+              sourceSessionId: source.id,
+              workingDir: sourceWorkingDir,
+              focus: request.focus,
+              attachments: request.attachments,
+              explicitArtifactGrant: snapshotGrant,
+            }),
+        });
+        cleanupPreparedArtifacts = prepared.cleanup;
+        evidence = prepared.value;
+        sourceArtifactFingerprint = prepared.fingerprint;
+      } catch (error) {
+        await cleanupPreparedArtifacts?.();
+        if (
+          error instanceof ReviewArtifactAuthorizationError ||
+          error instanceof SensitiveReviewPathError
+        ) {
+          throwIpcError('PERMISSION_DENIED', error.message);
+        }
+        throw error;
+      }
+      // A committed branch is reviewable content on its own: opening an existing
+      // worktree and running /review has no conversation, no dirty tree and no
+      // turn of its own, yet the branch's commits are exactly what to review.
+      if (
+        evidence.context.length === 0 &&
+        !evidence.workspace?.dirty &&
+        !evidence.branch &&
+        !evidence.changeSet &&
+        evidence.artifacts.length === 0 &&
+        !request.focus
+      ) {
+        await cleanupPreparedArtifacts?.();
+        // "Nothing to review" and "the branch was there but could not be read"
+        // are different answers, and only the second one tells the user what to
+        // do about it. The prompt-level warning never runs on this path.
+        throwIpcError(
+          'INVALID_PARAMS',
+          evidence.branchUnavailableReason
+            ? `Review could not load this branch's changes (${evidence.branchUnavailableReason})`
+            : 'The current task has no reviewable content yet',
+        );
+      }
+      let builtPrompt: ReturnType<typeof buildReviewPrompt>;
+      try {
+        builtPrompt = buildReviewPrompt({
+          focus: evidence.focusPath ? `审查路径：${evidence.focusPath}` : request.focus,
+          context: evidence.context,
+          workspace: evidence.workspace,
+          branch: evidence.branch,
+          ...(evidence.branchUnavailableReason
+            ? { branchUnavailableReason: evidence.branchUnavailableReason }
+            : {}),
+          changeSet: evidence.changeSet,
+          artifacts: evidence.artifacts,
+          artifactsOmitted: evidence.artifactsOmitted,
+          artifactExcerpts: evidence.artifactExcerpts,
+          artifactWarnings: evidence.artifactWarnings,
+        });
+      } catch (error) {
+        await cleanupPreparedArtifacts?.();
+        throw error;
+      }
+
+      return {
+        sourceAgentKind: source.agentKind as 'cc' | 'codex' | 'pi',
+        prompt: builtPrompt.prompt,
+        targetKind: builtPrompt.targetKind,
+        cleanup: async () => {
+          await cleanupPreparedArtifacts?.();
+        },
+        prepareLaunch: async () => {
+          const rawReviewMessage: IpcUserMessage = {
+            type: 'user',
+            content: [{ type: 'text', text: builtPrompt.prompt }, ...evidence.attachmentBlocks],
+          };
+          const reviewMessage = await prepareUserMessageForAgent(
+            reviewerSessionId,
+            rawReviewMessage,
+            'send',
+          );
+          const readRoots = new Set(evidence.readRoots);
+          const reviewReadPaths = new Set(evidence.reviewReadPaths);
+          if (typeof reviewMessage !== 'string' && Array.isArray(reviewMessage.content)) {
+            for (const block of reviewMessage.content) {
+              if (
+                (block.type === 'image' || block.type === 'file') &&
+                typeof block.path === 'string' &&
+                path.isAbsolute(block.path)
+              ) {
+                readRoots.add(path.dirname(block.path));
+                reviewReadPaths.add(block.path);
+              }
+            }
+          }
+          // Fingerprint what the review actually covers, not the whole
+          // workspace: explicit artifacts, attachments and the reviewed change
+          // set. The reviewer still reads the full workspace through workingDir,
+          // but an unrelated file edit must not invalidate a completed review,
+          // and a full-workspace content hash cannot stay inside its byte budget
+          // on a real checkout.
+          //
+          // Change-set paths are bound even when Git evidence exists: the Git
+          // fingerprint hashes identity, porcelain status and patches, so an
+          // ignored deliverable built by the reviewed turn (dist/report.html)
+          // is covered by neither unless it is included here.
+          // The change set is the review target only when nothing better was
+          // selected. With uncommitted work or a branch diff in hand it is not
+          // part of the evidence, so neither its gaps nor its paths belong
+          // here — those commits are already represented by the selected
+          // evidence, and binding unreviewed paths would let an unrelated turn
+          // refuse the review or invalidate its result.
+          //
+          // The accepted cost: a branch review does not bind an ignored file
+          // the latest turn happened to produce, so editing that file mid-review
+          // will not invalidate the result. Binding it would mean an unrelated
+          // turn — one whose content is not being reviewed — could refuse the
+          // review outright or expire it. Between "an unreviewed file went
+          // unwatched" and "an unreviewed file blocked a valid review", this
+          // takes the first. Reviewing that deliverable is still available by
+          // attaching it explicitly, which puts it in reviewReadPaths.
+          const changeSetIsReviewed = !evidence.workspace?.dirty && !evidence.branch;
+          const changeSetContent = changeSetIsReviewed
+            ? reviewChangeSetContentPaths(evidence.changeSet, sourceWorkingDir)
+            : { paths: [], truncated: false };
+          // A change set that cannot account for everything the turn changed —
+          // whether it was summarized away or never enumerable in the first
+          // place — cannot serve as a baseline. Refuse instead of publishing a
+          // conclusion whose freshness check silently skipped the remainder.
+          //
+          // A Git fingerprint is not an exemption: it hashes tracked evidence
+          // only, so a missing entry that happens to be an ignored deliverable
+          // is covered by neither side — exactly the gap this change closes.
+          if (changeSetContent.truncated) {
+            throw new ReviewPreconditionError({
+              code: 'artifact-unavailable',
+              message:
+                'The reviewed change set cannot account for every file the turn changed, so Review cannot bind a complete content baseline',
+            });
+          }
+          const artifactPaths = [...new Set([...reviewReadPaths, ...changeSetContent.paths])];
+          const artifactFingerprintOptions = { linkConfinementRoot: sourceWorkingDir };
+          let artifactFingerprint: string;
+          try {
+            artifactFingerprint = await fingerprintReviewArtifacts(
+              artifactPaths,
+              artifactFingerprintOptions,
+            );
+          } catch (error) {
+            if (
+              error instanceof ReviewArtifactFingerprintChangedError ||
+              error instanceof ReviewArtifactFingerprintLimitError
+            ) {
+              throw new ReviewPreconditionError({
+                code: 'artifact-unavailable',
+                message: error.message,
+              });
+            }
+            throw error;
+          }
+          const artifactFingerprintIsCurrent = async (
+            paths: readonly string[],
+            expected: string,
+          ): Promise<boolean> => {
+            try {
+              return (
+                (await fingerprintReviewArtifacts(paths, artifactFingerprintOptions)) === expected
+              );
+            } catch {
+              return false;
+            }
+          };
+          const completeArtifactFingerprintIsCurrent = (): Promise<boolean> =>
+            artifactFingerprintIsCurrent(artifactPaths, artifactFingerprint);
+          const readCurrentSourceIdentity = async () => {
+            const [currentSource] = await db
+              .select({
+                workingDir: sessions.workingDir,
+                workspaceKind: sessions.workspaceKind,
+                status: sessions.status,
+              })
+              .from(sessions)
+              .where(eq(sessions.id, source.id))
+              .limit(1);
+            return currentSource ?? null;
+          };
+
+          return {
+            message: reviewMessage as UserMessage,
+            reviewerCreateOpts: buildCreateOptsWithStderr({
+              id: reviewerSessionId,
+              agentKind: dbToMakerAgentKind(source.agentKind),
+              workingDir: sourceWorkingDir,
+              workspaceKind: source.workspaceKind,
+              model: source.model,
+              effort: source.effort as CreateOpts['effort'],
+              fastMode: !!source.fastMode,
+              providerId: source.providerId,
+              title: buildReviewSessionTitle(source.title),
+              permissionMode: 'ask',
+              planMode: false,
+              reviewMode: true,
+              reviewReadPaths: [...reviewReadPaths],
+              makerMemoryEnabled: false,
+              ...(readRoots.size > 0 ? { extraDirs: [...readRoots] } : {}),
+            }),
+            verifyBeforeStart: async (): Promise<ReviewFailureReason | null> => {
+              if (!reviewSourceIdentityMatches(source, await readCurrentSourceIdentity())) {
+                return {
+                  code: 'source-workspace-changed',
+                  message:
+                    'The source task workspace changed before Review started. Run /review again in the current workspace.',
+                };
+              }
+              if (
+                (await sourceHasActiveTurn(source.id)) ||
+                (await readReviewContextFingerprint(source.id)) !== evidence.contextFingerprint
+              ) {
+                return {
+                  code: 'source-conversation-changed',
+                  message:
+                    'The task conversation changed before Review started. Run /review again for the current context.',
+                };
+              }
+              if (
+                !(await reviewWorkspaceFingerprintIsCurrent(
+                  source.id,
+                  evidence.workspaceFingerprint,
+                ))
+              ) {
+                return {
+                  code: 'source-files-changed',
+                  message:
+                    'The task files changed before Review started. Run /review again for the current result.',
+                };
+              }
+              // The workspace fingerprint pins HEAD, not the base it is compared
+              // against; a moved base changes the branch diff without touching it.
+              if (!(await reviewBranchBaselineIsCurrent(source.id, evidence.branch))) {
+                return {
+                  code: 'source-files-changed',
+                  message:
+                    'The branch comparison base changed before Review started. Run /review again for the current result.',
+                };
+              }
+              if (
+                !(await artifactFingerprintIsCurrent(
+                  authorizedArtifactPaths,
+                  sourceArtifactFingerprint,
+                ))
+              ) {
+                return {
+                  code: 'artifact-changed',
+                  message:
+                    'A review artifact changed before Review started. Run /review again for the current result.',
+                };
+              }
+              if (!(await completeArtifactFingerprintIsCurrent())) {
+                return {
+                  code: 'artifact-changed',
+                  message:
+                    'A review artifact changed before Review started. Run /review again for the current result.',
+                };
+              }
+              return null;
+            },
+            verifyBeforePublish: async (): Promise<ReviewFailureReason | null> => {
+              if (!reviewSourceIdentityMatches(source, await readCurrentSourceIdentity())) {
+                return {
+                  code: 'source-workspace-changed',
+                  message:
+                    'The source task workspace changed while Review was running. Run /review again in the current workspace.',
+                };
+              }
+              if (
+                (await sourceHasActiveTurn(source.id)) ||
+                (await readReviewContextFingerprint(source.id)) !== evidence.contextFingerprint
+              ) {
+                return {
+                  code: 'source-conversation-changed',
+                  message:
+                    'The task conversation changed while Review was running. Run /review again for the current context.',
+                };
+              }
+              if (
+                !(await reviewWorkspaceFingerprintIsCurrent(
+                  source.id,
+                  evidence.workspaceFingerprint,
+                ))
+              ) {
+                return {
+                  code: 'source-files-changed',
+                  message:
+                    'The task files changed while Review was running. Run /review again for the current result.',
+                };
+              }
+              if (!(await reviewBranchBaselineIsCurrent(source.id, evidence.branch))) {
+                return {
+                  code: 'source-files-changed',
+                  message:
+                    'The branch comparison base changed while Review was running. Run /review again for the current result.',
+                };
+              }
+              if (
+                !(await artifactFingerprintIsCurrent(
+                  authorizedArtifactPaths,
+                  sourceArtifactFingerprint,
+                ))
+              ) {
+                return {
+                  code: 'artifact-changed',
+                  message:
+                    'A review artifact changed while Review was running. Run /review again for the current result.',
+                };
+              }
+              if (!(await completeArtifactFingerprintIsCurrent())) {
+                return {
+                  code: 'artifact-changed',
+                  message:
+                    'A review artifact changed while Review was running. Run /review again for the current result.',
+                };
+              }
+              return null;
+            },
+          };
+        },
+      };
+    },
+    createSourceCard: async ({ sourceSessionId, sourceCardClientId, sourceAgentKind, meta }) => {
+      await createDbMessage(sourceSessionId, {
+        clientId: sourceCardClientId,
+        role: 'assistant',
+        content: '',
+        agentMeta: { reviewRun: meta },
+        agentKind: sourceAgentKind,
+      });
+    },
+    updateSourceCard: async ({ sourceSessionId, sourceCardClientId, meta, result }) => {
+      await updateMessageContent(sourceSessionId, sourceCardClientId, result);
+      await patchMessageAgentMeta(sourceSessionId, sourceCardClientId, { reviewRun: meta });
+      await broadcastMessageAgentMetaUpdate(sourceSessionId, sourceCardClientId);
+    },
+    publishReviewerLink: async ({ sourceSessionId, sourceCardClientId, meta }) => {
+      await patchMessageAgentMeta(sourceSessionId, sourceCardClientId, { reviewRun: meta });
+      await broadcastMessageAgentMetaUpdate(sourceSessionId, sourceCardClientId);
+    },
+    startReviewer: async (createOpts) => {
+      const { session } = await bootstrapSession(createOpts);
+      return session;
+    },
+    markReviewerStarted: async (reviewerSessionId, startedAt) => {
+      await getDbClient()
+        .drizzle.update(sessions)
+        .set({ userSendAt: startedAt, updatedAt: startedAt })
+        .where(eq(sessions.id, reviewerSessionId));
+    },
+    broadcastReviewerCreated: broadcastSessionCreated,
+    persistReviewerPrompt: async ({ reviewerSessionId, runId, prompt, sourceAgentKind }) => {
+      await createDbMessage(reviewerSessionId, {
+        clientId: `review-prompt:${runId}`,
+        role: 'user',
+        content: prompt,
+        agentKind: sourceAgentKind,
+      });
+    },
+    drainPersistQueue,
+    readReviewerResult: readLatestReviewerResult,
+    closeReviewer: async (reviewerSessionId) => {
+      try {
+        await maker.closeSession(reviewerSessionId);
+      } finally {
+        // startSession can fail after F6/base64 attachments were materialized
+        // but before Maker owns the session, so its onClose hook is not enough.
+        await cleanupSessionTempAttachments(reviewerSessionId);
+      }
+    },
+    warn: (message, fields) => log.warn(message, fields),
+  });
   registerPrecreatedWorktreeDiscardHandler(makerSessionRegistry, {
     assertCaller: (event) => {
       // device-link 的真实调用身份由 invoke async context + allowlist 证明；本机直调仍
@@ -6242,11 +8497,29 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 解释它)。lazy-create 时刻 DB 行是唯一真源,执行字段无条件对齐。
       co.model = row.model ?? undefined;
       co.resumeSessionId = row.sdkSessionId ?? undefined;
+      if (!row.sdkSessionId && co.vendorOptions) {
+        // context.rebuild clears the DB sdk_session_id. Queued createOpts may
+        // still carry vendor-specific resume/fork anchors from before the close;
+        // strip every native continuation hint so CC/Codex bootstrap fresh too.
+        const freshVendorOptions = { ...co.vendorOptions };
+        for (const key of ['resumeSessionAt', 'forkSession', 'threadId', 'tailTurnsToDrop']) {
+          delete freshVendorOptions[key];
+        }
+        co.vendorOptions =
+          Object.keys(freshVendorOptions).length > 0 ? freshVendorOptions : undefined;
+      }
       co.providerId = row.providerId;
       co.effort = (row.effort ?? undefined) as CreateOpts['effort'];
       co.fastMode = !!row.fastMode;
-    } catch {
-      // 校正读库失败按原 opts 继续(与切换功能上线前行为一致)。
+    } catch (error) {
+      // context.rebuild clears sdk_session_id before the next bootstrap. If the
+      // DB truth cannot be read, continuing with caller-supplied opts could
+      // resurrect the dead native resume/fork/thread; fail closed instead.
+      log.warn('lazy-create: DB reconciliation failed; refusing stale native bootstrap', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
     }
   }
 
@@ -6266,6 +8539,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           remoteHostId: sessions.remoteHostId,
           orcaRole: sessions.orcaRole,
           sdkSessionId: sessions.sdkSessionId,
+          source: sessions.source,
         })
         .from(sessions)
         .where(eq(sessions.id, sessionId))
@@ -6278,16 +8552,29 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       listMessagesForAgentHandoff(sessionId, 400, after),
     findParkedEngineSession: (sessionId, targetDbKind) =>
       findParkedEngineSession(sessionId, targetDbKind),
-    applyAgentSwitchToDb: applyAgentSwitchToSessionRow,
+    applyAgentSwitchToDb: async (sessionId, patch) => {
+      const verifiedWindow = lookupVerifiedContextWindow(
+        (agentKind, modelId, pid) =>
+          resolveVerifiedContextWindow(
+            getActiveCatalog(),
+            dbToMakerAgentKind(agentKind || patch.agentKind),
+            pid,
+            modelId,
+          ),
+        patch.model,
+        patch.providerId ?? null,
+        dbToMakerAgentKind(patch.agentKind),
+      );
+      await applyAgentSwitchToSessionRow(sessionId, {
+        ...patch,
+        ...(verifiedWindow ? { contextWindow: verifiedWindow } : {}),
+      });
+    },
     setSessionProvider,
     supersedePendingCredentialSwitch: clearPendingCredentialSwitchForSession,
     insertBoundaryMessage: async (sessionId, content) => {
       const clientId = `agent-switch:${createId()}`;
-      await createDbMessage(sessionId, {
-        clientId,
-        role: 'agent_switch',
-        content,
-      });
+      await createDbMessage(sessionId, { clientId, role: 'agent_switch', content });
       return clientId;
     },
     applyResumeFallbackAtomically: applyAgentSwitchResumeFallbackAtomically,
@@ -6361,16 +8648,23 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     getLiveSession: (sessionId) => maker.getSession(sessionId),
     hasBackgroundActivity: getClaudeSessionBackgroundActivity,
     closeSession: (sessionId) => maker.closeSession(sessionId),
+    drainPersistQueue,
     commitDeletion: commitMessageDeletion,
     setPendingHandoff: (sessionId, handoff, expectedGeneration) =>
       agentHandoffPending.set(sessionId, handoff, expectedGeneration),
     readPendingHandoffGeneration: (sessionId) => agentHandoffPending.readGeneration(sessionId),
-    onCommitted: ({ sessionId, deletedClientIds, updatedAt, preview }, requestedClientId) => {
+    onCommitted: (
+      { sessionId, deletedClientIds, subagentRunIds, updatedAt, preview },
+      requestedClientId,
+    ) => {
       broadcastMessageDeleted({
         sessionId,
         clientId: requestedClientId,
         clientIds: deletedClientIds,
       });
+      for (const runId of subagentRunIds) {
+        broadcastSubagentRunsChanged({ sessionId, runId, created: false, firstForSession: false });
+      }
       // 不带 _count:可见消息数不是列表的权威口径,拿它 patch 的错值会被 shallow merge 一直
       // 留住;权威口径受删除影响只有 0 或 +1,交给 sessions:list / reseed 收敛就够。
       // 见 commitMessageDeletion 的注释与 issue #1282。
@@ -6390,6 +8684,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         bootstrapAfterSwitch: true,
         signal,
       });
+      await contextOverflowRolloverHolder?.prepareUnhealthySession(sessionId);
       return release;
     } catch (err) {
       release();
@@ -6427,6 +8722,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     workerSessionId: string;
     workerId: string;
     dispatched: boolean;
+    uiAssignmentSnapshotBeforeMs: number;
+    workerPermissionMode: OrcaWorkerPermissionMode;
     dispatchOutcome?: CollabDispatchOutcome;
   }> {
     await assertLeadCollabProjectEnabled(leadSessionId);
@@ -6440,6 +8737,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       fast: opts.fast,
       providerId: opts.providerId,
       delegateTask: opts.delegateTask,
+      deferDelegateTask: opts.deferDelegateTask,
+      workerPermissionMode: opts.workerPermissionMode,
     });
     if (!result.ok) throwOrcaServiceFailure(result);
     log.info('enableOrca done', {
@@ -6455,11 +8754,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       workerSessionId: result.workerSessionId,
       workerId: result.workerId,
       dispatched: result.dispatched,
+      uiAssignmentSnapshotBeforeMs: result.uiAssignmentSnapshotBeforeMs,
+      workerPermissionMode: result.workerPermissionMode,
       ...(result.dispatchOutcome ? { dispatchOutcome: result.dispatchOutcome } : {}),
     };
   }
 
   async function assertLeadCollabProjectEnabled(leadSessionId: string): Promise<void> {
+    await assertReviewSettingsUnlocked(leadSessionId);
     const lead = maker.getSession(leadSessionId);
     const leadRow = await getSessionRowSnapshot(leadSessionId);
     const rawWorkingDir =
@@ -6485,17 +8787,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     );
   }
 
-  type SendToSessionDispatchSession = {
-    id: string;
-    send(message: UserMessage | string, opts?: SessionSendOptions): Promise<SessionSendResult>;
-  };
-
   async function sendUserMessageWithAwaitedGitBaseline(
     session: SendToSessionDispatchSession,
     message: string,
+    anchorClientId: string,
     opts: SessionSendOptions,
   ): Promise<SessionSendResult> {
     let baselineStarted = false;
+    let turnChangeSetStarted = false;
     const pendingHandoff = await agentHandoffPending.peek(session.id);
     const outgoingMessage: UserMessage = pendingHandoff
       ? (prependHandoffToUserMessage(
@@ -6508,12 +8807,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         ...opts,
         onAccepted: async () => {
           await opts.onAccepted?.();
+          await beginTurnChangeSetAtDispatch(session, anchorClientId);
+          turnChangeSetStarted = true;
           if (gitSnapshotCoordinator) {
             await gitSnapshotCoordinator.onTurnStart(session.id);
             baselineStarted = true;
           }
         },
       });
+      if (turnChangeSetStarted && !sendResult.accepted) {
+        clearPendingTurnChangeSets(session.id);
+      }
       if (baselineStarted && !sendResult.accepted) {
         gitSnapshotCoordinator?.onTurnAbort(session.id);
       }
@@ -6522,6 +8826,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       return sendResult;
     } catch (err) {
+      if (turnChangeSetStarted) {
+        clearPendingTurnChangeSets(session.id);
+      }
       if (baselineStarted) {
         gitSnapshotCoordinator?.onTurnAbort(session.id);
       }
@@ -6539,6 +8846,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     useWorktree?: boolean;
     /** create 分支可选:新 session 的工作目录覆盖(绝对路径,须已存在;jump 忽略)。#811 */
     workingDir?: string;
+    /** create 分支可选:显式执行配置；未提供的字段继续继承 dispatcher。jump 忽略。 */
+    execution?: SendToSessionExecutionOverrides;
     onAccepted?: () => void | Promise<void>;
     onAcceptedRollback?: () => void | Promise<void>;
     origin?: AgentInputQueuedMessage['origin'];
@@ -6555,18 +8864,33 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       title,
       useWorktree,
       workingDir: workingDirOverride,
+      execution: executionOverrides,
       onAccepted,
       onAcceptedRollback,
       origin,
       createDefaults,
       inheritSourcePermissionMode,
     } = params;
+    const queuedOrigin = sessionQueueOriginForDispatcher({
+      dispatcherSessionId,
+      message,
+      explicitOrigin: origin,
+    });
     if (!message) {
-      return {
-        ok: false,
-        errorCode: 'INVALID_ARGS',
-        message: 'message required',
-      };
+      return { ok: false, errorCode: 'INVALID_ARGS', message: 'message required' };
+    }
+
+    if (targetSessionId) {
+      try {
+        await assertReviewExternalInputAllowed(targetSessionId);
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== 'UNSUPPORTED_CAPABILITY') throw error;
+        return {
+          ok: false,
+          errorCode: 'UNSUPPORTED_CAPABILITY',
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
     }
 
     // ── create 分支 ──────────────────────────────────────────────────────────
@@ -6622,6 +8946,63 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             }
             resolvedWorkDir = checked.dir;
           }
+          const [row] = await db
+            .select()
+            .from(sessions)
+            .where(eq(sessions.id, dispatcherSessionId))
+            .limit(1);
+          const inheritedBase: SendToSessionCreateDefaults = {
+            agentKind: meta.agentKind,
+            workingDir: resolvedWorkDir,
+            // 覆盖目录必有真实项目目录 → 归 project 工作区(标题/侧栏分组按项目
+            // 语义走);未覆盖时保持缺省继承,行为不变。
+            ...(workingDirOverride !== undefined ? { workspaceKind: 'project' as const } : {}),
+            model: meta.model,
+            effort: (row?.effort ?? undefined) as SendToSessionCreateDefaults['effort'],
+            fastMode: !!row?.fastMode,
+            providerId: row?.providerId,
+            // working_dir 覆盖时强制继承来源会话的权限档(review 反馈):把新目录
+            // 以 Full access 打开是相对 dispatcher 的权限升级,跨项目 handoff
+            // 不应隐式发生;未覆盖时保持既有缺省(bypassPermissions)不变。
+            permissionMode:
+              inheritSourcePermissionMode || workingDirOverride !== undefined
+                ? permissionModeOrAsk(row?.permissionMode)
+                : 'bypassPermissions',
+          };
+          const hasExecutionOverrides =
+            executionOverrides !== undefined &&
+            (executionOverrides.agentKind !== undefined ||
+              executionOverrides.model !== undefined ||
+              executionOverrides.effort !== undefined ||
+              executionOverrides.fastMode !== undefined);
+          if (hasExecutionOverrides) {
+            const targetAgent = executionOverrides.agentKind ?? inheritedBase.agentKind;
+            const resolvedExecution = resolveSendToSessionExecutionConfig({
+              source: {
+                agentKind: inheritedBase.agentKind,
+                model: inheritedBase.model,
+                effort: inheritedBase.effort,
+                fastMode: !!inheritedBase.fastMode,
+                providerId: inheritedBase.providerId,
+              },
+              overrides: executionOverrides,
+              availableModels: maker.getCapabilities(targetAgent).availableModels,
+              providerRouting: await getProviderRoutingContext(),
+              hasCindyAiApiKey: readClaudeApiKey() != null,
+            });
+            if (!resolvedExecution.ok) {
+              return {
+                ok: false,
+                errorCode: resolvedExecution.errorCode,
+                message: resolvedExecution.message,
+              };
+            }
+            inherited = { ...inheritedBase, ...resolvedExecution.config };
+          } else {
+            inherited = inheritedBase;
+          }
+          // 所有可能提前失败的 workingDir / 执行配置校验完成后才创建 worktree，
+          // 避免非法 agent/model/effort/Fast 组合留下无主目录与 store 绑定。
           // useWorktree:为新 session 预建正规 session worktree(与 UI 新会话勾选
           // worktree 同类:worktreeStore 绑定 + 关闭时 auto-stash 清理),新 session 的
           // id 必须用预生成的那个(worktree 绑定已按它登记)。失败硬报 WORKTREE_UNAVAILABLE
@@ -6653,29 +9034,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             }
             handoffWorktree = { sessionId: prep.sessionId, meta: prep.meta };
           }
-          const [row] = await db
-            .select()
-            .from(sessions)
-            .where(eq(sessions.id, dispatcherSessionId))
-            .limit(1);
-          inherited = {
-            agentKind: meta.agentKind,
-            workingDir: resolvedWorkDir,
-            // 覆盖目录必有真实项目目录 → 归 project 工作区(标题/侧栏分组按项目
-            // 语义走);未覆盖时保持缺省继承,行为不变。
-            ...(workingDirOverride !== undefined ? { workspaceKind: 'project' as const } : {}),
-            model: meta.model,
-            effort: (row?.effort ?? undefined) as SendToSessionCreateDefaults['effort'],
-            fastMode: !!row?.fastMode,
-            providerId: row?.providerId,
-            // working_dir 覆盖时强制继承来源会话的权限档(review 反馈):把新目录
-            // 以 Full access 打开是相对 dispatcher 的权限升级,跨项目 handoff
-            // 不应隐式发生;未覆盖时保持既有缺省(bypassPermissions)不变。
-            permissionMode:
-              inheritSourcePermissionMode || workingDirOverride !== undefined
-                ? permissionModeOrAsk(row?.permissionMode)
-                : 'bypassPermissions',
-          };
         } else {
           if (useWorktree) {
             return {
@@ -6719,7 +9077,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         const clientId = createId();
         createdPreviewSessionId = session.id;
         createdPreviewClientId = clientId;
-        const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, {
+        const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, clientId, {
           planMode: false,
           onAccepted: async () => {
             notifyAgentIslandUserPrompt(session, persistedContent ?? message, {
@@ -6731,6 +9089,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               clientId,
               role: 'user',
               content: persistedContent ?? message,
+              ...(queuedOrigin ? { agentMeta: { origin: queuedOrigin } as AgentMeta } : {}),
             });
             // F4: send_to_session 的 create 分支也建了一条用户可见新会话(有 title + 落了 user
             // 消息),同属"新建会话需同步所有窗侧栏"的 purpose。广播跟 user row 持久化
@@ -6766,6 +9125,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           targetTitle: newTitle,
           targetLastUserSendAt: null,
           worktreePath: handoffWorktree?.meta.path ?? null,
+          model: inherited.model,
+          effort: inherited.effort ?? null,
+          fastMode: !!inherited.fastMode,
+          providerId: inherited.providerId ?? null,
         };
       } catch (err) {
         if (createdPreviewStarted && createdPreviewSessionId && createdPreviewClientId) {
@@ -6788,11 +9151,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             .catch(() => undefined);
         }
         if (isSessionRunningError(err)) {
-          return {
-            ok: false,
-            errorCode: 'BUSY',
-            message: 'new session has a turn in progress',
-          };
+          return { ok: false, errorCode: 'BUSY', message: 'new session has a turn in progress' };
         }
         return {
           ok: false,
@@ -6846,13 +9205,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           dbRow,
           onAccepted,
           onAcceptedRollback,
-          origin,
+          origin: queuedOrigin,
         });
         return {
           ok: true as const,
           targetSessionId,
           agentKind: meta.agentKind,
           wakeKind: 'queued' as const,
+          queuedMessageId: qClientId,
           targetTitle: dbRow.title,
           targetLastUserSendAt:
             dbRow.userSendAt !== null ? new Date(dbRow.userSendAt).toISOString() : null,
@@ -6879,10 +9239,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           clientId,
           role: 'user',
           content: persistedContent ?? message,
+          ...(queuedOrigin ? { agentMeta: { origin: queuedOrigin } as AgentMeta } : {}),
         });
         await runAcceptedCallback(onAccepted, targetSessionId, clientId);
       };
 
+      await contextOverflowRolloverHolder?.prepareUnhealthySession(targetSessionId);
       let live = maker.getSession(targetSessionId);
       if (live) {
         if (live.isTurnRunning?.()) {
@@ -6895,13 +9257,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             dbRow,
             onAccepted,
             onAcceptedRollback,
-            origin,
+            origin: queuedOrigin,
           });
           return {
             ok: true as const,
             targetSessionId,
             agentKind: meta.agentKind,
             wakeKind: 'queued' as const,
+            queuedMessageId: clientId,
             targetTitle: dbRow.title,
             targetLastUserSendAt:
               dbRow.userSendAt !== null ? new Date(dbRow.userSendAt).toISOString() : null,
@@ -6937,10 +9300,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               } catch (err) {
                 log.warn(
                   'sendToSession: detach after drift rebootstrap failed, falling through to lazy-resume',
-                  {
-                    targetSessionId,
-                    err: err instanceof Error ? err.message : String(err),
-                  },
+                  { targetSessionId, err: err instanceof Error ? err.message : String(err) },
                 );
               }
               live = undefined;
@@ -6962,10 +9322,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           } catch (err) {
             log.warn(
               'sendToSession: detach stale remote CC session failed, falling through to lazy-resume',
-              {
-                targetSessionId,
-                err: err instanceof Error ? err.message : String(err),
-              },
+              { targetSessionId, err: err instanceof Error ? err.message : String(err) },
             );
           }
           // detach 后不得继续 live 直发 (session 已 closed) — 置空落入
@@ -6975,7 +9332,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       if (live) {
         try {
-          const sendResult = await sendUserMessageWithAwaitedGitBaseline(live, message, {
+          const sendResult = await sendUserMessageWithAwaitedGitBaseline(live, message, clientId, {
             planMode: false,
             onAccepted: persistUserMessage,
             onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
@@ -7019,13 +9376,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               dbRow,
               onAccepted,
               onAcceptedRollback,
-              origin,
+              origin: queuedOrigin,
             });
             return {
               ok: true as const,
               targetSessionId,
               agentKind: meta.agentKind,
               wakeKind: 'queued' as const,
+              queuedMessageId: clientId,
               targetTitle: dbRow.title,
               targetLastUserSendAt:
                 dbRow.userSendAt !== null ? new Date(dbRow.userSendAt).toISOString() : null,
@@ -7073,7 +9431,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         await ensureRemoteReadyForSessionStart({ createOpts });
         const { session } = await bootstrapSession(createOpts);
         await markOrcaRoleIfNeeded(session.id, createOpts.orcaRole);
-        const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, {
+        const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, clientId, {
           planMode: false,
           onAccepted: persistUserMessage,
           onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
@@ -7117,13 +9475,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             dbRow,
             onAccepted,
             onAcceptedRollback,
-            origin,
+            origin: queuedOrigin,
           });
           return {
             ok: true as const,
             targetSessionId,
             agentKind: meta.agentKind,
             wakeKind: 'queued' as const,
+            queuedMessageId: clientId,
             targetTitle: dbRow.title,
             targetLastUserSendAt:
               dbRow.userSendAt !== null ? new Date(dbRow.userSendAt).toISOString() : null,
@@ -7251,12 +9610,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       persistedContent: request.persistedContent,
     });
     if (!sent.ok) return sent;
-    return {
-      ok: true,
-      sessionId: forkedSessionId,
-      disposition: 'forked',
-    };
+    return { ok: true, sessionId: forkedSessionId, disposition: 'forked' };
   });
+  setGhostSessionRevealer((sessionId) => openMainWindowSession(sessionId));
 
   // Ghost 的派活取件(agent 槽 errand 加档):守门在 cindy-brain/errandSlot,
   // 这里注入真实执行链——专属会话确保/统一投递/turn 收口。投递仍走
@@ -7454,25 +9810,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onAcceptedRollback?: () => void | Promise<void>;
     origin?: AgentInputQueuedMessage['origin'];
   }): Promise<void> {
-    const createOpts = await buildCreateOptsForQueuedSession(params.targetSessionId, params.meta);
-    const queued: AgentInputQueuedMessage = {
-      clientId: params.clientId,
-      text: params.message,
-      persistedContent: params.persistedContent,
-      model: createOpts.model,
-      effort: createOpts.effort ?? '',
-      permissionMode: permissionModeOrAsk(createOpts.permissionMode),
-      workingDir: createOpts.workingDir,
-      vendorOptions: createOpts.vendorOptions,
-      chatMessage: {
-        clientId: params.clientId,
-        role: 'user',
-        content: params.persistedContent,
-        createdAt: new Date().toISOString(),
-      },
-      createOpts,
-      ...(params.origin ? { origin: params.origin } : {}),
-    };
+    const queued = await buildSessionControlInputItem(params);
     if (params.onAccepted) {
       orcaInterAgentDispatcher.registerQueuedOrcaInterAgentAcceptedCallback(
         params.clientId,
@@ -7490,6 +9828,35 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     });
   }
 
+  async function buildSessionControlInputItem(params: {
+    targetSessionId: string;
+    message: string;
+    persistedContent: string;
+    clientId: string;
+    meta: NonNullable<Awaited<ReturnType<typeof maker.getSessionMeta>>>;
+    origin?: AgentInputQueuedMessage['origin'];
+  }): Promise<AgentInputQueuedMessage> {
+    const createOpts = await buildCreateOptsForQueuedSession(params.targetSessionId, params.meta);
+    return {
+      clientId: params.clientId,
+      text: params.message,
+      persistedContent: params.persistedContent,
+      model: createOpts.model,
+      effort: createOpts.effort ?? '',
+      permissionMode: permissionModeOrAsk(createOpts.permissionMode),
+      workingDir: createOpts.workingDir,
+      vendorOptions: createOpts.vendorOptions,
+      chatMessage: {
+        clientId: params.clientId,
+        role: 'user',
+        content: params.persistedContent,
+        createdAt: new Date().toISOString(),
+      },
+      createOpts,
+      ...(params.origin ? { origin: params.origin } : {}),
+    };
+  }
+
   const orcaInterAgentDispatcher: OrcaInterAgentDispatcher = createOrcaInterAgentDispatcher({
     createId,
     getSessionMeta: (sessionId) => maker.getSessionMeta(sessionId).catch(() => null),
@@ -7497,6 +9864,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     getLiveSession: (sessionId) => maker.getSession(sessionId),
     shouldQueueNewTurn: (sessionId): boolean => inputCoordinator.shouldQueueNewTurn(sessionId),
     hasSendToSessionLock: (sessionId) => sendToSessionLocks.has(sessionId),
+    withSendToSessionLock,
+    prepareUnhealthySession: (sessionId) =>
+      contextOverflowRolloverHolder?.prepareUnhealthySession(sessionId) ?? Promise.resolve(false),
     buildCreateOptsForQueuedSession,
     enqueueQueuedMessage: (sessionId, item) => {
       // 先 await 恢复再 enqueue:确保恢复的排队 prompt 在新消息之前,且恢复后
@@ -7508,6 +9878,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     sendToSessionInternal,
     createDbMessage,
+    beginDirectTurnChangeSet: async (sessionId, clientId) => {
+      const liveSession = maker.getSession(sessionId);
+      if (!liveSession) {
+        throw new Error('Target session became unavailable before direct turn dispatch.');
+      }
+      await beginTurnChangeSetAtDispatch(liveSession, clientId);
+    },
+    abortDirectTurnChangeSet: clearPendingTurnChangeSets,
     resolveWorkerSenderLabel: async (workerId, fallback) => {
       const link = await getWorkerLink({ workerId });
       if (!link) return fallback;
@@ -7517,8 +9895,25 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     isSessionRunningError,
     log,
   });
-  const dispatchOrEnqueueOrcaInterAgentMessage =
-    orcaInterAgentDispatcher.dispatchOrEnqueueOrcaInterAgentMessage;
+  const dispatchOrEnqueueOrcaInterAgentMessage: OrcaInterAgentDispatcher['dispatchOrEnqueueOrcaInterAgentMessage'] =
+    async (params) => {
+      try {
+        await assertReviewExternalInputAllowed(params.targetSessionId);
+      } catch (error) {
+        return {
+          ok: false,
+          dispatchOutcome: {
+            ...createHostSendFailure(
+              'SEND_FAILED',
+              error instanceof Error ? error.message : String(error),
+            ),
+            source: params.meta.source,
+            context: params.meta.context,
+          },
+        };
+      }
+      return orcaInterAgentDispatcher.dispatchOrEnqueueOrcaInterAgentMessage(params);
+    };
   dispatchInterAgentMessageHolder = dispatchOrEnqueueOrcaInterAgentMessage;
 
   ipcMain.handle(
@@ -7535,10 +9930,21 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         effort?: unknown;
         fast?: unknown;
         providerId?: unknown;
+        workerPermissionMode?: unknown;
+        deferDelegateTask?: unknown;
       };
       const workerAgent: AgentKind =
         body.workerAgent === 'codex' ? 'codex' : body.workerAgent === 'pi' ? 'pi' : 'claude-code';
       const delegateTask = typeof body.delegateTask === 'string' ? body.delegateTask : undefined;
+      if (
+        body.workerPermissionMode !== undefined &&
+        !isOrcaWorkerPermissionMode(body.workerPermissionMode)
+      ) {
+        throwIpcError('INVALID_PARAMS', 'workerPermissionMode must be auto or bypassPermissions');
+      }
+      if (body.deferDelegateTask !== undefined && typeof body.deferDelegateTask !== 'boolean') {
+        throwIpcError('INVALID_PARAMS', 'deferDelegateTask must be a boolean');
+      }
       return enableOrcaInternal(leadSessionId, {
         workerAgent,
         delegateTask,
@@ -7552,7 +9958,69 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           typeof body.providerId === 'string' && body.providerId.trim().length > 0
             ? body.providerId.trim()
             : undefined,
+        workerPermissionMode: body.workerPermissionMode,
+        deferDelegateTask: body.deferDelegateTask,
       });
+    },
+  );
+
+  ipcMain.handle(
+    MAKER_INVOKE.WORKER_DISPATCH_UI_ASSIGNMENT,
+    async (
+      _e,
+      leadSessionId: unknown,
+      workerSessionId: unknown,
+      initialTask: unknown,
+      snapshotBeforeMs: unknown,
+      waitForLeadHistory: unknown,
+    ) => {
+      if (typeof leadSessionId !== 'string' || leadSessionId.length === 0) {
+        throwIpcError('INVALID_PARAMS', 'leadSessionId required');
+      }
+      if (typeof workerSessionId !== 'string' || workerSessionId.length === 0) {
+        throwIpcError('INVALID_PARAMS', 'workerSessionId required');
+      }
+      if (typeof initialTask !== 'string' || initialTask.trim().length === 0) {
+        throwIpcError('INVALID_PARAMS', 'initialTask required');
+      }
+      if (
+        typeof snapshotBeforeMs !== 'number' ||
+        !Number.isFinite(snapshotBeforeMs) ||
+        snapshotBeforeMs < 0
+      ) {
+        throwIpcError('INVALID_PARAMS', 'snapshotBeforeMs must be a non-negative number');
+      }
+      if (typeof waitForLeadHistory !== 'boolean') {
+        throwIpcError('INVALID_PARAMS', 'waitForLeadHistory must be a boolean');
+      }
+      if (waitForLeadHistory) {
+        const queryable = await orcaUiAssignmentHistoryGate.waitUntilQueryable(
+          leadSessionId,
+          snapshotBeforeMs,
+        );
+        if (!queryable) {
+          throwIpcError(
+            'PRECONDITION_FAILED',
+            'Lead input was not queryable before the UI assignment deadline',
+          );
+        }
+      }
+      return orcaUiAssignmentDispatchClaims.runOnce(
+        { leadSessionId, workerSessionId, snapshotBeforeMs },
+        async () => {
+          const result = await orcaTeamService.sendToWorker({
+            callerLeadSessionId: leadSessionId,
+            targetSessionId: workerSessionId,
+            message: buildUiAssignmentInitialTask({
+              leadSessionId,
+              initialTask: initialTask.trim(),
+              snapshotBeforeMs,
+            }),
+          });
+          if (!result.ok) throwOrcaServiceFailure(result);
+          return result;
+        },
+      );
     },
   );
 
@@ -7616,8 +10084,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         });
         // 上一次关闭若在 archiveWorkersByTeam 之前被打断,team 已非 active 但 worker session 还停在
         // active + hidden + unreachable —— 一并补齐归档,否则它们会成为永远触达不到的孤儿 worker。
+        const workerRecycleScope = captureSessionRecycleScope();
         const orphanedWorkerSessionIds = await reconcileInactiveTeamWorkersForLead(leadSessionId);
         for (const sid of orphanedWorkerSessionIds) {
+          await recycleSessionWorktreeForStatusChange(sid, 'archived', workerRecycleScope);
           cleanupPendingInteractionsForSession(sid, 'orca_disable');
           forgetKnownOrcaWorkerSession(sid);
         }
@@ -7638,6 +10108,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     const activeWorkers = workers.filter((w) => w.teamId === team.id);
     for (const w of activeWorkers) {
       orcaTeamService.clearAutoBridgeState(w.sessionId);
+      await cancelIOSSimulatorSessionOperations(w.sessionId);
       const sess = maker.getSession(w.sessionId);
       if (sess) {
         try {
@@ -7665,7 +10136,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
     await markTeamEnded(team.id, 'completed');
     await markWorkersStatusByTeam(team.id, 'done');
-    await archiveWorkersByTeam(team.id);
+    const workerRecycleScope = captureSessionRecycleScope();
+    const archivedWorkerSessionIds = await archiveWorkersByTeam(team.id);
+    await Promise.all(
+      archivedWorkerSessionIds.map((sessionId) =>
+        recycleSessionWorktreeForStatusChange(sessionId, 'archived', workerRecycleScope),
+      ),
+    );
 
     await clearLeadOrcaRoleState(leadSessionId);
 
@@ -7701,6 +10178,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           ? ('pi' as const)
           : ('claude-code' as const);
     const model = typeof b.model === 'string' && b.model.length > 0 ? b.model : undefined;
+    if (
+      b.workerPermissionMode !== undefined &&
+      !isOrcaWorkerPermissionMode(b.workerPermissionMode)
+    ) {
+      throwIpcError('INVALID_PARAMS', 'workerPermissionMode must be auto or bypassPermissions');
+    }
     await assertLeadCollabProjectEnabled(b.leadSessionId);
     const result = await orcaLifecycleService.createWorker({
       leadSessionId: b.leadSessionId,
@@ -7714,6 +10197,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         typeof b.providerId === 'string' && b.providerId.trim().length > 0
           ? b.providerId.trim()
           : undefined,
+      workerPermissionMode: b.workerPermissionMode,
       label: label.value,
       initialTask:
         typeof b.initialTask === 'string' && b.initialTask.length > 0 ? b.initialTask : undefined,
@@ -7820,6 +10304,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     markWorkerIdleIfStatus,
     restoreWorkerDoneIfIdle,
+    cancelWorkerSessionOperations: cancelIOSSimulatorSessionOperations,
     closeWorkerSession: async (sessionId) => {
       const sess = maker.getSession(sessionId);
       if (sess) {
@@ -7843,7 +10328,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       );
     },
     hasSendToSessionLock: (sessionId) => sendToSessionLocks.has(sessionId),
-    archiveWorkerSession: archiveSingleWorkerSession,
+    archiveWorkerSession: async (sessionId) => {
+      const workerRecycleScope = captureSessionRecycleScope();
+      await archiveSingleWorkerSession(sessionId);
+      await recycleSessionWorktreeForStatusChange(sessionId, 'archived', workerRecycleScope);
+    },
     getManualInterrupt,
     clearManualInterrupt,
     forgetWorkerSession: forgetKnownOrcaWorkerSession,
@@ -7872,10 +10361,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         onAcceptedRollback,
       });
       if (!result.ok) {
-        return {
-          ok: false,
-          dispatchOutcome: result.dispatchOutcome,
-        };
+        return { ok: false, dispatchOutcome: result.dispatchOutcome };
       }
       return {
         ok: true,
@@ -7889,10 +10375,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     getSessionQueueSnapshot: async (sessionId) => {
       // 先补崩溃恢复,保证重启后 lead 仍能看到快照恢复出的排队消息。
       await inputCoordinator.ensureQueueRestored(sessionId).catch(() => undefined);
-      const projection = inputCoordinator.getProjection(sessionId);
+      const snapshot = inputCoordinator.getQueueControlSnapshot(sessionId);
+      const inspection = inputCoordinator.getQueueInspection(sessionId);
       return {
-        pendingQueue: projection.pendingQueue,
-        steeringClientIds: projection.steeringQueueClientIds,
+        pendingQueue: snapshot.pendingQueue,
+        steeringClientIds: snapshot.steeringQueueClientIds,
+        consumingClientIds: inspection
+          .filter((entry) => entry.consuming)
+          .map((entry) => entry.queuedMessageId),
       };
     },
     removeQueuedMessage: (sessionId, clientId) => {
@@ -7923,6 +10413,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   });
   orcaTeamServiceForEvents = orcaTeamService;
 
+  const getProviderRoutingContext = () =>
+    readOrcaWorkerProviderRoutingContext({
+      providerService: getDesktopProviderService(),
+      getCatalog: getActiveCatalog,
+    });
+
   const orcaWorkerCreationService = createOrcaWorkerCreationService({
     getActiveTeamByLead,
     listWorkersByLead,
@@ -7952,79 +10448,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       };
     },
     getWorkerDefaults: getWorkerDefaultsFromNewMaker,
+    getWorkerPermissionMode: getWorkerPermissionModeFromCreationPrefs,
     getAvailableModels: (agent) => maker.getCapabilities(agent).availableModels,
-    getProviderRoutingContext: async () => {
-      const catalog = getDesktopSelectableCatalog();
-      const views = await getDesktopProviderService().listProviders({
-        allowSideEffects: true,
-        catalog,
-      });
-      const modelRegistry = catalog.modelRegistry;
-      // 准入过滤与 modelList.ts 标准派生同口径:用户停用的模型(disabled,见
-      // model-disable-store)与非聊天模型(image/video/tts/stt/realtime/
-      // embedding/compression,issue #882 第 3 点)不进路由可用集 —— MCP
-      // create_worker 点名它们会走既有的 INVALID_PARAMS / NO_PROVIDER 拒绝路径,
-      // 而不是静默路由过去。停用的供应商已在 connectedProvidersForAgent(suspended)
-      // 一层出局。isModelSelectableForNewRoute 同时收口 chat / disabled / retired，
-      // 这里的 models/fastModels/effortMetaByModel 都是
-      // orcaWorkerCreationService 唯一能看到的 provider 快照 —— 一旦某个非聊天
-      // mode 的模型混进这份 id 清单,service 内所有 `provider.models.includes(id)`
-      // 式的 preflight 都只按 id 存在与否放行,永远不会知道这条模型其实是图片/
-      // 语音端点(mode 信息在这一步已经被拍平丢弃),必须在这里先过滤,不能指望
-      // 下游 service 补(2026-07 review 第 16 轮:MCP create_worker / 缓存默认
-      // 路由都走这条快照,不经过 renderer 侧选择器的过滤)。
-      const routableModels = (provider: ProviderView, agent: AgentKind) =>
-        (provider.models[agent] ?? []).filter((model) =>
-          isModelSelectableForNewRoute(model, { userProvider: provider.source === 'user' }),
-        );
-      const availabilityFor = (agent: AgentKind) =>
-        connectedProvidersForAgent(views, agent).map((provider) => {
-          const models = routableModels(provider, agent);
-          const registryIdentityByModel = Object.fromEntries(
-            models.flatMap((model) => {
-              const matched = findModelRegistryRoute(
-                modelRegistry,
-                provider.id,
-                model.id,
-                agent === 'pi' ? undefined : agent,
-              );
-              return matched ? [[model.id, matched.entry.id]] : [];
-            }),
-          );
-          return {
-            id: provider.id,
-            name: provider.name,
-            models: models.map((model) => model.id),
-            registryIdentityByModel,
-            // Fast 能力 per-(provider, model):显式来源的 Fast 判定按该来源自己的条目。
-            fastModels: models.filter((model) => model.supportsFastMode).map((model) => model.id),
-            // effort 档位同样 per-(provider, model):供 service 按实际路由来源重归一。
-            effortMetaByModel: Object.fromEntries(
-              models.map((model) => [
-                model.id,
-                { efforts: model.efforts, defaultEffort: model.defaultEffort },
-              ]),
-            ),
-            requiresExplicitRoute: providerRouteRequiresExplicitSelection(
-              provider.routing[agent]?.authStrategy,
-            ),
-            // chat-bridged codex 供应商标记 (SSH 远端 worker 兼容闸用,
-            // 见 orcaWorkerCreationService R23 P2 校验;wireProtocol 仅
-            // codex 侧存在, 其他 agent 恒 false)。
-            chatBridgedCodex:
-              agent === 'codex' && provider.routing[agent]?.wireProtocol === 'openai-chat',
-          };
-        });
-      return {
-        availability: {
-          'claude-code': availabilityFor('claude-code'),
-          codex: availabilityFor('codex'),
-          pi: availabilityFor('pi'),
-        },
-        resolveDefaultProviderIdForModel: (agent, model) =>
-          effectiveSourceIdForModel(views, null, model, agent),
-      };
-    },
+    getProviderRoutingContext,
     readClaudeApiKey,
     reserveWorkerCreation,
     renewWorkerCreationReservation,
@@ -8056,9 +10482,30 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
   });
 
+  const orcaUiAssignmentHistoryGate = createOrcaUiAssignmentHistoryGate({
+    hasUserMessageSince: async (leadSessionId, snapshotBeforeMs) => {
+      const page = await getMessagesForHistory({
+        sessionIds: [leadSessionId],
+        workdir: null,
+        fromMs: snapshotBeforeMs,
+        toMs: null,
+        agentKind: null,
+        roles: ['user'],
+        includeRewound: false,
+        limit: 1,
+        cursor: null,
+        order: 'asc',
+      });
+      return page.items.length > 0;
+    },
+  });
+  const orcaUiAssignmentDispatchClaims = createOrcaUiAssignmentDispatchClaims();
+
   const orcaLifecycleService = createOrcaLifecycleService({
     getActiveTeamByLead,
     createActiveTeam: async (leadSessionId) => createActiveTeam({ leadSessionId }),
+    getWorkerPermissionMode: getWorkerPermissionModeFromCreationPrefs,
+    setWorkerPermissionMode: applyWorkerPermissionModePreference,
     createWorkerInTeam: (params) => orcaWorkerCreationService.createWorkerInTeam(params),
     dispatchWorkerTask: (params) => orcaTeamService.dispatchWorkerTask(params),
     markTeamEnded,
@@ -8074,12 +10521,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         orcaWorkflowId: teamId,
         orcaLeadSessionId: leadSessionId,
         ...(workerId && workerSessionId
-          ? {
-              initialWorker: {
-                workerId,
-                sessionId: workerSessionId,
-              },
-            }
+          ? { initialWorker: { workerId, sessionId: workerSessionId } }
           : {}),
       });
     },
@@ -8113,12 +10555,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       });
     },
     rollbackCreatedWorker: async ({ workerId, workerSessionId }) => {
+      await cancelIOSSimulatorSessionOperations(workerSessionId);
       const workerSession = maker.getSession(workerSessionId);
       if (workerSession) {
         await maker.closeSession(workerSessionId).catch(() => undefined);
       }
       forgetKnownOrcaWorkerSession(workerSessionId);
       await archiveSingleWorkerSession(workerSessionId).catch(() => undefined);
+      await cancelIOSSimulatorSessionOperations(workerSessionId);
       await removeWorker(workerId);
     },
     broadcastSessionCreated,
@@ -8220,31 +10664,133 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   });
   idleReleaseWatcher.start();
 
+  const sessionControlService = createSessionControlService({
+    sessionExists: async (sessionId) => (await maker.getSessionMeta(sessionId)) !== null,
+    getLiveSession: (sessionId) => maker.getSession(sessionId) ?? null,
+    getSessionActivitySnapshot: readCanonicalSessionActivity,
+    assertExternalInputAllowed: assertReviewExternalInputAllowed,
+    createQueuedMessage: async ({ targetSessionId, callerSessionId, queuedMessageId, message }) => {
+      const meta = await maker.getSessionMeta(targetSessionId);
+      if (!meta) throw new Error(`session ${targetSessionId} not found`);
+      return buildSessionControlInputItem({
+        targetSessionId,
+        message,
+        persistedContent: message,
+        clientId: queuedMessageId,
+        meta,
+        origin: { kind: 'session', senderSessionId: callerSessionId, displayText: message },
+      });
+    },
+    steerQueuedMessage: async (sessionId, item, expectedTurn) => {
+      await inputCoordinator.ensureQueueRestored(sessionId);
+      return inputCoordinator.steer(sessionId, item, {
+        touchUserSend: true,
+        fallbackToTurn: false,
+        expectedTurnSession: expectedTurn.session,
+        expectedTurnGeneration: expectedTurn.turnGeneration,
+      });
+    },
+    getQueueSnapshot: async (sessionId) => {
+      await inputCoordinator.ensureQueueRestored(sessionId);
+      if (!inputCoordinator.isQueueRestored(sessionId)) {
+        throw new Error(`queue restore incomplete for ${sessionId}`);
+      }
+      const snapshot = inputCoordinator.getQueueControlSnapshot(sessionId);
+      const consumingClientIds = inputCoordinator
+        .getQueueInspection(sessionId)
+        .filter((entry) => entry.consuming)
+        .map((entry) => entry.queuedMessageId);
+      return { pendingQueue: snapshot.pendingQueue, consumingClientIds };
+    },
+    replaceQueuedMessage: (sessionId, clientId, next) =>
+      inputCoordinator.replaceQueuedMessage(sessionId, clientId, next),
+    removeQueuedMessage: (sessionId, clientId) => {
+      if (!inputCoordinator.hasQueuedItemWhere(sessionId, (item) => item.clientId === clientId)) {
+        return false;
+      }
+      inputCoordinator.remove(sessionId, clientId);
+      return !inputCoordinator.hasQueuedItemWhere(sessionId, (item) => item.clientId === clientId);
+    },
+    createId,
+  });
+
   // ─── 把 internal 业务函数发布到 module-level holder ────────────────────
   // mcp-providers.ts 的 cindy_helper control deps 通过
   // tryGetOrcaCollabService() 拿到这些函数引用, 让 MCP tool
   // 走与 IPC handler 完全相同的业务路径。
   orcaCollabServiceHolder = {
+    listSessionQueue: async (sessionId) => {
+      try {
+        const meta = await maker.getSessionMeta(sessionId);
+        if (!meta) {
+          return { ok: false, errorCode: 'NOT_FOUND', message: `session ${sessionId} not found` };
+        }
+        await inputCoordinator.ensureQueueRestored(sessionId);
+        if (!inputCoordinator.isQueueRestored(sessionId)) {
+          return {
+            ok: false,
+            errorCode: 'INTERNAL',
+            message: `queue restore incomplete for ${sessionId}`,
+          };
+        }
+        return { ok: true, messages: inputCoordinator.getQueueInspection(sessionId) };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          errorCode: isDbClientNotReadyError(err) ? 'HOST_NOT_READY' : 'INTERNAL',
+          message,
+        };
+      }
+    },
+    listSessionQueuedCounts: async (sessionIds) => {
+      try {
+        const counts = await resolveSessionQueueCounts(sessionIds, {
+          getLiveQueue: (sessionId) => inputCoordinator.getQueueInspectionIfRestored(sessionId),
+          loadPersistedCounts: loadAgentInputQueueSnapshotCounts,
+        });
+        return { ok: true, counts };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          errorCode: isDbClientNotReadyError(err) ? 'HOST_NOT_READY' : 'INTERNAL',
+          message,
+        };
+      }
+    },
+    updateSessionQueuedMessage: (params) => sessionControlService.updateQueuedMessage(params),
+    cancelSessionQueuedMessage: (params) => sessionControlService.cancelQueuedMessage(params),
+    steerSession: (params) => sessionControlService.steerSession(params),
+    stopSessionTurn: (params) => sessionControlService.stopSessionTurn(params),
+    getSessionRuntime: (params) => sessionControlService.getSessionRuntime(params),
     sendToSession: sendToSessionInternal,
     enableOrca: enableOrcaInternal,
     disableOrca: disableOrcaInternal,
     // MCP worker 派活必须经 OrcaTeamService，确保 running、resume idle、广播和
     // 公开错误码映射都与 IPC handler WORKER_SEND_TO 保持同一套状态机。
     sendToWorker: ({ callerLeadSessionId, targetSessionId, message }) =>
-      orcaTeamService.sendToWorker({
-        callerLeadSessionId,
-        targetSessionId,
-        message,
-      }),
+      orcaTeamService.sendToWorker({ callerLeadSessionId, targetSessionId, message }),
     // 排队消息控制统一走 OrcaTeamService,复用 resolveWorkerRef 归属校验与
     // coordinator 的 remove/replace 原语(cancel 经 remove 触发 discard settle)。
     listWorkerQueuedMessages: (params) => orcaTeamService.listWorkerQueuedMessages(params),
     updateWorkerQueuedMessage: (params) => orcaTeamService.updateWorkerQueuedMessage(params),
     cancelWorkerQueuedMessage: (params) => orcaTeamService.cancelWorkerQueuedMessage(params),
-    startTeam: async ({ leadSessionId }) => {
+    startTeam: async ({ leadSessionId, workerPermissionMode }) => {
       try {
         await assertLeadCollabProjectEnabled(leadSessionId);
-        return await orcaLifecycleService.startTeam({ leadSessionId });
+        return await startOrcaTeamWithPermissionGate(
+          { leadSessionId, workerPermissionMode },
+          {
+            getCurrentWorkerPermissionMode: getWorkerPermissionModeFromCreationPrefs,
+            requestFullAccessConfirmation: (sessionId) =>
+              orcaWorkerPermissionConfirmBridge.request(sessionId, {
+                title: t('newChat.chatInput.fullAccessConfirmation.title'),
+                description: `${t('newChat.chatInput.fullAccessConfirmation.description')} ${t('newChat.chatInput.fullAccessConfirmation.note')}`,
+              }),
+            startTeam: (params) => orcaLifecycleService.startTeam(params),
+          },
+        );
       } catch (err) {
         return {
           ok: false,
@@ -8437,12 +10983,29 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     listAvailableModels: async ({ agent }) => {
       try {
         const agents: AgentKind[] = agent ? [agent] : ['codex', 'claude-code', 'pi'];
-        const result: Record<string, Array<{ id: string; label: string }>> = {};
+        const providerRouting = await getProviderRoutingContext();
+        const result: Record<
+          string,
+          Array<{
+            id: string;
+            label: string;
+            providers: Array<{ id: string; name: string }>;
+            defaultProviderId: string | null;
+          }>
+        > = {};
         for (const a of agents) {
           const caps = maker.getCapabilities(a);
           // key 必须区分 pi,否则 pi 模型会被塞进 claude_code 键与 CC 模型混淆。
           const key = a === 'codex' ? 'codex' : a === 'pi' ? 'pi' : 'claude_code';
-          result[key] = caps.availableModels.map((m) => ({ id: m.id, label: m.displayName }));
+          const providers = providerRouting.availability[a] ?? [];
+          result[key] = caps.availableModels.map((m) => ({
+            id: m.id,
+            label: m.displayName,
+            providers: providers
+              .filter((provider) => provider.models.includes(m.id))
+              .map((provider) => ({ id: provider.id, name: provider.name })),
+            defaultProviderId: providerRouting.resolveDefaultProviderIdForModel(a, m.id),
+          }));
         }
         return { ok: true, ...result };
       } catch (err) {
@@ -8504,13 +11067,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           message.agentMeta.transcriptParentUuid.length > 0;
         const enrichedMessage =
           transcriptParentUuid && !hasTranscriptParent
-            ? {
-                ...message,
-                agentMeta: {
-                  ...message.agentMeta,
-                  transcriptParentUuid,
-                },
-              }
+            ? { ...message, agentMeta: { ...message.agentMeta, transcriptParentUuid } }
             : message;
         // session-agent-switch:user 行逐行 stamp 当前引擎(见 messages.agent_kind 注释)。
         const agentKind = getSessionDbAgentKind(sessionId);
@@ -8624,20 +11181,149 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     reconcileCreateOptsWithDb: reconcileCreateOptsAgainstDb,
     peekPendingHandoff: (sessionId) => agentHandoffPending.peek(sessionId),
     consumePendingHandoff: (sessionId) => agentHandoffPending.consume(sessionId),
+    peekPlanReconcileNote: async (sessionId) => {
+      const snapshot = await enqueueDurableWrite(`plan-reconcile-read:${sessionId}`, () =>
+        readCodexPlanState(sessionId),
+      );
+      if (!snapshot) return null;
+      if (snapshot.state === 'sealed') {
+        return { note: buildCompletedPlanGuardNote(), sealedTurnId: snapshot.turnId };
+      }
+      const openSteps = snapshot.plan
+        .filter((item) => item.status !== 'completed')
+        .map((item) => item.step);
+      if (openSteps.length === 0 && snapshot.state !== 'interrupted') return null;
+      return { note: buildPlanReconcileNote({ openSteps, totalSteps: snapshot.plan.length }) };
+    },
+    consumeSealedPlanReconcileNote: (sessionId, turnId) =>
+      enqueueDurableWrite(`plan-seal-consume:${sessionId}:${turnId}`, () =>
+        clearSealedCodexPlanState(sessionId, turnId),
+      ),
     // 手机客户端说明的开关:被控端盖章的来源判据(本机 renderer / 桌面控制端 / 平台
     // 未知一律 false)。必须在这里现取,不能提前求值缓存——同一个装配好的事务会服务
     // 后续所有 send,来源是逐次调用的属性。
     isMobileClientInvoke: () => isMobileControllerInvoke(),
     applyPendingAgentSwitch: (sessionId) =>
       applyPendingAgentSwitchIfIdle(agentSwitchDeps, sessionId),
+    prepareUnhealthySession: (sessionId) =>
+      contextOverflowRolloverHolder?.prepareUnhealthySession(sessionId) ?? Promise.resolve(false),
     log,
   });
 
   const sendToAgentAccepted: typeof sendToAgentAcceptedUnlocked = async (...args) => {
     const [sessionId] = args;
     if (typeof sessionId !== 'string') return await sendToAgentAcceptedUnlocked(...args);
-    return await withSendToSessionLock(sessionId, () => sendToAgentAcceptedUnlocked(...args));
+    await assertReviewExternalInputAllowed(sessionId);
+    return await withSendToSessionLock(sessionId, async () => {
+      return sendToAgentAcceptedUnlocked(...args);
+    });
   };
+  contextOverflowRolloverHolder = createContextOverflowRollover({
+    getSessionRow: async (sessionId) => {
+      const [row] = await getDbClient()
+        .drizzle.select({
+          status: sessions.status,
+          agentKind: sessions.agentKind,
+          remoteHostId: sessions.remoteHostId,
+          clearedAt: sessions.clearedAt,
+          sdkSessionId: sessions.sdkSessionId,
+          contextTokens: sessions.contextTokens,
+          contextWindow: sessions.contextWindow,
+          model: sessions.model,
+          providerId: sessions.providerId,
+        })
+        .from(sessions)
+        .where(eq(sessions.id, sessionId))
+        .limit(1);
+      return row ?? null;
+    },
+    getAutoCompactThresholdPct: () => readCompactionPct(),
+    resolveVerifiedWindow: (agentKind, modelId, providerId) => {
+      const catalog = getActiveCatalog();
+      const makerAgentKind = dbToMakerAgentKind(agentKind);
+      return resolveVerifiedContextWindow(catalog, makerAgentKind, providerId, modelId);
+    },
+    listMessages: (sessionId) => listMessagesForAgentHandoff(sessionId, 400),
+    findLatestUser: findLatestUserMessageForRebuild,
+    findLatestRebuildMeta: findLatestContextRebuildMeta,
+    getLiveSession: (sessionId) => maker.getSession(sessionId),
+    closeSession: (sessionId) => maker.closeSession(sessionId),
+    drainPersistQueue,
+    commitRebuild: async (sessionId, handoff, meta) => {
+      const { updatedAt } = await commitContextRebuild(sessionId, handoff, meta);
+      const [sessionKindRow] = await getDbClient()
+        .drizzle.select({ agentKind: sessions.agentKind })
+        .from(sessions)
+        .where(eq(sessions.id, sessionId))
+        .limit(1);
+      const cardAgentKind =
+        sessionKindRow?.agentKind === 'codex'
+          ? 'codex'
+          : sessionKindRow?.agentKind === 'pi'
+            ? 'pi'
+            : 'cc';
+      broadcastSessionPatched(sessionId, {
+        sdkSessionId: null,
+        updatedAt: new Date(updatedAt).toISOString(),
+      });
+      await createDbMessage(sessionId, {
+        clientId: `context-rebuild-card:${createId()}`,
+        role: 'assistant',
+        content: '',
+        agentKind: cardAgentKind,
+        agentMeta: { contextRebuild: { reason: meta.reason, handoff } } as AgentMeta,
+      });
+    },
+    setPendingHandoff: (sessionId, handoff, expectedGeneration) =>
+      agentHandoffPending.set(sessionId, handoff, expectedGeneration),
+    readPendingHandoffGeneration: (sessionId) => agentHandoffPending.readGeneration(sessionId),
+    onRebuilt: (sessionId) => {
+      // overflow 终态已先走 coordinator onTurnEvent('error')，会留下 active-turn
+      // recovery 和错误横幅。重放绕开 coordinator，随后的 done 会被 recovery 吃掉。
+      agentInputCoordinatorHolder?.clearError(sessionId);
+    },
+    replayUserMessage: async (sessionId, content, agentFacingWireContent) => {
+      const [row] = await getDbClient()
+        .drizzle.select()
+        .from(sessions)
+        .where(eq(sessions.id, sessionId))
+        .limit(1);
+      if (!row?.workingDir) return { accepted: false };
+      const createOpts = buildCreateOptsWithStderr({
+        id: sessionId,
+        agentKind: dbToMakerAgentKind(row.agentKind),
+        workingDir: row.workingDir,
+        model: row.model ?? undefined,
+        providerId: row.providerId,
+        effort: (row.effort ?? undefined) as CreateOpts['effort'],
+        fastMode: !!row.fastMode,
+        permissionMode: (row.permissionMode ?? 'ask') as CreateOpts['permissionMode'],
+        planMode: !!row.planModeEnabled,
+        title: row.title ?? undefined,
+        remoteHostId: row.remoteHostId ?? undefined,
+      });
+      if (createOpts.extraDirs === undefined) {
+        try {
+          const extraDirs = await readSessionExtraDirsFromDb(sessionId);
+          if (extraDirs.length > 0) createOpts.extraDirs = extraDirs;
+        } catch (err) {
+          log.warn('overflow replay: read extra_dirs from DB failed (non-fatal)', {
+            sessionId,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      const result = await sendToAgentAcceptedUnlocked(
+        sessionId,
+        persistedUserContentToWireMessage(agentFacingWireContent ?? content),
+        createOpts,
+      );
+      return { accepted: result.accepted === true };
+    },
+    withSessionLock: withSendToSessionLock,
+    withCloseSuppressed: withRehydrateCloseSuppressed,
+    log,
+  });
   /**
    * Same-turn steer contract: resolved STEER means maker-core accepted the
    * inserted message into the active turn (Claude: streaming input push;
@@ -8653,11 +11339,34 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     sendOpts?: unknown,
   ): Promise<void> => {
     if (typeof sessionId !== 'string') throwIpcError('INVALID_PARAMS', 'sessionId required');
-    const sess = maker.getSession(sessionId);
-    if (!sess) {
-      log.warn('steer: session not running', { sessionId });
-      throwIpcError('NO_ACTIVE_TURN', `Session ${sessionId} is not running`);
-    }
+    await assertReviewExternalInputAllowed(sessionId);
+    const so = (sendOpts ?? {}) as {
+      messageUuid?: string;
+      userName?: string;
+      signal?: AbortSignal;
+      /** coordinator 从队列项透传的手机来源(main 构造,非 wire 输入)。 */
+      fromMobileClient?: boolean;
+      expectedClearBoundaryMs?: number | null;
+      expectedInputGeneration?: number;
+      expectedTurnSession?: object;
+      expectedTurnGeneration?: number;
+    };
+    const readCurrentSteerSession = () => {
+      const current = maker.getSession(sessionId);
+      if (!current) {
+        log.warn('steer: session not running', { sessionId });
+        throwIpcError('NO_ACTIVE_TURN', `Session ${sessionId} is not running`);
+      }
+      if (
+        (so.expectedTurnSession !== undefined && current !== so.expectedTurnSession) ||
+        (so.expectedTurnGeneration !== undefined &&
+          current.getTurnGeneration() !== so.expectedTurnGeneration)
+      ) {
+        throw new Error(`[STALE_TURN] Session ${sessionId} changed turns before steer delivery`);
+      }
+      return current;
+    };
+    let sess = readCurrentSteerSession();
     log.info('steer: invoked', {
       sessionId,
       agentKind: sess.agentKind,
@@ -8694,23 +11403,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       activeAfterNormalize: sess.isTurnRunning(),
       ...summarizeIpcUserMessage(normalized),
     });
+    sess = readCurrentSteerSession();
     if (!sess.isTurnRunning()) {
       throwIpcError('NO_ACTIVE_TURN', `Session ${sessionId} has no active turn`);
     }
     const meta = await maker.getSessionMeta(sessionId).catch(() => null);
-    const so = (sendOpts ?? {}) as {
-      messageUuid?: string;
-      userName?: string;
-      signal?: AbortSignal;
-      /** coordinator 从队列项透传的手机来源(main 构造,非 wire 输入)。 */
-      fromMobileClient?: boolean;
-      expectedClearBoundaryMs?: number | null;
-      expectedInputGeneration?: number;
-    };
+    sess = readCurrentSteerSession();
     // 手机说明同样只进 wire payload(steer 路径不落库用户消息,天然不污染原话)。
     // 两个来源都要认:IPC 直连 steer 时 async context 在;coordinator 投递时靠透传。
     const steerNote =
-      isMobileControllerInvoke() || so.fromMobileClient === true
+      (isMobileControllerInvoke() || so.fromMobileClient === true) &&
+      shouldPrependMobileClientPromptNote(normalized, sess.agentKind)
         ? buildMobileClientPromptNote()
         : null;
     const steerPayload = steerNote
@@ -8724,6 +11427,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         assertCurrentInputClearBoundary(sessionId, precondition.expected);
       }
       assertCurrentInputGeneration(sessionId, readExpectedInputGeneration(sendOpts));
+      sess = readCurrentSteerSession();
       await sess.steer(steerPayload as never, {
         logTitle: meta?.title,
         messageUuid: so.messageUuid,
@@ -8875,22 +11579,32 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
    * whether work is still running; the desktop tracker is only an event-driven
    * view and can remain stale across owner-boundary teardown.
    */
-  const getStableSessionForTurnBoundary = (sessionId: string): WiredSession | null => {
+  type StableSessionLookup =
+    | { status: 'found'; session: WiredSession }
+    | { status: 'missing' }
+    | { status: 'unavailable' };
+
+  const lookupStableSessionForTurnBoundary = (sessionId: string): StableSessionLookup => {
     const wired = wiredSessionsById.get(sessionId)?.session;
-    if (wired) return wired;
+    if (wired) return { status: 'found', session: wired };
     try {
-      return maker.getSession(sessionId) ?? null;
+      const sess = maker.getSession(sessionId);
+      return sess ? { status: 'found', session: sess } : { status: 'missing' };
     } catch (err) {
-      // Dynamic Maker intentionally fails closed while an account owner is
-      // being replaced. A missing stable wiring snapshot means we cannot
-      // authoritatively reconcile this session yet; callers must retain their
-      // boundary and wait for the normal close/settle path.
+      // Dynamic Maker throws PRECONDITION_FAILED while an account owner is
+      // being replaced. Callers that need fail-closed must not treat this as
+      // "session process gone".
       log.warn('session lookup unavailable during turn-boundary reconciliation', {
         sessionId,
         error: err instanceof Error ? err.message : String(err),
       });
-      return null;
+      return { status: 'unavailable' };
     }
+  };
+
+  const getStableSessionForTurnBoundary = (sessionId: string): WiredSession | null => {
+    const lookup = lookupStableSessionForTurnBoundary(sessionId);
+    return lookup.status === 'found' ? lookup.session : null;
   };
 
   /**
@@ -8915,9 +11629,57 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return true;
   };
 
+  const sealLostTerminalPersistState = (sessionId: string): void => {
+    // Same persist boundary as a lost-terminal live-idle reconcile. The next
+    // turn on this sessionId must not append to a half-open streaming block.
+    sealAssistantBlockForLateFinal(sessionId, null);
+    const abortedAssistantPersistId = consumeLastAssistantPersistId(sessionId);
+    const abortedBoundaryAssistantPersistId = consumeLastTopLevelAssistantPersistId(sessionId);
+    flushOrphanToolResults(sessionId, null);
+    if (abortedAssistantPersistId) {
+      pendingFailedTurnAssistantPersistId.set(sessionId, abortedAssistantPersistId);
+    }
+    if (abortedBoundaryAssistantPersistId) {
+      void markAssistantTurnFailed(sessionId, abortedBoundaryAssistantPersistId);
+    }
+    clearCodexPlanRowsForSession(sessionId);
+    resetTurnPersistState(sessionId);
+  };
+
   const reconcileSessionTurnIdle = (sessionId: string, source: string): boolean => {
-    const sess = getStableSessionForTurnBoundary(sessionId);
-    if (!sess) return false;
+    const lookup = lookupStableSessionForTurnBoundary(sessionId);
+    if (lookup.status === 'unavailable') return false;
+    if (lookup.status === 'missing') {
+      const trackerStale =
+        sessionTurnActivityTracker.isSessionInTurn(sessionId) ||
+        sessionTurnActivityTracker.isSessionTurnDispatchBoundaryBusy(sessionId);
+      sealLostTerminalPersistState(sessionId);
+      if (trackerStale) {
+        log.warn('reconciling stale session turn boundary after session unload', {
+          sessionId,
+          source,
+        });
+      }
+      sessionTurnActivityTracker.deleteSession(sessionId);
+      void sessionTurnLeaseTracker.markTurnEnded(sessionId);
+      notifyGoalIdleAfterTurnSettled(sessionId);
+      try {
+        markTurnEndedAfterPersistDrain(sessionId);
+        noteClaudeSessionTurnState(sessionId, false);
+        settlePendingCredentialSwitch(sessionId, `reconcile:${source}`);
+        deferredCodexRestartHolder?.onSessionSettled();
+        agentInputCoordinatorHolder?.onExternalTurnSettled(sessionId);
+        refreshRemoteCodexMcpOnTurnSettledHolder?.(sessionId);
+      } catch (err) {
+        log.warn('stale session turn side-effect cleanup failed', {
+          sessionId,
+          source,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return true;
+    }
+    const sess = lookup.session;
     let liveSessionIdle = false;
     try {
       liveSessionIdle = !sess.isTurnRunning();
@@ -8931,20 +11693,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     if (!liveSessionIdle) return false;
     // The vendor is authoritative that this turn is over, but no terminal event
-    // reached the host. Flush and fail-seal the latest top-level Assistant before
-    // releasing the boundary; otherwise its last progress line is later treated
-    // as a legacy final answer by title regeneration. Preserve the last Assistant
-    // id for a rare late paired done so usage attribution still has a target.
-    flushAssistantBlock(sessionId, null);
-    const abortedAssistantPersistId = consumeLastAssistantPersistId(sessionId);
-    const abortedBoundaryAssistantPersistId = consumeLastTopLevelAssistantPersistId(sessionId);
-    flushOrphanToolResults(sessionId, null);
-    if (abortedAssistantPersistId) {
-      pendingFailedTurnAssistantPersistId.set(sessionId, abortedAssistantPersistId);
-    }
-    if (abortedBoundaryAssistantPersistId) {
-      void markAssistantTurnFailed(sessionId, abortedBoundaryAssistantPersistId);
-    }
+    // reached the host. Seal persist state before releasing the boundary;
+    // otherwise its last progress line is later treated as a legacy final
+    // answer by title regeneration.
+    sealLostTerminalPersistState(sessionId);
     const trackerStale =
       sessionTurnActivityTracker.isSessionInTurn(sessionId) ||
       sessionTurnActivityTracker.isSessionTurnDispatchBoundaryBusy(sessionId);
@@ -8967,6 +11719,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       });
     }
     sessionTurnActivityTracker.setSessionInTurn(sessionId, false);
+    void sessionTurnLeaseTracker.markTurnEnded(sessionId);
     // 与正常 product-terminal 事件共享同一条 Goal idle 唤醒语义。direct abort
     // 与 coordinator 的 authoritative-idle 都从本 reconciliation 成功出口经过；
     // 迟到终态或重复尾巴由 Goal controller 的 deferred intent 防抖幂等收敛。
@@ -8975,7 +11728,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // The marker write is best-effort and ordered behind pending message
       // persistence. It may retry/settle after an owner boundary is available.
       markTurnEndedAfterPersistDrain(sessionId);
-      resetTurnPersistState(sessionId);
       noteClaudeSessionTurnState(sessionId, false);
       settlePendingCredentialSwitch(sessionId, `reconcile:${source}`);
       deferredCodexRestartHolder?.onSessionSettled();
@@ -9267,13 +12019,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       options: { surfaceError: boolean; owner: SuppressedTurnErrorOwner },
     ) => {
       if (options.surfaceError) {
-        autoResumeBookkeeping.surfaceSuppressedError(sessionId, {
-          deferredOwner: options.owner,
-        });
+        autoResumeBookkeeping.surfaceSuppressedError(sessionId, { deferredOwner: options.owner });
       } else {
-        autoResumeBookkeeping.flushSuppressedError(sessionId, {
-          deferredOwner: options.owner,
-        });
+        autoResumeBookkeeping.flushSuppressedError(sessionId, { deferredOwner: options.owner });
       }
     },
     onResumableTurnError: (
@@ -9321,6 +12069,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           : null;
       if (schedulerRunId) {
         beginSchedulerAutoResume(sessionId, schedulerRunId, decision.attemptToken);
+      }
+      if (signals.reason === 'codex_reconnect_stalled') {
+        const runtimeSession = getStableSessionForTurnBoundary(sessionId);
+        if (runtimeSession) {
+          pendingCodexReconnectStalledRebuilds.set(runtimeSession, decision.attemptToken);
+        }
       }
       // 排期的撤旧、补落与令牌都在 AutoResumeBookkeeping.schedule 里(带单测),这里只给
       // 退避时长和到点要干的事。
@@ -9412,8 +12166,24 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       const sess = getStableSessionForTurnBoundary(sessionId);
       return isSessionTurnDispatchBoundaryBusy(sessionTurnActivityTracker, sessionId, sess);
     },
+    isLiveTurnRunning: (sessionId) => {
+      const lookup = lookupStableSessionForTurnBoundary(sessionId);
+      if (lookup.status === 'unavailable') return undefined;
+      if (lookup.status === 'missing') return false;
+      try {
+        return lookup.session.isTurnRunning();
+      } catch {
+        return undefined;
+      }
+    },
+    isLiveSessionPresent: (sessionId) => {
+      const lookup = lookupStableSessionForTurnBoundary(sessionId);
+      if (lookup.status === 'unavailable') return undefined;
+      return lookup.status === 'found';
+    },
     getTurnGeneration: (sessionId) =>
       getStableSessionForTurnBoundary(sessionId)?.getTurnGeneration() ?? null,
+    getTurnSessionIdentity: (sessionId) => getStableSessionForTurnBoundary(sessionId) ?? null,
     reconcileTurnIdle: (sessionId) => {
       // steer 拿到 maker-core 权威 NO_ACTIVE_TURN、或 abort 已让 vendor 停止
       // 但终态事件丢失时，都走同一条收口路径。
@@ -9442,6 +12212,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       await drainPersistQueue();
       return hasAssistantProgressAfterMessage(sessionId, userClientId);
     },
+    getRecoveryContextSnapshot: async (sessionId, userClientId) => {
+      await drainPersistQueue();
+      return getRecoveryContextSnapshot(sessionId, userClientId);
+    },
     // retry-supersede:零产出重试的克隆行落库并派发成功后,软删被取代的旧 user 行
     // 与其后的 error 行(实现与守卫见 localDb/ipc/messages.supersedeRetriedUserTurn)。
     // 只发 messages:deleted、不额外发 sessions:patched:软删既不改变会话列表的
@@ -9465,6 +12239,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // ownership record; the local materialization itself now belongs to the
       // durable transcript row.
       void queuedAttachmentOwnership.settleDurable(sessionId, item.clientId);
+    },
+    onUserMessageQueryable: (sessionId) => {
+      orcaUiAssignmentHistoryGate.notifyUserMessagePersisted(sessionId);
     },
     onUserMessagePersistenceFailed: (sessionId, item, opts) => {
       settleQueuedAttachmentPersistenceFailure(sessionId, item.clientId, opts.retainForRetry);
@@ -9539,6 +12316,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       failPendingSchedulerAutoResume(sessionId);
       publishUiSessionIntervention(sessionId);
     },
+    previewQueuedUserTurn: (sessionId, item) => {
+      notifyAgentIslandUserPrompt(
+        { id: sessionId, agentKind: item.createOpts?.agentKind, workDir: item.workingDir },
+        item.text || item.persistedContent,
+        { source: 'enqueue', clientId: item.clientId },
+      );
+    },
     onAutomaticEnqueue: (sessionId) => {
       // Orca 等自动输入会推进同一会话，必须撤销旧 retry owner，避免它消费这轮事件；
       // 但预算充值仍只发生在真人消息的持久化路径，自动输入不会重置 episode。
@@ -9547,6 +12331,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       publishUiSessionIntervention(sessionId);
     },
     onRejectedUserTurn: (sessionId, item) => {
+      rollbackAgentIslandUserPrompt(sessionId, item.clientId, 'rejected');
       // Auto-resume items have an exact-token cleanup boundary below. Keep
       // their attempt lease until that boundary can restore recovery and
       // finalize the suppressed error; releasing it here would make a later
@@ -9554,8 +12339,29 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (item.autoResume) return;
       autoResumeBookkeeping.surfaceSuppressedErrorForRetry(sessionId, item.clientId);
     },
+    persistTerminalSendError: (sessionId, message) => {
+      onTurnErrorEvent(
+        sessionId,
+        {
+          message,
+          ...(isPiPromptRpcTimeoutError({ message }) ? { reason: 'pi-prompt-timeout' } : {}),
+        },
+        null,
+      );
+    },
+    onPersistedSendRejected: (sessionId, message) => {
+      if (!isPiPromptRpcTimeoutError({ message })) return;
+      // 第一次 timeout：只关掉卡住的原生进程，不自动 replay。用户重试时再 hidden rebuild。
+      void maker.closeSession(sessionId).catch((error) => {
+        log.warn('failed to close unhealthy PI session after prompt timeout', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    },
     // 队列项未派发即被丢弃(stop/remove/clearSession) → 释放暂存的 accepted 副作用, 防回调表泄漏。
     onDiscardedQueuedMessage: (sessionId, item) => {
+      rollbackAgentIslandUserPrompt(sessionId, item.clientId, 'discarded');
       discardQueuedAttachmentOwnership(sessionId, item.clientId);
       orcaInterAgentDispatcher.discardQueuedOrcaInterAgentAcceptedCallback(item.clientId);
       // Auto-resume cleanup must run before generic claimed-retry release:
@@ -9580,48 +12386,59 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         }
       }
     },
-    hasPendingCredentialSwitch: (sessionId) => {
-      if (pendingCredentialSwitchHolder?.has(sessionId) === true) return true;
-      // 延迟 Codex 重启 pending 期间同样挡住本地 Codex live 会话的排队派发 ——
-      // 否则排队消息在旧 host 上接续开新 turn,重启被无限顺延(review P1
-      // 2026-07-23)。未 spawn / 已关闭的会话不挡:fresh spawn 本来就读新设置。
-      // maker 是 dynamic facade,owner 边界窗口会抛 → 按不挡处理(边界会清 pending)。
-      if (deferredCodexRestartHolder?.isPending() !== true) return false;
-      try {
-        const session = maker.listActiveSessions().find((s) => s.id === sessionId);
-        return !!session && session.agentKind === 'codex' && !session.remoteHostId;
-      } catch {
-        return false;
-      }
-    },
+    // 谓词逻辑在 deferredRestartQueueWiring.ts(与 #2506 跨模块回归共用同一
+    // 工厂,harness 不再照抄接线形状);holder 晚于 coordinator 构造,经闭包
+    // 晚绑定。
+    hasPendingCredentialSwitch: createDeferredRestartQueueGate({
+      hasPendingCredentialSwitchEntry: (sessionId) =>
+        pendingCredentialSwitchHolder?.has(sessionId) === true,
+      isDeferredRestartPending: () => deferredCodexRestartHolder?.isPending() === true,
+      listActiveSessions: () => maker.listActiveSessions(),
+    }),
     emitProjection: (projection) => {
       broadcastToAllWindows(MAKER_PUSH.INPUT_PROJECTION, projection);
     },
     // 意识拦截钩(订阅槽①):派发/落库前问已装钩子意识;fail-open 由
     // screenGhostUserMessage 内部收敛,快路径(无钩子意识)零开销。
-    screenUserMessage: (sessionId, agentFacingText) =>
-      screenGhostUserMessage(sessionId, agentFacingText),
-    onUserMessageBlocked: (sessionId, item, verdict) =>
+    screenUserMessage: (sessionId, agentFacingText, item) => {
+      const session = getStableSessionForTurnBoundary(sessionId);
+      const model = resolveGhostUserHookModel(
+        session?.isTurnRunning() === true,
+        session?.model,
+        item.createOpts.model,
+      );
+      return withGhostUserHookModel(model, () =>
+        screenGhostUserMessage(sessionId, agentFacingText),
+      );
+    },
+    onUserMessageBlocked: (sessionId, item, verdict) => {
+      rollbackAgentIslandUserPrompt(sessionId, item.clientId, 'blocked');
       broadcastGhostMessageBlocked({
         sessionId,
         clientId: item.clientId,
         text: item.text,
         ...verdict,
-      }),
+      });
+    },
     onUserMessageRewritten: (sessionId, item, info) =>
       broadcastGhostMessageRewritten({ sessionId, clientId: item.clientId, ...info }),
-    beforeDispatchUserTurn: (sessionId, item) => {
+    beforeDispatchUserTurn: async (sessionId, item) => {
       autoResumeBookkeeping.markReplacementDispatching(sessionId, item.clientId);
+      const liveSession = maker.getSession(sessionId);
+      if (liveSession) {
+        await beginTurnChangeSetAtDispatch(liveSession, item.clientId);
+      }
       // hook 续跑回流的**权威归属点**: 在 vendor dispatch 之前(本回调被 await), 所以
       // 观察器挂上就不丢正文开头, 而 live session 此刻必然已就绪。clientId 对得上的
       // 才是目标续跑轮 —— 绕过 coordinator 的 turn(silent-stop 自动续跑)不走这里,
       // 结构上不可能被误认。详见 uiContinuationSignal 的模块注释。
       publishUiTurnDispatching(sessionId, item.clientId);
-      return gitSnapshotCoordinator?.onTurnStart(sessionId);
+      await gitSnapshotCoordinator?.onTurnStart(sessionId);
     },
     onUndispatchedUserTurn: (sessionId, item, disposition) => {
       // 目标轮落库了却没能 dispatch(取消 / 失败): 记账该立刻还回去, 而不是等超时。
       publishUiTurnUndispatched(sessionId, item.clientId);
+      clearPendingTurnChangeSets(sessionId);
       gitSnapshotCoordinator?.onTurnAbort(sessionId);
       autoResumeBookkeeping.rollbackReplacementPreview(sessionId, item.clientId);
       const autoResume = item.autoResume === true;
@@ -9641,8 +12458,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       getAgentIslandService()?.notifyQueueEmptied(sessionId);
     },
     // 排队输入崩溃恢复(issue #761):快照写入 fire-and-forget(模块内 per-session
-    // 写链保序 + 失败落日志),读回由 IPC 入口的 ensureQueueRestored 懒触发。
+    // 写链保序 + 失败落日志),读回由 ensureQueueRestored 懒触发。恢复前先严格
+    // 水合 durable /clear 边界，所有入口共用，避免仅 projection 路径安全。
     persistQueueSnapshot: (sessionId, items) => saveAgentInputQueueSnapshot(sessionId, items),
+    loadClearBoundary: async (sessionId) =>
+      (await getSessionRowSnapshotStrict(sessionId))?.clearedAt,
     loadQueueSnapshot: (sessionId) => loadAgentInputQueueSnapshot(sessionId),
     getPersistedClientIds: getPersistedInputClientIds,
   });
@@ -9766,12 +12586,38 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (route.model) patch.model = route.model;
       if (route.effort) patch.effort = route.effort;
       if (route.fastMode !== undefined) patch.fastMode = route.fastMode;
+      const agentKind = getSessionDbAgentKind(sessionId);
+      if (route.model && agentKind) {
+        const verifiedWindow = lookupVerifiedContextWindow(
+          (resolvedAgentKind, modelId, pid) =>
+            resolveVerifiedContextWindow(
+              getActiveCatalog(),
+              dbToMakerAgentKind(resolvedAgentKind || agentKind),
+              pid,
+              modelId,
+            ),
+          route.model,
+          route.providerId ?? null,
+          dbToMakerAgentKind(agentKind),
+        );
+        if (verifiedWindow) patch.contextWindow = verifiedWindow;
+      }
       await getDbClient().drizzle.update(sessions).set(patch).where(eq(sessions.id, sessionId));
       broadcastSessionPatched(sessionId, patch);
     },
     logger: log,
   });
   pendingCredentialSwitchHolder = pendingCredentialSwitchService;
+  setPendingCredentialSwitchReader((sessionId) => {
+    const pending = pendingCredentialSwitchService.get(sessionId);
+    return pending
+      ? {
+          model: pending.model,
+          providerId: pending.providerId,
+          ...(pending.previousRoute?.model ? { previousModel: pending.previousRoute.model } : {}),
+        }
+      : undefined;
+  });
 
   // Memory 设置变更撞上 Codex busy 时的延迟软重启登记(见 deferredCodexRestart.ts)。
   // 与 pendingCredentialSwitchService 共用 turn 结束 / 会话关闭边界接线;pending
@@ -9793,11 +12639,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         .listActiveSessions()
         .filter((session) => session.agentKind === 'codex' && !session.remoteHostId)
         .map((session) => session.id),
-    onApplied: (sessionIds) => {
-      for (const sessionId of sessionIds) {
-        inputCoordinator.wakeSession(sessionId, 'deferred-codex-restart-applied');
-      }
-    },
+    onApplied: createDeferredRestartAppliedWake({
+      wakeSession: (sessionId, reason) => inputCoordinator.wakeSession(sessionId, reason),
+    }),
     logger: log,
   });
   deferredCodexRestartHolder = deferredCodexRestartService;
@@ -10006,10 +12850,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return normalized;
   };
 
-  ipcMain.handle(DL_SESSION_REFERENCE_CAPABILITY_CHANNEL, () => ({
-    supported: true,
-    version: 1,
-  }));
+  ipcMain.handle(DL_SESSION_REFERENCE_CAPABILITY_CHANNEL, () => ({ supported: true, version: 1 }));
 
   /**
    * device-link 远控输入的自动起名(入队 / 插话共用)。
@@ -10243,6 +13084,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     remote: boolean,
     opts: unknown,
   ): Promise<MainOwnedInputBoundaryStamp> => {
+    await assertReviewExternalInputAllowed(sid);
     // Capture the coordinator generation before the first database await.  A
     // concurrent /clear replaces the in-memory state; after that await we must
     // reject the old request rather than treating the new generation as its
@@ -10299,6 +13141,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     MAKER_INVOKE.INPUT_ENQUEUE,
     async (_e, sessionId: unknown, item: unknown, opts?: unknown) => {
       const sid = requireSessionId(sessionId);
+      await assertReviewExternalInputAllowed(sid);
       const deviceLinkInvoke = isDeviceLinkInvoke();
       const parsed = requireQueuedMessage(item);
       assertRemoteInputClearNotInFlight(sid, deviceLinkInvoke);
@@ -10448,6 +13291,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     MAKER_INVOKE.INPUT_STEER,
     async (_e, sessionId: unknown, item: unknown, opts?: unknown) => {
       const sid = requireSessionId(sessionId);
+      await assertReviewExternalInputAllowed(sid);
       const deviceLinkInvoke = isDeviceLinkInvoke();
       const steerOpts =
         opts && typeof opts === 'object'
@@ -10592,11 +13436,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         if (isKnownSteerDuplicate()) {
           await materialized.cleanupBeforeAcceptance?.();
           if (attachmentOwnerId) {
-            await discardSpecificQueuedAttachmentOwnership(
-              sid,
-              parsed.clientId,
-              attachmentOwnerId,
-            );
+            await discardSpecificQueuedAttachmentOwnership(sid, parsed.clientId, attachmentOwnerId);
           }
           return true;
         }
@@ -10663,6 +13503,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   ipcMain.handle(MAKER_INVOKE.INPUT_STOP, async (_e, sessionId: unknown, opts?: unknown) => {
     const sid = requireSessionId(sessionId);
     await assertRemoteInputControlBoundary(sid, isDeviceLinkInvoke(), opts);
+    // Main 是本机窗口与 Device Link 控制端的 Stop 汇合点；先记账再触发 abort，
+    // 任何 renderer 后续请求推荐都会从同一 ledger fail-closed。
+    notePromptPredictionSessionStopped(sid);
     // 这三类续跑撤销都是同步操作，必须早于 goal/DB await；
     // 否则退避 timer 能在用户已点 Stop 后抢先发出下一轮。
     resetAutomaticRecoveryForExplicitStop(sid);
@@ -10919,6 +13762,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         throwIpcError('INVALID_PARAMS', 'clearedAt must be an ISO timestamp');
       }
       const sid = requireSessionId(sessionId);
+      await assertReviewExternalInputAllowed(sid);
       // Fence remote content-bearing controls for the whole clear lifecycle,
       // including the DB await below.  Local clear is gated too so a remote
       // controller cannot enter the same sealing window through another peer.
@@ -11080,23 +13924,33 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           pluginSetupResponseTarget = event.sender;
         }
       }
-      if (!resolvePendingInteraction(requestId, decision as InteractionDecision)) {
-        if (isPermissionInteractionDecision(decision)) {
-          handleAgentIslandInteractionDismissedByRequestId(requestId);
-        }
-        // agent interaction 没命中 → 可能是 issue 确认卡(kind='issue_confirm',
-        // pending 在 issueConfirmBridge 自己的 map 里)或批量改名确认卡。
-        // 三边都 miss 才告警。
-        if (issueConfirmBridge.resolve(requestId, decision)) return;
-        if (renameSessionsConfirmBridge.resolve(requestId, decision)) return;
-        if (ghostGrantConfirmBridge.resolve(requestId, decision)) return;
-        if (ghostSetupInteractionBridge.resolve(requestId, decision, pluginSetupResponseTarget)) {
-          return;
-        }
-        log.warn('resolve-interaction: no pending resolver (likely already dismissed/timed out)', {
-          requestId,
-        });
+      if (resolvePendingInteraction(requestId, decision as InteractionDecision)) {
+        return { accepted: true };
       }
+      if (isPermissionInteractionDecision(decision)) {
+        handleAgentIslandInteractionDismissedByRequestId(requestId);
+      }
+      // agent interaction 没命中 → 可能是 issue 确认卡(kind='issue_confirm',
+      // pending 在 issueConfirmBridge 自己的 map 里)或批量改名确认卡。
+      // 三边都 miss 才告警。
+      if (issueConfirmBridge.resolve(requestId, decision)) return { accepted: true };
+      if (renameSessionsConfirmBridge.resolve(requestId, decision)) return { accepted: true };
+      if (
+        orcaWorkerPermissionConfirmBridge.resolveFromIpc(requestId, decision, {
+          isDeviceLink: isDeviceLinkInvoke(),
+          assertTrustedSender: () => assertTrustedAppRendererEvent(event),
+        })
+      ) {
+        return { accepted: true };
+      }
+      if (ghostGrantConfirmBridge.resolve(requestId, decision)) return { accepted: true };
+      if (ghostSetupInteractionBridge.resolve(requestId, decision, pluginSetupResponseTarget)) {
+        return { accepted: true };
+      }
+      log.warn('resolve-interaction: no pending resolver (likely already dismissed/timed out)', {
+        requestId,
+      });
+      return { accepted: false };
     },
   );
 
@@ -11175,6 +14029,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 后到的 SET_MODEL 才能写 route。否则切换 DB await 恢复后会用旧 provider
       // 覆盖用户刚选的新 route，形成 DB 与进程内路由分叉。
       return withSendToSessionLock(sessionId, async () => {
+        await assertReviewSettingsUnlocked(sessionId);
         // 同引擎重选是 switch ack 后的第二段写入。另一控制端若在两段之间更新（含
         // set→clear ABA），修订号已变化：旧 SET_MODEL 必须在任何 route/DB 副作用前让位。
         if (
@@ -11191,16 +14046,56 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         // 拦「切过去」;隐式来源的原生默认落点被停用而有启用替代拷贝时,以显式来源
         // 落地(与 bootstrapSession 同语义)。agentKind 读不到(会话行缺失等)时不拦。
         // DB 存的是 'cc' | 'codex'(messages.agent_kind 口径),目录侧是 AgentKind。
-        let effectiveProviderId = providerId;
+        const requestedProviderId = normalizeSessionProviderId(
+          typeof providerId === 'string' || providerId === null ? providerId : undefined,
+        );
+        let persistedProviderId: string | null = null;
+        let persistedProviderKnown = true;
+        if (requestedProviderId === undefined && !hasSessionProvider(sessionId)) {
+          try {
+            const db = getDbClient().drizzle;
+            const [row] = await db
+              .select({ providerId: sessions.providerId })
+              .from(sessions)
+              .where(eq(sessions.id, sessionId))
+              .limit(1);
+            persistedProviderId = row?.providerId?.trim() || null;
+            hydrateSessionProvider(sessionId, persistedProviderId);
+          } catch (err) {
+            persistedProviderKnown = false;
+            log.debug('set-model persisted provider lookup failed (non-fatal)', {
+              sessionId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+        const currentProviderId = resolveCurrentSetModelProviderId(
+          hasSessionProvider(sessionId),
+          getSessionProvider(sessionId),
+          persistedProviderId,
+        );
+        const guardProviderId = resolveSetModelGuardProviderId(
+          requestedProviderId,
+          currentProviderId,
+        );
+        let effectiveProviderId = requestedProviderId;
         {
           const dbAgentKind = getSessionDbAgentKind(sessionId);
           if (dbAgentKind) {
-            const reroute = await assertModelRouteUsable(
-              dbToMakerAgentKind(dbAgentKind),
-              model,
-              typeof providerId === 'string' ? providerId : null,
+            const reroute = persistedProviderKnown
+              ? await assertModelRouteUsable(
+                  dbToMakerAgentKind(dbAgentKind),
+                  model,
+                  guardProviderId,
+                )
+              : undefined;
+            effectiveProviderId = resolveExclusiveSetModelReroute(
+              requestedProviderId,
+              currentProviderId,
+              reroute,
+              persistedProviderKnown,
+              getActiveCatalog().providers,
             );
-            if (reroute && typeof providerId !== 'string') effectiveProviderId = reroute;
           }
         }
         try {
@@ -11280,6 +14175,35 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               markRemoteSettingPersistedInsideHandler(response);
             }
           }
+          if (!response.deferred) {
+            const currentAgentKind =
+              maker.getSession(sessionId)?.agentKind ??
+              dbToMakerAgentKind(getSessionDbAgentKind(sessionId));
+            const verifiedWindow = lookupVerifiedContextWindow(
+              (agentKind, modelId, pid) =>
+                resolveVerifiedContextWindow(
+                  getActiveCatalog(),
+                  dbToMakerAgentKind(agentKind),
+                  pid,
+                  modelId,
+                ),
+              model,
+              typeof effectiveProviderId === 'string' ? effectiveProviderId : null,
+              currentAgentKind,
+            );
+            if (verifiedWindow) {
+              const [usage] = await getDbClient()
+                .drizzle.select({ contextTokens: sessions.contextTokens })
+                .from(sessions)
+                .where(eq(sessions.id, sessionId))
+                .limit(1);
+              await recordSessionContextSnapshot(
+                sessionId,
+                usage?.contextTokens ?? 0,
+                verifiedWindow,
+              );
+            }
+          }
           return response;
         } catch (err) {
           if (err instanceof CredentialModeSwitchBusyError) {
@@ -11293,10 +14217,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
   );
 
-  ipcMain.handle(MAKER_INVOKE.SET_EFFORT, async (_e, sessionId: unknown, effort: unknown) => {
+  ipcMain.handle(MAKER_INVOKE.SET_EFFORT, async (event, sessionId: unknown, effort: unknown) => {
+    // 轮 24-I3 HIGH:会话变更型 IPC 统一 sender 校验(对齐 SET_PERMISSION_MODE)——
+    // 任意 WebView/受污染页面不得修改活会话偏好。device-link 远程控制端已授权。
+    if (!isDeviceLinkInvoke()) {
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
+    }
     if (typeof sessionId !== 'string' || typeof effort !== 'string') {
       throwIpcError('INVALID_PARAMS', 'sessionId + effort required');
     }
+    await assertReviewSettingsUnlocked(sessionId);
     // 记下会话 effort:responses-bridge 模型(chatgpt/ / xai/)的 effort 无法经请求体流到 bridge,
     // 由 compat-proxy 路由决策从这里读出、闭包进订阅直连 handler 的 prefs(不影响 session 是否在跑)。
     setSessionEffort(sessionId, effort);
@@ -11338,10 +14268,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   ipcMain.handle(
     MAKER_INVOKE.SET_PERMISSION_MODE,
-    async (_e, sessionId: unknown, mode: unknown) => {
+    async (event, sessionId: unknown, mode: unknown) => {
+      // 轮 40-w4-t6 CRITICAL:切到 bypassPermissions 是高风险授权 —— 本地 raw IPC
+      // 必须来自受信顶层 renderer(UI 的 Full access 确认在 ChatInput 侧), 否则
+      // 任意 WebView/Ghost 可绕过确认直切 Full access(Pi 热读权限文件立即放行)。
+      // device-link 远程控制端已由 remoteControlEnabled + revoke + allowlist 授权,
+      // 按既有契约放行。
+      if (!isDeviceLinkInvoke()) {
+        assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
+      }
       if (typeof sessionId !== 'string' || typeof mode !== 'string') {
         throwIpcError('INVALID_PARAMS', 'sessionId + mode required');
       }
+      await assertReviewSettingsUnlocked(sessionId);
       const sess = maker.getSession(sessionId);
       if (!sess) {
         log.debug('set-permission-mode: session not found, no-op', { sessionId });
@@ -11353,17 +14292,25 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
   );
 
-  ipcMain.handle(MAKER_INVOKE.SET_PLAN_MODE, async (_e, sessionId: unknown, enabled: unknown) => {
-    if (typeof sessionId !== 'string' || typeof enabled !== 'boolean') {
-      throwIpcError('INVALID_PARAMS', 'sessionId + enabled required');
-    }
-    const sess = maker.getSession(sessionId);
-    if (!sess) {
-      log.debug('set-plan-mode: session not found, no-op', { sessionId });
-      return;
-    }
-    await sess.setPlanMode(enabled);
-  });
+  ipcMain.handle(
+    MAKER_INVOKE.SET_PLAN_MODE,
+    async (event, sessionId: unknown, enabled: unknown) => {
+      // 轮 24-I3 HIGH:会话变更型 IPC 统一 sender 校验(对齐 SET_PERMISSION_MODE)。
+      if (!isDeviceLinkInvoke()) {
+        assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
+      }
+      if (typeof sessionId !== 'string' || typeof enabled !== 'boolean') {
+        throwIpcError('INVALID_PARAMS', 'sessionId + enabled required');
+      }
+      await assertReviewSettingsUnlocked(sessionId);
+      const sess = maker.getSession(sessionId);
+      if (!sess) {
+        log.debug('set-plan-mode: session not found, no-op', { sessionId });
+        return;
+      }
+      await sess.setPlanMode(enabled);
+    },
+  );
 
   ipcMain.handle(MAKER_INVOKE.EXPORT_SESSION_HTML, async (e, sessionId: unknown) => {
     // 会弹原生保存对话框并把会话内容落盘:必须来自受信顶层页面,不能让辅助窗口 /
@@ -11391,7 +14338,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       BrowserWindow.fromWebContents(e.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined;
     const defaultPath = path.join(app.getPath('documents'), 'cindy-session.html');
     const picked = await dialog.showSaveDialog(parent!, {
-      title: 'Export session to HTML',
+      title: t('ccAgent.sidebar.sessionMenu.exportHtml'),
       defaultPath,
       filters: [{ name: 'HTML', extensions: ['html'] }],
     });
@@ -11452,11 +14399,23 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         permissionMode: sessions.permissionMode,
         remoteHostId: sessions.remoteHostId,
         orcaRole: sessions.orcaRole,
+        status: sessions.status,
       })
       .from(sessions)
       .where(eq(sessions.id, sessionId))
       .limit(1);
     if (!row) return null;
+    // 轮 40-w3 MEDIUM:会话树是历史浏览入口, lazy resume 会**复活**会话
+    // (重建 desktop 内存 session + 远端 daemon session)。已归档/软删除的
+    // 会话必须保持死态 —— 只允许 active 会话被懒恢复, 否则「查看会话树」
+    // 这个只读动作会让产品持久态(归档/删除)与运行态(活跃进程)分叉。
+    if (row.status !== 'active') {
+      log.debug('session-tree: skip lazy resume for non-active session', {
+        sessionId,
+        status: row.status,
+      });
+      return null;
+    }
     const createOpts = buildCreateOptsWithStderr({
       id: sessionId,
       agentKind: 'pi',
@@ -11599,56 +14558,76 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
   );
 
-  ipcMain.handle(MAKER_INVOKE.SET_FAST_MODE, async (_e, sessionId: unknown, enabled: unknown) => {
-    if (typeof sessionId !== 'string' || typeof enabled !== 'boolean') {
-      throwIpcError('INVALID_PARAMS', 'sessionId + enabled required');
-    }
-    // 记下会话 Fast 态:responses-bridge 模型(chatgpt/ 前缀)的 fast 无法经请求体流到 bridge,
-    // 由 compat-proxy 路由决策从这里读出、闭包进订阅直连 handler 的 prefs(与 SET_EFFORT 的 effort 同机制)。
-    setSessionFastMode(sessionId, enabled);
-    const sess = maker.getSession(sessionId);
-    if (!sess) {
-      log.debug('set-fast-mode: session not found, no-op', { sessionId });
-      return;
-    }
-    if (sess.agentKind === 'pi') {
-      // Pi 的 ChatGPT 请求不从 pi 请求体携带 Fast，而是由上面的 session store
-      // 在 compat-proxy 决策点闭包进 responses bridge prefs。到这里已经即时生效，
-      // 无需向 pi RPC 再发一份不存在的 set_fast_mode 控制命令。
-      log.debug('set-fast-mode: pi responses bridge state updated', { sessionId, enabled });
-      return;
-    }
-    if (sess.agentKind !== 'codex') {
-      log.debug('set-fast-mode: agent does not implement fast mode, no-op', {
-        sessionId,
-        agentKind: sess.agentKind,
-      });
-      return;
-    }
-    // 同 set-effort:pending 凭证切换期间不触碰仍在跑的旧 turn,持久化走各自 DB 路径。
-    if (pendingCredentialSwitchHolder?.has(sessionId)) {
-      log.debug('set-fast-mode: skipped live push (pending credential switch)', { sessionId });
-      return;
-    }
-    await sess.setFastMode(enabled);
-  });
+  ipcMain.handle(
+    MAKER_INVOKE.SET_FAST_MODE,
+    async (event, sessionId: unknown, enabled: unknown) => {
+      // 轮 24-I3 HIGH:会话变更型 IPC 统一 sender 校验(对齐 SET_PERMISSION_MODE)。
+      if (!isDeviceLinkInvoke()) {
+        assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
+      }
+      if (typeof sessionId !== 'string' || typeof enabled !== 'boolean') {
+        throwIpcError('INVALID_PARAMS', 'sessionId + enabled required');
+      }
+      await assertReviewSettingsUnlocked(sessionId);
+      // 记下会话 Fast 态:responses-bridge 模型(chatgpt/ 前缀)的 fast 无法经请求体流到 bridge,
+      // 由 compat-proxy 路由决策从这里读出、闭包进订阅直连 handler 的 prefs(与 SET_EFFORT 的 effort 同机制)。
+      setSessionFastMode(sessionId, enabled);
+      const sess = maker.getSession(sessionId);
+      if (!sess) {
+        log.debug('set-fast-mode: session not found, no-op', { sessionId });
+        return;
+      }
+      if (sess.agentKind === 'pi') {
+        // Pi 的 ChatGPT 请求不从 pi 请求体携带 Fast，而是由上面的 session store
+        // 在 compat-proxy 决策点闭包进 responses bridge prefs。到这里已经即时生效，
+        // 无需向 pi RPC 再发一份不存在的 set_fast_mode 控制命令。
+        log.debug('set-fast-mode: pi responses bridge state updated', { sessionId, enabled });
+        return;
+      }
+      if (sess.agentKind !== 'codex') {
+        log.debug('set-fast-mode: agent does not implement fast mode, no-op', {
+          sessionId,
+          agentKind: sess.agentKind,
+        });
+        return;
+      }
+      // 同 set-effort:pending 凭证切换期间不触碰仍在跑的旧 turn,持久化走各自 DB 路径。
+      if (pendingCredentialSwitchHolder?.has(sessionId)) {
+        log.debug('set-fast-mode: skipped live push (pending credential switch)', { sessionId });
+        return;
+      }
+      await sess.setFastMode(enabled);
+    },
+  );
 
-  // renderer → main 单向镜像「模型显示/隐藏」override(整张快照,fire-and-forget,不落盘)。
-  // main 缓存供 IM /model 与 device-link provider:list 复用同一套可见性过滤。值实变时
-  // 复用 PROVIDER_CHANGED 目录失效事件，让已连接控制端驱逐缓存并重拉 override 快照。
-  // 容错存储(非对象 ⇒ 清空),无错误路径,故不需要 throwIpcError。
-  ipcMain.handle(MAKER_INVOKE.MODEL_VISIBILITY_SYNC, async (_e, map: unknown) => {
-    syncModelVisibilityMirror(map, () => {
-      broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
-    });
-  });
+  ipcMain.handle(
+    MAKER_INVOKE.SET_THINKING_ENABLED,
+    async (event, sessionId: unknown, enabled: unknown) => {
+      if (!isDeviceLinkInvoke()) {
+        assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
+      }
+      if (typeof sessionId !== 'string' || typeof enabled !== 'boolean') {
+        throwIpcError('INVALID_PARAMS', 'sessionId + enabled required');
+      }
+      await assertReviewSettingsUnlocked(sessionId);
+      const sess = maker.getSession(sessionId);
+      if (!sess) return;
+      await sess.setThinkingEnabled(enabled);
+    },
+  );
 
   // 附加只读引用目录的运行时 closure 推送。DB 持久化由 renderer 同步调
   // local-db:sessions:update 完成 (跟 SET_MODEL / sessionService.update 同模式)。
   // session 不在 / capability 不支持都 no-op, 不抛错 — 跟 setModel 容错语义一致。
-  ipcMain.handle(MAKER_INVOKE.SET_EXTRA_DIRS, async (_e, sessionId: unknown, dirs: unknown) => {
+  ipcMain.handle(MAKER_INVOKE.SET_EXTRA_DIRS, async (event, sessionId: unknown, dirs: unknown) => {
+    // 轮 24-I3 HIGH:SET_EXTRA_DIRS 会扩展 agent 的文件可见面(任意已存在绝对目录
+    // 加入额外可读范围)—— 必须 sender 校验, 否则受污染页面可扩大文件访问。
+    if (!isDeviceLinkInvoke()) {
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
+    }
     if (typeof sessionId !== 'string') throwIpcError('INVALID_PARAMS', 'sessionId required');
     if (!Array.isArray(dirs)) throwIpcError('INVALID_PARAMS', 'dirs must be string[]');
+    await assertReviewSettingsUnlocked(sessionId);
     const sess = maker.getSession(sessionId);
     if (!sess) {
       log.debug('set-extra-dirs: session not found, no-op', { sessionId });
@@ -11911,7 +14890,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return refreshCodexMcpEnvironment({
       restartCodex: restartCodexAfterAuthModeChange,
       shutdownCodexEnvironment,
-      onDeferred: () => deferredCodexRestartHolder?.schedule('Codex Browser capability routing changed'),
+      onDeferred: () =>
+        deferredCodexRestartHolder?.schedule('Codex Browser capability routing changed'),
       logger: log,
     });
   });
@@ -11930,17 +14910,27 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return refreshCodexMcpEnvironment({
       restartCodex: restartCodexAfterAuthModeChange,
       shutdownCodexEnvironment,
-      onDeferred: () => deferredCodexRestartHolder?.schedule('Codex Browser capability routing changed'),
+      onDeferred: () =>
+        deferredCodexRestartHolder?.schedule('Codex Browser capability routing changed'),
       logger: log,
     });
   });
 
-  registerProjectPluginPolicyHandlers(createElectronIpcHandlerRegistry(), {
-    getPluginRegistry,
-  });
+  registerProjectPluginPolicyHandlers(createElectronIpcHandlerRegistry(), { getPluginRegistry });
 
   // ── Android automation (Settings →「电脑使用」) ──────────────────────────
   registerAndroidAutomationHandlers(createElectronIpcHandlerRegistry());
+
+  // ── iOS Simulator pane / Agent discovery ────────────────────────────────
+  registerIOSSimulatorHandlers(createElectronIpcHandlerRegistry(), {
+    getPluginAccess: getIOSSimulatorPluginAccessDecision,
+    getSessionContext: async (sessionId) => {
+      const liveSession = maker.getSession(sessionId);
+      if (liveSession) return { workingDir: liveSession.workDir };
+      const snapshot = await getSessionRowSnapshotStrict(sessionId);
+      return snapshot ? { workingDir: snapshot.workingDir } : null;
+    },
+  });
 
   // ── Browser automation (Settings →「电脑使用」) ───────────────────────────
   // Probe local browser detection. Drives the detection status + download
@@ -12057,24 +15047,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   ipcMain.on(
     MAKER_SEND.COMPUTER_PERMISSION_APP_DRAG_START,
-    (
-      _event,
-      payload?: {
-        iconDataUrl?: unknown;
-      },
-    ) => {
+    (_event, payload?: { iconDataUrl?: unknown }) => {
       startComputerPermissionAppDrag(_event.sender, payload?.iconDataUrl);
     },
   );
 
   ipcMain.handle(
     MAKER_INVOKE.COMPUTER_PERMISSION_APP_DRAG_END,
-    async (
-      _event,
-      payload?: {
-        didCopy?: unknown;
-      },
-    ) => {
+    async (_event, payload?: { didCopy?: unknown }) => {
       return finishComputerPermissionAppDrag(_event.sender, payload?.didCopy);
     },
   );
@@ -12174,30 +15154,19 @@ async function broadcastCodexImageAsToolResult(
       type: 'tool_use',
       source: 'codex',
       agentMeta: event.agentMeta,
-      data: {
-        toolUseId,
-        toolName: 'imagegen',
-        input: toolInput,
-      },
+      data: { toolUseId, toolName: 'imagegen', input: toolInput },
     } satisfies AgentEvent);
     broadcastSyntheticToolEvent(sessionId, {
       type: 'tool_result_full',
       source: 'codex',
       agentMeta: event.agentMeta,
-      data: {
-        toolUseId,
-        fullText,
-        isError: false,
-      },
+      data: { toolUseId, fullText, isError: false },
     } satisfies AgentEvent);
     broadcastSyntheticToolEvent(sessionId, {
       type: 'tool_result',
       source: 'codex',
       agentMeta: event.agentMeta,
-      data: {
-        summary: 'image generated',
-        toolUseIds: [toolUseId],
-      },
+      data: { summary: 'image generated', toolUseIds: [toolUseId] },
     } satisfies AgentEvent);
   } catch (err) {
     log.warn('failed to materialize codex image event', {
@@ -12381,11 +15350,7 @@ function emitWorkDirMissingError(
   });
   broadcastToAllWindows(MAKER_PUSH.EVENT, {
     sessionId,
-    event: {
-      type: 'error',
-      data: { message },
-      source: agentSource,
-    } satisfies AgentEvent,
+    event: { type: 'error', data: { message }, source: agentSource } satisfies AgentEvent,
   });
 }
 
@@ -12394,11 +15359,30 @@ function redactEventForRenderer(event: AgentEvent): AgentEvent {
   // event used for bookkeeping but never expose them through the raw renderer channel.
   const rendererEvent = { ...event };
   delete rendererEvent.turnAttemptToken;
+  delete rendererEvent.backgroundTurnStartedAt;
+  delete rendererEvent.sessionTurnGeneration;
+  delete rendererEvent.sessionInstanceId;
   if (!event.data || typeof event.data !== 'object') return rendererEvent;
 
   const data = event.data as Record<string, unknown>;
   const safeData = { ...data };
   let changed = false;
+  // Main consumes this Cindy-owned durable projection marker before the event
+  // crosses renderer/device-link boundaries. Live task-card payloads therefore
+  // keep their existing wire shape and older mobile clients need no upgrade.
+  if (event.type === 'agent_task_update') {
+    for (const key of [
+      'subagentObservation',
+      'subagentParentContext',
+      'returnedResult',
+      'returnedResultEmpty',
+      'returnedResultTruncated',
+    ]) {
+      if (!(key in safeData)) continue;
+      delete safeData[key];
+      changed = true;
+    }
+  }
   for (const key of ['message', 'sdkError'] as const) {
     if (typeof safeData[key] === 'string') {
       const redacted = redactSensitiveText(safeData[key]);
@@ -12481,9 +15465,6 @@ function broadcastNewMakerDraftChanged(): void {
   draftChangedScheduled = true;
   setTimeout(() => {
     draftChangedScheduled = false;
-    tapWindowBroadcast(MAKER_PUSH.NEW_MAKER_DRAFT_CHANGED, {
-      claudeCode: getRemoteNewMakerDefaults('claude-code'),
-      codex: getRemoteNewMakerDefaults('codex'),
-    });
+    tapWindowBroadcast(MAKER_PUSH.NEW_MAKER_DRAFT_CHANGED, getRemoteNewMakerDefaultsByVendor());
   }, 0);
 }

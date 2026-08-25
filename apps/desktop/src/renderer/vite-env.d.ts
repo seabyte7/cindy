@@ -26,6 +26,31 @@ type VoiceInputConnectionTestResult =
 type DesktopLoginAction = import('../shared/authIpc').DesktopLoginAction;
 type DesktopLoginActionResult = import('../shared/authIpc').DesktopLoginActionResult;
 type UtilityTextFailure = import('../shared/utilityTextResult').UtilityTextFailure;
+type IOSSimulatorSessionStatus = import('../shared/iosSimulatorIpc').IOSSimulatorSessionStatus;
+type IOSSimulatorAccessRequest = import('../shared/iosSimulatorIpc').IOSSimulatorAccessRequest;
+type IOSSimulatorAccessRequestResult =
+  import('../shared/iosSimulatorIpc').IOSSimulatorAccessRequestResult;
+type IOSSimulatorStatusRequest = import('../shared/iosSimulatorIpc').IOSSimulatorStatusRequest;
+type IOSSimulatorToolRequest = import('../shared/iosSimulatorIpc').IOSSimulatorToolRequest;
+type IOSSimulatorToolResponse = import('../shared/iosSimulatorIpc').IOSSimulatorToolResponse;
+type IOSSimulatorAgentControlRequest =
+  import('../shared/iosSimulatorIpc').IOSSimulatorAgentControlRequest;
+type IOSSimulatorFocusRequest = import('../shared/iosSimulatorIpc').IOSSimulatorFocusRequest;
+type IOSSimulatorH264FramePush = import('../shared/iosSimulatorIpc').IOSSimulatorH264FramePush;
+type IOSSimulatorRouteStatusPush = import('../shared/iosSimulatorIpc').IOSSimulatorRouteStatusPush;
+type IOSSimulatorLiveTouchRequest =
+  import('../shared/iosSimulatorIpc').IOSSimulatorLiveTouchRequest;
+type IOSSimulatorMutationControlRequest =
+  import('../shared/iosSimulatorIpc').IOSSimulatorMutationControlRequest;
+type IOSSimulatorViewerRouteRequest =
+  import('../shared/iosSimulatorIpc').IOSSimulatorViewerRouteRequest;
+type IOSSimulatorViewerVisibilityRequest =
+  import('../shared/iosSimulatorIpc').IOSSimulatorViewerVisibilityRequest;
+type IOSSimulatorRetryNativeRouteRequest =
+  import('../shared/iosSimulatorIpc').IOSSimulatorRetryNativeRouteRequest;
+type IOSSimulatorStreamProfileRequest =
+  import('../shared/iosSimulatorIpc').IOSSimulatorStreamProfileRequest;
+type ProviderRoutingPayload = import('@cindy/model-providers').Provider['routing'];
 type MakerSessionTreeSnapshot = import('@cindy/maker-core').SessionTreeSnapshot;
 type BrowserBackendHealth = import('../shared/browserBackend').BrowserBackendHealth;
 type BrowserBackendRecoveryResult = import('../shared/browserBackend').BrowserBackendRecoveryResult;
@@ -45,6 +70,12 @@ type PendingRemotePrecreatedWorktreeTarget =
   import('../shared/remotePrecreatedWorktreeLedger').PendingRemotePrecreatedWorktreeTarget;
 type RemotePrecreatedWorktreeLedgerSnapshot =
   import('../shared/remotePrecreatedWorktreeLedger').RemotePrecreatedWorktreeLedgerSnapshot;
+type RawReleaseNotesPayload = import('../shared/releaseNotesContent').RawReleaseNotes;
+type WorkLouderCodexSettingsPatch =
+  import('../shared/workLouderCodex').WorkLouderCodexSettingsPatch;
+type WorkLouderCodexState = import('../shared/workLouderCodex').WorkLouderCodexState;
+type WorkLouderCodexRendererAction =
+  import('../shared/workLouderCodex').WorkLouderCodexRendererAction;
 
 interface NewMakerWorktreeBranchPreferenceSnapshot {
   baseRepo: string;
@@ -59,6 +90,8 @@ interface EnvCheckResult {
   codex: { status: 'passed' | 'failed' | 'skipped'; path?: string; error?: string };
   /** pi 可选实验 agent:failed 不影响 allPassed；本次启动会禁用 pi。 */
   pi?: { status: 'passed' | 'failed' | 'skipped'; path?: string; error?: string };
+  /** bundled ripgrep(必需):failed 时 allPassed=false,splash 进失败态可重试 (#1956)。 */
+  ripgrep?: { status: 'passed' | 'failed' | 'skipped'; error?: string };
   allPassed: boolean;
   platform: 'darwin' | 'win32' | 'linux';
 }
@@ -133,6 +166,8 @@ interface SessionSharePreview {
   fidelity: 'full' | 'partial' | 'db-only';
   messageCount: number;
   mediaCount: number;
+  /** 协同包携带的 Worker 会话数;普通包为 0。 */
+  orcaWorkerCount: number;
 }
 
 interface LocalSshKeyInfo {
@@ -166,13 +201,14 @@ interface RemoteAgentSilentInstallStatusPush {
   message?: string;
 }
 
-/** cc-mgr 版本升级 push payload。available=null 表示该 host 的 pending 已清空。 */
+/** cc-mgr / pi-manager 版本升级 push payload。available=null 表示该 host 的 pending 已清空。 */
 interface RemoteAgentCcMgrUpgradeAvailablePush {
   hostId: string;
   available: {
     currentVersion: string;
     availableVersion: string;
   } | null;
+  agent: 'cc' | 'pi';
 }
 
 interface RemoteAgentExecResult {
@@ -267,6 +303,14 @@ type SubagentModelSettingsState =
   import('../shared/subagentModelSettings').SubagentModelSettingsState;
 type SubagentModelSettingsWriteResult =
   import('../shared/subagentModelSettings').SubagentModelSettingsWriteResult;
+type AuxiliaryModelSettingsPatch =
+  import('../shared/auxiliaryModelSettings').AuxiliaryModelSettingsPatch;
+type AuxiliaryModelSettingsState =
+  import('../shared/auxiliaryModelSettings').AuxiliaryModelSettingsState;
+type VisionBridgeSettingsPatch =
+  import('../shared/visionBridgeSettings').VisionBridgeSettingsPatch;
+type VisionBridgeSettingsState =
+  import('../shared/visionBridgeSettings').VisionBridgeSettingsState;
 
 /** Agent 资源占用设置的 IPC wire 形状(main 侧 agentResourceSettingsWire)。 */
 type AgentResourceProcessPriority = 'normal' | 'low' | 'lowest';
@@ -557,6 +601,7 @@ interface OrcaTeamRecord {
   id: string;
   leadSessionId: string;
   status: 'active' | 'completed' | 'cancelled' | 'failed';
+  workerPermissionMode: 'auto' | 'bypassPermissions';
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -628,7 +673,7 @@ interface CodexUsageSnapshot {
   completionTokens: number;
   reasoningTokens: number;
   cachedTokens: number;
-  /** = prompt + completion + reasoning + cached */
+  /** = prompt + completion + cached; reasoning is a diagnostic subset of completion */
   total: number;
 }
 
@@ -654,7 +699,7 @@ interface CCAgentStreamEvent {
     | 'thinking'
     | 'compact_boundary';
   data: unknown;
-  source?: 'claude-code' | 'codex' | 'pi';
+  source?: 'claude-code' | 'codex' | 'pi' | 'vision-bridge';
   /**
    * agent-meta: SDK 元信息（按 session.agentKind 解析）。当事件来自一条 SDK
    * message（assistant / tool_use / thinking final / done 等）时由 main 透传过来。
@@ -663,6 +708,8 @@ interface CCAgentStreamEvent {
   agentMeta?: import('@/lib/ccAgent.types').AgentMeta;
   /** Host-owned SDK boundary claim; claimed done/status events are not product completion. */
   turnContinuationId?: number;
+  /** Idle/host compact is not a product turn; must not finalize live streaming. */
+  turnScope?: 'turn' | 'background';
   /**
    * F1-a: 由 main 端 messagePersistBroadcaster 为这条消息分配的稳定 persistId,
    * 经 maker:event payload 透传。renderer 用它当在途气泡 clientId(不再自造随机),
@@ -711,6 +758,7 @@ interface CCAgentPermissionRequestPayload {
   displayName?: string;
   description?: string;
   suggestions?: unknown[];
+  autoReviewUnavailable?: boolean;
 }
 
 interface CCAgentPermissionResult {
@@ -740,6 +788,10 @@ interface CCAgentStatusUpdate {
   costUsd?: number;
   contextTokens: number;
   contextWindow: number;
+  outputTokens?: number;
+  generationDurationMs?: number;
+  generationActive?: boolean;
+  generationReliable?: boolean;
   isRunning: boolean;
   /** Host-owned SDK boundary claim; a claimed `status(false)` is not product idle. */
   turnContinuationId?: number;
@@ -1038,8 +1090,28 @@ interface GoalStatusPayload {
   lastReason: string | null;
 }
 
+type CindyMediaPreferenceOption = {
+  id: string;
+  label: string;
+  group: string;
+  providerId: string;
+  providerName: string;
+  modelId: string;
+  modelName: string;
+  routing?: import('@cindy/model-providers').Provider['routing'];
+};
+
+type CindyMediaPreferenceKind = {
+  options: CindyMediaPreferenceOption[];
+  defaultModel: CindyMediaPreferenceOption | null;
+};
+
 interface ElectronAPI {
   platform: string;
+  windowBackdropMaterial: import('../shared/windowBackdrop').WindowsBackdropMaterial;
+  onWindowBackdropMaterialChanged?: (
+    cb: (material: import('../shared/windowBackdrop').WindowsBackdropMaterial) => void,
+  ) => () => void;
   osRelease: string;
   appVersion: string;
   /** 运行期端点清单(main 启动时远程 → 缓存 → 烘焙解析;重启生效)。 */
@@ -1047,6 +1119,7 @@ interface ElectronAPI {
   appDisplayVersion: string;
   appDisplayVersionDetail: string;
   preferredSystemLocale: ApplicationMenuLocale;
+  onLocaleChanged?: (cb: (locale: import('../shared/locale').SupportedLocale) => void) => () => void;
   getDeviceId: () => Promise<string>;
   windowMinimize: () => void;
   windowMaximize: () => void;
@@ -1139,8 +1212,11 @@ interface ElectronAPI {
     getStateSync: () => { layout: import('../shared/layoutTree').Layout };
     set: (
       layout: import('../shared/layoutTree').Layout,
-    ) => Promise<{ layout: import('../shared/layoutTree').Layout }>;
-    reset: () => Promise<{ layout: import('../shared/layoutTree').Layout }>;
+    ) => Promise<{ layout: import('../shared/layoutTree').Layout; persisted: boolean }>;
+    reset: () => Promise<{
+      layout: import('../shared/layoutTree').Layout;
+      persisted: boolean;
+    }>;
     onChanged: (
       callback: (payload: { layout: import('../shared/layoutTree').Layout }) => void,
     ) => () => void;
@@ -1166,13 +1242,16 @@ interface ElectronAPI {
     onRecentUsageChanged: (callback: (payload: { ids: string[] }) => void) => () => void;
     install: (
       lizFilePath: string,
-      /** enable:装入后立即开启(确认框勾选决定;缺省沉睡)。 */
+      /** enable:装入后立即开启；缺省沉睡。 */
       opts: { enable?: boolean; expectedPackageSha256: string },
     ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
     /** 原位更新(同 id 换版):唤醒状态与面板位置延续,沙箱熄灯待重拉。 */
     update: (
       lizFilePath: string,
-      opts: { expectedPackageSha256: string },
+      opts: {
+        expectedPackageSha256: string;
+        expectedInstalledApproval: string;
+      },
     ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
     /**
      * cindy 槽后端覆盖:首帧同步读(规则 7);overrides 键为 "image.generate"
@@ -1183,18 +1262,32 @@ interface ElectronAPI {
      */
     cindyPrefsSync: (id: string) => {
       overrides: Record<string, string>;
-      image: {
-        options: Array<{ id: string; label: string }>;
-        defaultModel: { id: string; label: string } | null;
-      };
-      video: {
-        options: Array<{ id: string; label: string }>;
-        defaultModel: { id: string; label: string } | null;
-      };
-      /** 文本类(快问快答):选项是轻量任务模型链的档位(供应商×模型),不是媒体目录模型。 */
+      image: CindyMediaPreferenceKind;
+      imageEdit: CindyMediaPreferenceKind;
+      video: CindyMediaPreferenceKind;
+      videoEdit: CindyMediaPreferenceKind;
+      /** 文本类(快问快答):选项是当前供应商目录的全部文本模型(cat: 编码钉值,
+       *  带供应商/模型/徽标等结构化字段供富列表渲染);declaredModel = 身份卡声明
+       *  的偏好模型(目录里解析得到才给,"跟随默认"行据此如实展示实际路由)。 */
       text: {
-        options: Array<{ id: string; label: string }>;
+        options: Array<{
+          id: string;
+          label: string;
+          group: string;
+          providerId: string;
+          agentKind: string;
+          modelId: string;
+          modelName: string;
+          icon?: string;
+          budget: boolean;
+          subscription: boolean;
+          routing?: ProviderRoutingPayload;
+          agentSuffix?: string;
+        }>;
         defaultModel: { id: string; label: string } | null;
+        declaredModel?: { id: string; label: string } | null;
+        /** 存量轻量档位钉(目录扩展前的合法钉值)的展示名表,老钉值回显友好名用。 */
+        utilityProfiles?: Array<{ id: string; label: string }>;
       };
       /** 向量类(文本转向量):同 image/video 走目录派生。 */
       embed: {
@@ -1217,12 +1310,14 @@ interface ElectronAPI {
     ) => Promise<{ config: Record<string, unknown> }>;
     /** 系统文件选择框(.cindy 过滤),只选不装;取消返回 { canceled: true }。 */
     pickFile: () => Promise<{ canceled: true } | { filePath: string }>;
-    /** 只验不装:读出清单、签名信任等级与 icon data URL,供确认弹窗展示。 */
+    /** 只验不装:读出清单、签名信任等级与 icon data URL,供安装编排使用。 */
     inspect: (lizFilePath: string) => Promise<{
       manifest: import('../shared/ghost').GhostManifest;
       trust: import('../shared/ghost').GhostTrustInfo;
       /** 本次检查的整包指纹；安装/更新时回传，防止确认后文件被替换。 */
       packageSha256: string;
+      /** v2 清单中无法映射的历史 slot；仅用于兼容诊断，不阻塞安装。 */
+      unsupportedSlots: string[];
       iconDataUrl?: string;
     }>;
     uninstall: (id: string) => Promise<{ ok: true }>;
@@ -1240,7 +1335,7 @@ interface ElectronAPI {
       id: string,
       disabled: boolean,
     ) => Promise<{ disabled: string[] }>;
-    /** 双击 .cindy 的待装路径,原子取走(取即清空;无则 null)。 */
+    /** 双击 .cindy 的待装路径，原子取走（取即清空；无则 null）。 */
     takePendingInstall: () => Promise<{ filePath: string | null }>;
     onChanged: (
       callback: (payload: { ghosts: import('../shared/ghost').InstalledGhost[] }) => void,
@@ -1253,7 +1348,7 @@ interface ElectronAPI {
           | { sessionId: string; target: 'client_settings' },
       ) => void,
     ) => () => void;
-    /** 双击 .cindy 转交信号:收到后调 takePendingInstall 取路径走确认装入流程。 */
+    /** 双击 .cindy 转交信号:收到后调 takePendingInstall 取路径走一键装入流程。 */
     onInstallRequested: (callback: () => void) => () => void;
     /** 运行时状态广播:crashed / fused 时面板原地显示错误接管态。 */
     onRuntimeChanged: (
@@ -1456,6 +1551,16 @@ interface ElectronAPI {
     runtimeStates: () => Promise<{ states: Record<string, string> }>;
     /** 面板错误态「重载意识」:清熔断记账 + 重新拉起沙箱。 */
     reload: (id: string) => Promise<{ state: string }>;
+    /** Library(持久作品库)设置面:概览/选位置/绑定/迁移/回默认/解绑/删除。 */
+    libraryOverview: (id: string) => Promise<import('../shared/ghost').GhostLibraryOverview>;
+    libraryPickLocation: (
+      id: string,
+    ) => Promise<{ ok: boolean; cancelled?: boolean; candidate?: string; warnings?: string[]; message?: string }>;
+    libraryBind: (id: string, candidate: string) => Promise<{ ok: boolean; message?: string; warnings?: string[] }>;
+    libraryRelocate: (id: string, candidate: string) => Promise<{ ok: boolean; message?: string }>;
+    libraryRevertDefault: (id: string) => Promise<{ ok: boolean; message?: string }>;
+    libraryUnbind: (id: string) => Promise<{ ok: boolean; message?: string }>;
+    libraryDelete: (id: string) => Promise<{ ok: boolean; cancelled?: boolean; message?: string }>;
     legacyRecoveryStatus: () => Promise<
       import('../shared/legacyGhostRecovery').LegacyGhostRecoveryStatus
     >;
@@ -1475,19 +1580,13 @@ interface ElectronAPI {
   pluginMarket: {
     snapshot: () => Promise<import('../shared/pluginMarket').PluginMarketSnapshot>;
     detail: (pluginId: string) => Promise<import('../shared/pluginMarket').PluginMarketDetail>;
+    localIcons: (
+      requests: import('../shared/pluginMarket').PluginMarketLocalIconRequest[],
+    ) => Promise<import('../shared/pluginMarket').PluginMarketLocalIconResult[]>;
     install: (
       pluginId: string,
       options: import('../shared/pluginMarket').PluginMarketInstallOptions,
     ) => Promise<import('../shared/pluginMarket').PluginMarketInstallResult>;
-    onPackagePermissionReview: (
-      callback: (
-        request: import('../shared/pluginMarket').PluginMarketPackageReviewRequest,
-      ) => void,
-    ) => () => void;
-    resolvePackagePermissionReview: (
-      requestId: string,
-      confirmed: boolean,
-    ) => Promise<{ handled: boolean }>;
     uninstall: (pluginId: string) => Promise<{ ok: true }>;
     consumeRemovalNotice: () => Promise<
       import('../shared/pluginMarket').PluginRemovalUserNotice | null
@@ -1508,6 +1607,18 @@ interface ElectronAPI {
     removeSource: (name: string) => Promise<{ ok: true }>;
     refreshSource: (name: string) => Promise<import('../shared/pluginMarket').MarketSourceSummary>;
     gitPreflight: () => Promise<{ ok: boolean; version: string | null }>;
+  };
+  pluginPublisher: {
+    start: (filePath: string) => Promise<{ transferId: string; uploadId: string | null }>;
+    status: (transferId: string) => Promise<{ progress: unknown }>;
+    cancel: (transferId: string) => Promise<{ cancelled: boolean }>;
+    listMine: (cursor?: string) => Promise<{
+      releases: Array<Record<string, unknown>>;
+      nextCursor: string | null;
+    }>;
+    onProgress: (callback: (progress: unknown) => void) => () => void;
+    onConfirm: (callback: (request: unknown) => void) => () => void;
+    resolveConfirm: (requestId: string, confirmed: boolean) => Promise<{ handled: boolean }>;
   };
   voiceInput: {
     prewarm: (payload?: {
@@ -1626,6 +1737,11 @@ interface ElectronAPI {
     addDictionaryEntry: (text: string) => Promise<VoiceInputSettingsData>;
     importDictionaryEntries: (texts: string[]) => Promise<VoiceInputSettingsData>;
     renameDictionaryEntry: (entryId: string, text: string) => Promise<VoiceInputSettingsData>;
+    editDictionaryEntry: (
+      entryId: string,
+      text: string,
+      aliases: string[],
+    ) => Promise<VoiceInputSettingsData>;
     recordDictionaryLearningActions: (actions: VoiceInputDictionaryLearningAction[]) => Promise<{
       settings: VoiceInputSettingsData;
       newAutomaticEntries: Array<{ id: string; text: string }>;
@@ -1706,19 +1822,63 @@ interface ElectronAPI {
     notifyWindowsCloseBehaviorPromptShown: () => void;
   };
 
+  workLouderCodex: {
+    getState: () => Promise<WorkLouderCodexState>;
+    setSettings: (patch: WorkLouderCodexSettingsPatch) => Promise<WorkLouderCodexState>;
+    resetSettings: () => Promise<WorkLouderCodexState>;
+    openInputMonitoringSettings: () => Promise<void>;
+    /** Re-check whether the device is still attached; the SDK never says so itself. */
+    probe: () => Promise<WorkLouderCodexState>;
+    /**
+     * Hand the sidebar's task list to the agent keys. Main cannot see tasks on
+     * linked machines, nor which machine filter is applied.
+     */
+    publishTasks: (
+      tasks: import('../shared/workLouderCodex').WorkLouderCodexPublishedTask[],
+    ) => Promise<void>;
+    setLayoutPreviewActive: (active: boolean) => Promise<void>;
+    onStateChanged: (callback: (state: WorkLouderCodexState) => void) => () => void;
+    onAction: (callback: (action: WorkLouderCodexRendererAction) => void) => () => void;
+    onPreviewInput: (
+      callback: (input: import('../shared/workLouderCodex').WorkLouderCodexPreviewInput) => void,
+    ) => () => void;
+  };
+
+  xboxGamepad: {
+    getState: () => Promise<import('../shared/xboxGamepad').XboxGamepadState>;
+    setSettings: (
+      patch: import('../shared/xboxGamepad').XboxGamepadSettingsPatch,
+    ) => Promise<import('../shared/xboxGamepad').XboxGamepadState>;
+    resetSettings: () => Promise<import('../shared/xboxGamepad').XboxGamepadState>;
+    probe: () => Promise<import('../shared/xboxGamepad').XboxGamepadState>;
+    setLayoutPreviewActive: (active: boolean) => Promise<void>;
+    onStateChanged: (
+      callback: (state: import('../shared/xboxGamepad').XboxGamepadState) => void,
+    ) => () => void;
+    onPreviewInput: (
+      callback: (input: import('../shared/xboxGamepad').XboxGamepadPreviewInput) => void,
+    ) => () => void;
+  };
+
   // ── 右侧栏独立子窗口(RSB window)──────────────────────────────────────
   // 「侧边栏在新窗口中显示」偏好 + 子窗口生命周期(main: right-sidebar-window/)。
   rightSidebarWindow: {
-    getState: () => Promise<{ detached: boolean; lastOpen: boolean; open: boolean }>;
+    getState: () => Promise<{
+      detached: boolean;
+      lastOpen: boolean;
+      open: boolean;
+      hostSessionId?: string | null;
+    }>;
     /**
      * 幂等开窗。缺省(用户手势)已开则 show + focus;
      * userInitiated:false(启动恢复 / 插件 / agent 自发)已开则完全不动窗口。
      */
-    open: (options?: { userInitiated?: boolean }) => Promise<void>;
+    open: (options?: { userInitiated?: boolean; sessionId?: string }) => Promise<void>;
     close: () => Promise<void>;
     /** 写偏好;true 附带开窗,false 附带关窗。返回新 state。 */
     setDetached: (
       detached: boolean,
+      handoff?: import('../shared/rightSidebarWindow').RsbWindowTabHandoff,
     ) => Promise<{ detached: boolean; lastOpen: boolean; open: boolean }>;
     /** 子窗口 mount 时拉主窗上报的渲染上下文(main 缓存的最后一份)。 */
     getContext: () => Promise<{
@@ -1726,10 +1886,15 @@ interface ElectronAPI {
       workdir: string | null;
       remoteHostId: string | null;
       deviceLinkDeviceId?: string | null;
+      subagentsAvailable?: boolean;
       available: boolean;
     } | null>;
     /** 子窗口根组件挂载握手。 */
     ready: () => Promise<void>;
+    rendererReady: () => Promise<void>;
+    presentationReady: () => Promise<void>;
+    refreshContext: () => Promise<void>;
+    onVisibilityChanged: (cb: (payload: { visible: boolean }) => void) => () => void;
     /** 主窗把命令转发给子窗口(必要时 main 先开窗)。 */
     /** main 原子裁决 attached / routed / queued / stale-context。 */
     sendCommand: (
@@ -1741,19 +1906,39 @@ interface ElectronAPI {
       workdir: string | null;
       remoteHostId: string | null;
       deviceLinkDeviceId?: string | null;
+      subagentsAvailable?: boolean;
       available: boolean;
     }) => void;
-    onStateChanged: (cb: (state: { detached: boolean; open: boolean }) => void) => () => void;
+    onStateChanged: (cb: (state: {
+      detached: boolean;
+      open: boolean;
+      hostSessionId?: string | null;
+      userClose?: boolean;
+    }) => void) => () => void;
     onContextChanged: (
       cb: (ctx: {
         sessionId: string | null;
         workdir: string | null;
         remoteHostId: string | null;
         deviceLinkDeviceId?: string | null;
+        subagentsAvailable?: boolean;
         available: boolean;
       }) => void,
     ) => () => void;
+    onTabHandoff: (
+      callback: (handoff: import('../shared/rightSidebarWindow').RsbWindowTabHandoff) => void,
+    ) => () => void;
     onCommand: (cb: (cmd: RsbWindowCommand) => void) => () => void;
+  };
+
+  /** 资源用量独立子窗口(单实例;入口在顶部菜单)。 */
+  resourceUsageWindow: {
+    open: () => Promise<void>;
+    close: () => Promise<void>;
+    rendererReady: () => Promise<void>;
+    presentationReady: () => Promise<void>;
+    onSamplingActiveChanged: (cb: (active: boolean) => void) => () => void;
+    onLocaleChanged: (cb: (locale: import('../shared/locale').SupportedLocale) => void) => () => void;
   };
 
   /** 插件停靠面板独立窗口(每 ghostId 一扇窗;状态机在 main)。 */
@@ -1771,6 +1956,12 @@ interface ElectronAPI {
     onStateChanged: (
       cb: (state: import('../shared/ghostPanelWindow').GhostPanelWindowsState) => void,
     ) => () => void;
+    rendererReady: () => Promise<void>;
+    presentationReady: () => Promise<void>;
+    onVisibilityChanged: (cb: (payload: { visible: boolean }) => void) => () => void;
+    onCloseRequested: (cb: () => void) => () => void;
+    onMinimizeRequested: (cb: () => void) => () => void;
+    resolveCloseRequest: (approved: boolean) => Promise<void>;
   };
 
   agentIsland: {
@@ -1843,6 +2034,8 @@ interface ElectronAPI {
   }>;
   authGetLoginState: () => Promise<DesktopLoginActionResult>;
   authDispatchLoginAction: (action: DesktopLoginAction) => Promise<DesktopLoginActionResult>;
+  /** 登录 captcha 托管挑战页地址(不含 query);LoginCaptchaOverlay 装载 webview 用。 */
+  authGetCaptchaChallengeUrl: () => Promise<string>;
   authLogout: () => Promise<void>;
   authEnterLocal: () => Promise<AuthStateChangePayload>;
   authExitLocal: () => Promise<AuthStateChangePayload>;
@@ -1878,9 +2071,7 @@ interface ElectronAPI {
    * `LOG_UPLOAD_EMPTY`(采到 0 条)/ `LOG_UPLOAD_FAILED`(网络)/ `LOG_UPLOAD_BUSY`。
    */
   uploadLogsNow: () => Promise<LogUploadResult>;
-  onLogUploadSettingsChange: (
-    callback: (payload: LogUploadSettingsPayload) => void,
-  ) => () => void;
+  onLogUploadSettingsChange: (callback: (payload: LogUploadSettingsPayload) => void) => () => void;
 
   // ── Profile 编辑(设置 → 用户卡片编辑名字 / 头像;直写服务端,跨设备生效) ──
   profileGetState: () => Promise<{
@@ -2091,6 +2282,7 @@ interface ElectronAPI {
     effort: string;
     permissionMode: string;
     fastMode: boolean;
+    providerId: string | null;
   }) => void;
 
   syncNewMakerDraft: (snapshot: {
@@ -2100,10 +2292,17 @@ interface ElectronAPI {
         { model?: string; effort?: string; permissionMode?: string; providerId?: string | null }
       >
     >;
+    /** 每个 vendor 是否由用户在 New Maker 中明确选过模型；device-link 默认校准据此保护显式选择。 */
+    modelChosenByVendor: Partial<Record<'cc' | 'codex' | 'pi', boolean>>;
     fastModeByModel: Record<string, boolean>;
     effortByModel: Record<string, string>;
     /** 「新建会话默认启用 worktree」勾选记忆(vendor 无关根字段,远程草稿播种用)。 */
     worktreeEnabled: boolean;
+  }) => void;
+
+  /** Renderer localStorage workerCreationPrefs → main 内存镜像。 */
+  syncWorkerCreationPrefs: (snapshot: {
+    workerPermissionMode: 'auto' | 'bypassPermissions';
   }) => void;
 
   /** 被控端 renderer → 自身 main:providerModelMemory 全量快照镜像(草稿列表行真实读源)。 */
@@ -2134,6 +2333,7 @@ interface ElectronAPI {
       markModelChoice?: boolean;
       effort?: string;
       fast?: boolean;
+      thinking?: boolean;
     }) => void,
   ) => () => void;
 
@@ -2154,6 +2354,11 @@ interface ElectronAPI {
   /** 本机或远程控制端改动本工作端源分支后的权威广播。 */
   onNewMakerWorktreeBranchChanged: (
     cb: (snapshot: NewMakerWorktreeBranchPreferenceSnapshot) => void,
+  ) => () => void;
+
+  /** Orca tool 显式修改 Worker 默认权限后，回写 renderer localStorage。 */
+  onWorkerCreationPrefsApply: (
+    cb: (payload: { workerPermissionMode: 'auto' | 'bypassPermissions' }) => void,
   ) => () => void;
 
   /** 被控端本地 main → 自身 renderer:控制端写穿的会话「模型 effort/fast」pref(调本地 setter)。 */
@@ -2562,7 +2767,7 @@ interface ElectronAPI {
         | { type: 'project'; workingDir: string }
         | { type: 'new-session'; workingDir: string }
         | { type: 'share-import'; filePath: string }
-        | { type: 'settings'; tab: 'voice-input' | 'providers' },
+        | { type: 'settings'; tab: 'voice-input' | 'providers'; connect?: string },
     ) => void,
   ) => () => void;
 
@@ -2577,7 +2782,7 @@ interface ElectronAPI {
     | { type: 'project'; workingDir: string }
     | { type: 'new-session'; workingDir: string }
     | { type: 'share-import'; filePath: string }
-    | { type: 'settings'; tab: 'voice-input' | 'providers' }
+    | { type: 'settings'; tab: 'voice-input' | 'providers'; connect?: string }
     | null
   >;
 
@@ -3209,6 +3414,7 @@ interface ElectronAPI {
   cindyMediaStorage: {
     /** 本窗口草稿附件 URL 变化时上报(fire-and-forget;多窗口防误删取证)。 */
     reportDraftUrls: (urls: string[]) => void;
+    openLegacyImagesDir: () => Promise<{ opened: boolean }>;
     stats: () => Promise<{
       success: boolean;
       error?: string;
@@ -3288,9 +3494,38 @@ interface ElectronAPI {
     autoRelaunchOnIdle: boolean;
   }) => Promise<AutoUpdateSettingsPayload>;
   resetAutoUpdateSettings: () => Promise<AutoUpdateSettingsPayload>;
+  /** beta 测试渠道(设备级)开关的读/写/恢复默认。 */
+  getUpdateChannelSettings: () => Promise<{
+    enableBeta: boolean;
+    isCustomized?: boolean;
+  }>;
+  setUpdateChannelSettings: (settings: {
+    enableBeta: boolean;
+  }) => Promise<{
+    enableBeta: boolean;
+    isCustomized?: boolean;
+  }>;
+  resetUpdateChannelSettings: () => Promise<{
+    enableBeta: boolean;
+    isCustomized?: boolean;
+  }>;
+  /** 用户主动重启,让 beta 通道切换在下次冷启动前生效。 */
+  relaunchForChannelChange: () => Promise<void>;
+  /** 打开 beta 前预检:探测 beta manifest 是否可达(HTTP 200)。 */
+  probeBetaChannel: () => Promise<{ available: boolean }>;
+  onUpdateChannelSettings: (
+    callback: (payload: { enableBeta: boolean; isCustomized?: boolean }) => void,
+  ) => () => void;
   setUpdateRelaunchTheme: (theme: 'light' | 'dark') => void;
   // E4D 毛玻璃:family 切换/启动通知 main 开关 vibrancy(仅 CINDY 透壁纸)
-  theme: { applyVibrancy: (familyId: string, isDark: boolean) => void };
+  theme: {
+    applyVibrancy: (
+      familyId: string,
+      isDark: boolean,
+      mode: 'system' | 'light' | 'dark',
+      systemModeFollowsSystem: boolean,
+    ) => void;
+  };
   /**
    * Manually trigger an update check. Returns the resolved state so the
    * renderer can show the appropriate toast:
@@ -3299,7 +3534,7 @@ interface ElectronAPI {
    *   - 'ready'            → 新版本已就绪,等待重启
    *   - 'manifest_failed'  → 拉清单失败(网络问题)
    *   - 'download_failed'  → 找到了新版本但下载失败
-   *   - 'manual_download'  → Linux 首版仅支持手动下载安装包
+   *   - 'manual_download'  → 保留给仍走手动安装的旧路径；现行 Linux 已应用内下 .deb
    */
   checkForUpdate: () => Promise<{
     result:
@@ -3331,6 +3566,7 @@ interface ElectronAPI {
   /** Query current fullscreen state synchronously on mount (covers IPC events
    *  that fired before the renderer had a chance to subscribe). */
   getFullscreenState: () => Promise<boolean>;
+  toggleFullscreen: () => Promise<boolean>;
 
   /** 窗口是否对用户不可见(最小化 / hide)。装饰动画闸门用它兜底 ——
    *  backgroundThrottling 关闭时 document.visibilityState 会一直停在 visible。 */
@@ -3551,11 +3787,12 @@ interface ElectronAPI {
     ccMgrForceUpgrade: (
       hostId: string,
       sessionId?: string,
+      agent?: 'cc' | 'pi',
     ) => Promise<{ ok: true; daemonReady: boolean }>;
     ccMgrListPendingUpgrades: () => Promise<{
-      pending: Array<{ hostId: string; currentVersion: string; availableVersion: string }>;
+      pending: Array<{ hostId: string; currentVersion: string; availableVersion: string; agent: 'cc' | 'pi' }>;
     }>;
-    ccMgrDismissPendingUpgrade: (hostId: string) => Promise<{ ok: true }>;
+    ccMgrDismissPendingUpgrade: (hostId: string, agent?: 'cc' | 'pi') => Promise<{ ok: true }>;
     // Codex credential sync
     checkCodexAuth: (id: string) => Promise<{
       localExists: boolean;
@@ -3772,6 +4009,10 @@ interface ElectronAPI {
       worktreePath: string | null;
       remoteHostId?: string | null;
     }) => Promise<import('@/lib/gitContext.types').SessionGitDirResult>;
+    findLinkedWorktree: (input: { sessionId: string }) => Promise<{
+      workdir: string;
+      branch: string | null;
+    } | null>;
     watch: (workdir: string) => Promise<void>;
     unwatch: (workdir: string) => Promise<void>;
     listPrRefs: (sessionId: string) => Promise<import('@/lib/gitContext.types').SessionPrRef[]>;
@@ -3866,14 +4107,53 @@ interface ElectronAPI {
     }) => Promise<import('@/lib/gitReview.types').ReviewPushResult>;
   };
 
-  // sidebar 偏好(置顶手动顺序)跨 dev / installed 共享;读 sendSync,写 invoke。
-  sidebarSettingsLoadPinnedOrderSync: () => string[];
-  sidebarSettingsSavePinnedOrder: (order: readonly string[]) => Promise<void>;
-  sidebarSettingsOnPinnedOrderChanged: (cb: (order: string[]) => void) => () => void;
   sidebarSettings: {
-    loadHiddenProjectKeys: () => string[];
-    setProjectHidden: (projectKey: string, hidden: boolean) => Promise<boolean>;
-    onHiddenProjectKeysChanged: (cb: (projectKeys: string[]) => void) => () => void;
+    claimLegacyRendererOwner: () => import('../shared/sidebarSettings').SidebarLegacyRendererOwnerClaim;
+    loadSnapshot: () => import('../shared/sidebarSettings').SidebarSettingsSnapshot;
+    mutatePinnedOrder: (
+      mutation: import('../shared/sidebarSettings').SidebarPinnedOrderMutation,
+      ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+    ) => Promise<string[]>;
+    onPinnedOrderChanged: (
+      cb: (
+        order: string[],
+        ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+      ) => void,
+    ) => () => void;
+    setProjectHidden: (
+      projectKey: string,
+      hidden: boolean,
+      ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+    ) => Promise<boolean>;
+    onHiddenProjectKeysChanged: (
+      cb: (
+        projectKeys: string[],
+        ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+      ) => void,
+    ) => () => void;
+    setMainViewHidden: (
+      ghostId: string,
+      hidden: boolean,
+      ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+    ) => Promise<string[]>;
+    onHiddenMainViewGhostIdsChanged: (
+      cb: (
+        ghostIds: string[],
+        ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+      ) => void,
+    ) => () => void;
+    getProjectOrder: () => Promise<import('../shared/projectOrderSettings').SyncedProjectOrderSnapshot>;
+    applyProjectOrder: (request: {
+      manualProjectOrder: readonly string[];
+      ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp;
+      projectOrder: 'activity' | 'custom';
+    }) => Promise<import('../shared/projectOrderSettings').SyncedProjectOrderSnapshot>;
+    onProjectOrderChanged: (
+      cb: (
+        snapshot: import('../shared/projectOrderSettings').SyncedProjectOrderSnapshot,
+        ownerStamp: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+      ) => void,
+    ) => () => void;
   };
 
   remotePrecreatedWorktreeLedger: {
@@ -4010,6 +4290,8 @@ interface ElectronAPI {
        * fire-and-forget；renderer 应在 emitPatch userSendAt 之后调用，作为持久化兜底。
        */
       touchUserSend: (id: string, atMs?: number) => Promise<void>;
+      /** 置顶段切到卡片模式才生成/回填任务摘要。 */
+      setPinnedCardSummaries: (enabled: boolean) => Promise<void>;
       /** interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id。 */
       interruptedPending: () => Promise<string[]>;
       /** 红点派生的周期性重算源:尾部停在未 dismissed 错误行的 active 会话 id。 */
@@ -4054,6 +4336,20 @@ interface ElectronAPI {
         }>;
         activeTabId: string | null;
       }>;
+      ensureSingleton: (input: { sessionId: string; kind: string; state?: unknown }) => Promise<{
+        tab: {
+          id: string;
+          sessionId: string;
+          kind: string;
+          position: number;
+          state: unknown;
+          isActive: boolean;
+          createdAt: number;
+          updatedAt: number;
+        } | null;
+        created: boolean;
+        persistable: boolean;
+      }>;
       /** 新增 / 更新单个 tab;超 20 抛 RIGHT_SIDEBAR_TOO_MANY_TABS;state >16KB 抛 RIGHT_SIDEBAR_STATE_TOO_LARGE。 */
       upsert: (input: {
         id: string;
@@ -4065,6 +4361,23 @@ interface ElectronAPI {
       close: (input: { id: string }) => Promise<{ ok: true }>;
       setActive: (input: { sessionId: string; id: string | null }) => Promise<{ ok: true }>;
       reorder: (input: { sessionId: string; orderedIds: string[] }) => Promise<{ ok: true }>;
+    };
+    subagentRuns: {
+      list: (
+        input: import('@cindy/maker-shared/subagent-workspace').SubagentRunsListRequest,
+      ) => Promise<import('@cindy/maker-shared/subagent-workspace').SubagentRunsListResponse>;
+      detail: (
+        input: import('@cindy/maker-shared/subagent-workspace').SubagentRunDetailRequest,
+      ) => Promise<import('@cindy/maker-shared/subagent-workspace').SubagentRunDetailResponse>;
+      transcript: (
+        input: import('@cindy/maker-shared/subagent-workspace').SubagentTranscriptPageRequest,
+      ) => Promise<import('@cindy/maker-shared/subagent-workspace').SubagentTranscriptPageResponse>;
+      onChanged: (
+        callback: (
+          payload: import('@cindy/maker-shared/subagent-workspace').SubagentRunsChangedPayload,
+          ownerStamp?: import('../shared/dataOwnerPush').DataOwnerPushStamp,
+        ) => void,
+      ) => () => void;
     };
     projectAliases: {
       list: () => Promise<import('../shared/projectAliases').ProjectAlias[]>;
@@ -4119,6 +4432,8 @@ interface ElectronAPI {
             fidelity: 'full' | 'partial' | 'db-only';
             missingTranscripts: string[];
             mediaMissing: number;
+            /** 随包携带的协同 Worker 会话数(非协同包为 0)。 */
+            orcaWorkers: number;
           }
         | { status: 'canceled' }
         | { status: 'oversize'; totalBytes: number; mediaBytes: number; limitBytes: number }
@@ -4151,6 +4466,8 @@ interface ElectronAPI {
         sessionId: string;
         fidelity: 'full' | 'partial' | 'db-only';
         notes: string[];
+        /** 随协同包一并导入的 Worker 会话数;普通包为 0。 */
+        orcaWorkers: number;
       }>;
       cancel: (request: { draftId: string }) => Promise<{ ok: boolean }>;
       classifyPath: (request: {
@@ -4333,6 +4650,21 @@ interface ElectronAPI {
   };
 
   /**
+   * 资源用量面板(process-monitor):订阅期间 main 才采样;terminate 只对
+   * 本产品 spawn 的 agent 根进程有效,归属由 main 重新校验。
+   */
+  processMonitor: {
+    subscribe: () => Promise<void>;
+    unsubscribe: () => Promise<void>;
+    terminate: (
+      request: import('../shared/processMonitor').TerminateAgentProcessRequest,
+    ) => Promise<import('../shared/processMonitor').TerminateAgentProcessResult>;
+    onSample: (
+      cb: (sample: import('../shared/processMonitor').ProcessMonitorSample) => void,
+    ) => () => void;
+  };
+
+  /**
    * Browser backend toggle: 切换 MCP `browser` 工具实际控制的浏览器。
    * - `external`: vendored Playwright + 独立 Chrome(**系统默认**)
    * - `rsb-webview`: 右侧栏内置 webview tab
@@ -4418,6 +4750,50 @@ interface ElectronAPI {
       keys: Partial<Record<'claude-code' | 'codex' | 'pi', string>>,
     ) => Promise<{ ok: true }>;
     deleteCustomProvider: (providerId: string) => Promise<{ ok: true }>;
+    localModelStatus: () => Promise<import('../shared/localModelRuntime').LocalRuntimeStatus>;
+    localModelStart: () => Promise<import('../shared/localModelRuntime').LocalRuntimeStatus>;
+    localModelList: () => Promise<{
+      status: import('../shared/localModelRuntime').LocalRuntimeStatus;
+      models: import('../shared/localModelRuntime').LocalInstalledModel[];
+      recommended: import('../shared/localModelRuntime').RecommendedLocalModel | null;
+      catalog: import('../shared/localModelRuntime').CuratedOllamaModel[];
+      featured: import('../shared/localModelRuntime').CuratedOllamaModel[];
+      memoryGb: number;
+      recommendReason: import('../shared/localModelRuntime').LocalRecommendReason;
+      appleSilicon: boolean;
+      pull: import('../shared/localModelRuntime').LocalModelPullProgress | null;
+      pulls: import('../shared/localModelRuntime').LocalModelPullProgress[];
+      pausedPull: import('../shared/localModelRuntime').LocalModelPullProgress | null;
+      detectedLocalPresetIds: string[];
+      catalogDirty?: boolean;
+    }>;
+    localModelPull: (name: string) => Promise<{ ok: true; stopped?: 'pause' | 'cancel' }>;
+    localModelAbort: (reason: 'pause' | 'cancel', name: string) => Promise<{ ok: true }>;
+    localModelEnsure: () => Promise<{ ok: true; created: boolean }>;
+    localModelSetInPicker: (
+      name: string,
+      enabled: boolean,
+    ) => Promise<{ ok: true; created: boolean }>;
+    localModelDelete: (name: string) => Promise<{ ok: true; created: boolean }>;
+    localModelDiscardPaused: (name: string) => Promise<{ ok: true }>;
+    localModelInstall: (input: {
+      consent: true;
+    }) => Promise<{
+      ok: true;
+      status?: import('../shared/localModelRuntime').LocalRuntimeStatus;
+      created?: boolean;
+      stopped?: 'cancel';
+    }>;
+    localModelInstallAbort: () => Promise<{ ok: true }>;
+    onLocalModelStatus: (
+      callback: (status: import('../shared/localModelRuntime').LocalRuntimeStatus) => void,
+    ) => () => void;
+    onLocalModelPullProgress: (
+      callback: (progress: import('../shared/localModelRuntime').LocalModelPullProgress) => void,
+    ) => () => void;
+    onLocalModelInstallProgress: (
+      callback: (progress: import('../shared/localModelRuntime').LocalRuntimeInstallProgress) => void,
+    ) => () => void;
     /** 自定义供应商创建模板（目录 presets 段，纯 UI 模板数据）。 */
     listProviderPresets: () => Promise<{
       presets: import('@cindy/model-providers').ProviderPreset[];
@@ -4527,6 +4903,8 @@ interface ElectronAPI {
         retryable: boolean;
         status: number;
         detail?: string;
+        errorType?: string;
+        reqId?: number;
       }) => void,
     ) => () => void;
     /** Claude Auto classifier 失败后降级到 ask 的会话级通知。 */
@@ -4551,15 +4929,37 @@ interface ElectronAPI {
     ) => () => void;
     /** 精确停止会话内单个后台任务(不中断当前 turn;任务已结束幂等成功)。 */
     stopAgentTask: (sessionId: string, taskId: string) => Promise<{ ok: true }>;
+    controlPiSubagent: (input: {
+      sessionId: string;
+      taskId: string;
+      action: 'stop' | 'steer' | 'follow_up' | 'resume';
+      message?: string;
+      childId?: string;
+    }) => Promise<{ ok: boolean; controlled: number }>;
     /** 会话仍在运行的后台任务快照(挂载 / 重载后补回存量;实时增量走事件流)。 */
     listSessionBackgroundTasks: (sessionId: string) => Promise<{
-      tasks: Array<{ taskId: string; taskType?: string; toolUseId?: string; title?: string }>;
+      tasks: Array<{
+        taskId: string;
+        taskType?: string;
+        toolUseId?: string;
+        title?: string;
+        provider?: 'pi' | 'claude-code';
+      }>;
+      /** 「任务已终态、wake turn 尚未启动或仍在跑」的 continuation claim 数(桥接对账收口权威依据)。 */
+      pendingContinuations?: number;
     }>;
     /**
      * renderer → main 单向镜像「模型显示/隐藏」override 整张快照(modelVisibilityPrefs)。
-     * 让 IM /model 在 main 侧复用同一套可见性过滤,与应用内模型列表逐模型一致。fire-and-forget。
+     * 让 IM /model 在 main 侧复用同一套可见性过滤,与应用内模型列表逐模型一致；owner stamp
+     * 用于拒绝账号切换期间的迟到快照。fire-and-forget。
      */
-    syncModelVisibility: (map: Record<string, boolean>) => Promise<void>;
+    syncModelVisibility: (
+      dataOwnerId: string | null,
+      ownerGeneration: number,
+      map: Record<string, boolean>,
+    ) => Promise<void>;
+    /** Resolve the stable local/cloud owner allowed to import the pre-account preference key. */
+    claimLegacyModelVisibilityOwner: () => import('../shared/modelVisibility').ModelVisibilityLegacyOwnerClaim;
     /**
      * 「模型 / 供应商停用」override 写入(main 侧 model-disable-store);成功后 main 广播
      * PROVIDER_CHANGED,useProviders 快照刷新后 UI 拿到新的 suspended / disabled 标志。
@@ -4589,7 +4989,18 @@ interface ElectronAPI {
     ) => Promise<import('../shared/modelPriceOverride').ModelPriceOverrideView>;
 
     // 「在新窗口打开」会话多开
-    openSessionInNewWindow: (sessionId: string) => Promise<void>;
+    openSessionInNewWindow: (sessionId: string, deviceId?: string | null) => Promise<void>;
+    openSessionInNewWindowIfDroppedOutside: (
+      sessionId: string,
+      deviceId?: string | null,
+    ) => Promise<boolean>;
+    beginSessionDragPreview: (
+      label: string,
+      sessionId: string,
+      deviceId: string | null | undefined,
+      palette: import('../shared/sessionDragPreview').SessionDragPreviewPalette,
+    ) => Promise<void>;
+    endSessionDragPreview: (dragEndAtMs?: number) => void;
 
     // ── Palette `/` 命令三源 (palette refactor) ───────────────────────
     listDesktopCommands: () => Promise<{
@@ -4603,15 +5014,25 @@ interface ElectronAPI {
       ctx: { sessionId?: string; workingDir?: string; args?: string; deviceId?: string },
     ) => Promise<{ success: boolean; error?: string }>;
 
-    listAgentCommands: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<{
+    startReview: (input: {
+      sourceSessionId: string;
+      focus?: string;
+      attachments?: import('./lib/fileTypes').SerializedAttachedFile[];
+    }) => Promise<{ ok: true; runId: string; reviewerSessionId: string }>;
+
+    listAgentCommands: (
+      agentKind: 'claude-code' | 'codex' | 'pi',
+      params?: { sessionId?: string; allowManagedPiPackagePreview?: boolean },
+    ) => Promise<{
       success: boolean;
       error?: string;
       commands?: Array<{ kind: 'agent-builtin'; name: string; description: string }>;
+      runtimeStatus?: import('../shared/piPackages').PiPackageCommandRuntimeStatus;
     }>;
 
     listAgentSkills: (
       agentKind: 'claude-code' | 'codex' | 'pi',
-      params: { workingDir?: string; forceReload?: boolean },
+      params: { workingDir?: string; forceReload?: boolean; sessionId?: string },
     ) => Promise<{
       success: boolean;
       error?: string;
@@ -4623,8 +5044,18 @@ interface ElectronAPI {
         path?: string;
         scope?: string;
         enabled?: boolean;
+        runtimeStatus?: 'discovered' | 'approved' | 'loaded' | 'failed' | 'unknown';
+        runtimeCommandName?: string;
       }>;
     }>;
+
+    listPiPackages: () => Promise<import('../shared/piPackages').PiPackageListResult>;
+
+    mutatePiPackage: (
+      request: import('../shared/piPackages').PiPackageMutationRequest,
+    ) => Promise<import('../shared/piPackages').PiPackageMutationResult>;
+
+    onPiPackagesChanged: (handler: () => void) => () => void;
 
     onDesktopCommandTriggered: (
       handler: (payload: {
@@ -4765,8 +5196,27 @@ interface ElectronAPI {
         fast?: boolean;
         /** 显式选定的模型来源(标准面板 per-worker 选择);缺省 = 跟随默认路由解析。 */
         providerId?: string | null;
+        /** Worker 创建默认权限；缺省沿用当前偏好，显式值会更新偏好。 */
+        workerPermissionMode?: 'auto' | 'bypassPermissions';
+        /** 新建 Lead 专用：等首条输入 accepted 且可查询后再派任务。 */
+        deferDelegateTask?: boolean;
       },
-    ) => Promise<{ teamId: string; workerSessionId: string; workerId: string }>;
+    ) => Promise<{
+      teamId: string;
+      workerSessionId: string;
+      workerId: string;
+      dispatched: boolean;
+      workerPermissionMode: 'auto' | 'bypassPermissions';
+      uiAssignmentSnapshotBeforeMs: number;
+    }>;
+
+    dispatchOrcaUiAssignment: (
+      leadSessionId: string,
+      workerSessionId: string,
+      initialTask: string,
+      snapshotBeforeMs: number,
+      waitForLeadHistory: boolean,
+    ) => Promise<unknown>;
 
     /**
      * F-COLLAB: 关闭 lead session 当前的协同 workflow。
@@ -4960,7 +5410,10 @@ interface ElectronAPI {
     };
 
     /** Resolve a pending interaction (permission / ask_user_question / plan_review). */
-    resolveInteraction: (requestId: string, decision: Record<string, unknown>) => Promise<void>;
+    resolveInteraction: (
+      requestId: string,
+      decision: Record<string, unknown>,
+    ) => Promise<{ accepted: boolean }>;
 
     /** Submit one inline plugin Secret through the local trusted-frame-only IPC. */
     submitPluginSetupInline: (request: {
@@ -5026,6 +5479,7 @@ interface ElectronAPI {
     setEffort: (sessionId: string, effort: string) => Promise<void>;
     setPermissionMode: (sessionId: string, mode: string) => Promise<void>;
     setFastMode: (sessionId: string, enabled: boolean) => Promise<void>;
+    setThinkingEnabled: (sessionId: string, enabled: boolean) => Promise<void>;
     /** 计划模式一级开关(与 permissionMode 正交); DB 持久化由调用方另调 sessionService.update({ planModeEnabled }) */
     setPlanMode: (sessionId: string, enabled: boolean) => Promise<void>;
     /** 会话导出 HTML(pi 原生); 主进程弹保存对话框 + 导出 + 在文件管理器显示; 返回路径或 null(取消/不支持) */
@@ -5139,6 +5593,15 @@ interface ElectronAPI {
       patch: SubagentModelSettingsPatch,
     ) => Promise<SubagentModelSettingsWriteResult>;
     subagentModelSettingsReset: () => Promise<SubagentModelSettingsWriteResult>;
+    auxiliaryModelSettingsGet: () => Promise<AuxiliaryModelSettingsState>;
+    auxiliaryModelSettingsSet: (
+      patch: AuxiliaryModelSettingsPatch,
+    ) => Promise<AuxiliaryModelSettingsState>;
+
+    /** 视觉桥设置（目标模型勾选 + 视觉后端主/备选）。 */
+    visionBridgeSettingsGet: () => Promise<VisionBridgeSettingsState>;
+    visionBridgeSettingsSet: (patch: VisionBridgeSettingsPatch) => Promise<VisionBridgeSettingsState>;
+    visionBridgeSettingsReset: () => Promise<VisionBridgeSettingsState>;
 
     /** Agent 资源占用治理(命令并发上限/进程优先级/工具链限核)。 */
     agentResourceSettingsGet: () => Promise<AgentResourceSettingsWire>;
@@ -5293,6 +5756,19 @@ interface ElectronAPI {
     xaiOAuthCancel: () => Promise<{ authorized: boolean }>;
 
     // Push channels
+    listTurnChangeSets: (
+      sessionId: string,
+    ) => Promise<import('../shared/turnChangeSet').TurnChangeSetSummary[]>;
+    getTurnChangeSets: (
+      sessionId: string,
+      ids: string[],
+    ) => Promise<import('../shared/turnChangeSet').TurnChangeSetDetail[]>;
+    applyTurnChangeSet: (
+      sessionId: string,
+      id: string,
+      action: import('../shared/turnChangeSet').TurnChangeAction,
+    ) => Promise<import('../shared/turnChangeSet').TurnChangeActionResult>;
+    onTurnChangeSetUpdated: (cb: (data: unknown, ownerStamp?: unknown) => void) => () => void;
     onEvent: (cb: (data: unknown) => void) => () => void;
     onStatusChanged: (cb: (data: unknown) => void) => () => void;
     onInteractionRequest: (cb: (data: unknown) => void) => () => void;
@@ -5320,6 +5796,15 @@ interface ElectronAPI {
       agentKind: 'claude-code' | 'codex' | 'pi';
       isUserText?: boolean;
     }) => Promise<{ applied: boolean; done: boolean }>;
+    /** 输入框推荐提示词:turn 结束后预测用户下一步输入。 */
+    predictNextPrompt: (request: {
+      sessionId: string;
+      agentKind: 'claude-code' | 'codex' | 'pi';
+      messages: Array<{ role: string; content: string }>;
+      workingDir?: string;
+      turnGen: number;
+      completionRevision: number;
+    }) => Promise<{ prompt: string | null }>;
     helpAsk: (
       request: import('../shared/helpTypes').HelpAskRequest,
     ) => Promise<import('../shared/helpTypes').HelpAnswerResult>;
@@ -5518,6 +6003,8 @@ interface ElectronAPI {
           } | null,
         ) => void,
       ) => () => void;
+      getXaiSubscription: () => Promise<unknown | null>;
+      onXaiSubscriptionChanged: (cb: (payload: unknown) => void) => () => void;
     };
 
     /* ── 跨 Agent 工作区互转（双向，5 项独立判断；进度 step 通过 push 流转）── */
@@ -5680,6 +6167,33 @@ interface ElectronAPI {
       setAdbPath: (adbPathOverride: string | null) => Promise<AndroidAutomationConfigState>;
       prepareAdb: () => Promise<AndroidAdbPreparationState>;
     };
+    iosSimulator: {
+      requestAccess: (
+        request: IOSSimulatorAccessRequest,
+      ) => Promise<IOSSimulatorAccessRequestResult>;
+      status: (request: IOSSimulatorStatusRequest) => Promise<IOSSimulatorSessionStatus>;
+      call: (request: IOSSimulatorToolRequest) => Promise<IOSSimulatorToolResponse>;
+      setAgentControl: (
+        request: IOSSimulatorAgentControlRequest,
+      ) => Promise<IOSSimulatorToolResponse>;
+      setMutationControl: (
+        request: IOSSimulatorMutationControlRequest,
+      ) => Promise<IOSSimulatorToolResponse>;
+      setViewerVisibility: (
+        request: IOSSimulatorViewerVisibilityRequest,
+      ) => Promise<IOSSimulatorToolResponse>;
+      retryNativeRoute: (
+        request: IOSSimulatorRetryNativeRouteRequest,
+      ) => Promise<IOSSimulatorToolResponse>;
+      latestFrame: (request: IOSSimulatorViewerRouteRequest) => Promise<IOSSimulatorToolResponse>;
+      setStreamProfile: (
+        request: IOSSimulatorStreamProfileRequest,
+      ) => Promise<IOSSimulatorToolResponse>;
+      liveTouch: (request: IOSSimulatorLiveTouchRequest) => Promise<IOSSimulatorToolResponse>;
+      onH264Frame: (callback: (payload: IOSSimulatorH264FramePush) => void) => () => void;
+      onRouteStatus: (callback: (payload: IOSSimulatorRouteStatusPush) => void) => () => void;
+      onFocusRequest: (callback: (request: IOSSimulatorFocusRequest) => void) => () => void;
+    };
     computer: {
       status: (options?: ComputerDriverStatusOptions) => Promise<ComputerDriverStatus>;
       installDriver: () => Promise<ComputerDriverInstallResult>;
@@ -5701,43 +6215,6 @@ interface ElectronAPI {
       onUpdateProgress: (callback: (progress: ComputerDriverUpdateProgress) => void) => () => void;
     };
   };
-}
-
-/* ── Release notes raw payload shape from CDN ── */
-
-/** Author-grouped item: one block per contributor, with their bullets. */
-interface RawReleaseNotesItem {
-  name: string;
-  list: string[];
-}
-
-interface RawReleaseNotesSection {
-  title: string;
-  items: RawReleaseNotesItem[];
-}
-
-/** Topic-format (v2) block: one user-facing theme with a short narrative. */
-interface RawReleaseNotesTopic {
-  emoji?: string;
-  title: string;
-  text: string;
-  contributors?: string[];
-}
-
-interface RawReleaseNotesPayload {
-  version: string;
-  date: string;
-  /**
-   * Flat contributor list — collective hall-of-fame on top of per-item `by`.
-   * Optional: older notice files predate the field (renderer defaults to []).
-   */
-  contributors?: string[];
-  /** Legacy author-grouped sections. Absent on topic-format payloads. */
-  sections?: RawReleaseNotesSection[];
-  /** Topic-format blocks. Non-empty ⇒ renderer uses the topic layout. */
-  topics?: RawReleaseNotesTopic[];
-  /** Optional one-line lead above the topics (e.g. PR/commit counts). */
-  intro?: string;
 }
 
 /* ── SkillHub Registry types (v0.6) ──
@@ -5789,15 +6266,25 @@ interface SkillhubSkill {
   id: string;
   /** URL 匹配键 — 不含 engine，和路由格式一致，用于侧栏选中高亮。 */
   urlKey: string;
+  /** Pi customization 的 canonical physical source hash；Pi 条目始终提供。 */
+  sourceKey?: string;
+  /** 同一 URL 基键存在多个来源时，详情路由必须携带 sourceKey。 */
+  requiresSourceKey?: boolean;
   /** 来自哪个 agent 引擎。 */
   engine: 'claude-code' | 'codex' | 'pi';
   /** 发现该 skill 的所有引擎专属路径（去重后）。 */
-  linkedEngines: Array<{ engine: 'claude-code' | 'codex' | 'pi'; label: string }>;
+  linkedEngines: Array<{
+    engine: 'claude-code' | 'codex' | 'pi';
+    label: string;
+    runtimeStatus?: 'discovered' | 'approved' | 'loaded' | 'failed' | 'unknown';
+  }>;
   kind: SkillhubKind;
   scope: SkillhubScope;
   name: string;
   description?: string;
   absolutePath: string;
+  /** Lexical path reported by discovery before canonical realpath deduplication. */
+  discoveredPath?: string;
   mdPath: string;
   files: SkillhubFileEntry[];
   frontmatter?: Record<string, unknown>;

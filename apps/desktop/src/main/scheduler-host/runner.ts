@@ -42,6 +42,8 @@ import type {
   TurnContinuationState,
 } from '@cindy/maker-core';
 import { clampEffortToSupported } from '@cindy/model-providers';
+import { shouldApplyExclusiveProviderRerouteLive } from '../maker-host/model-route-guard-live.js';
+import { SCHEDULER_RUN_ID_VENDOR_OPTION } from '@cindy/maker-scheduler';
 import type {
   Schedule,
   ScheduleRun,
@@ -63,6 +65,7 @@ import {
 import { setSessionFastMode } from '../maker-host/session-effort-store.js';
 import {
   CredentialModeSwitchBusyError,
+  isCodexThreadModelProviderIdentityMismatch,
   prepareLocalCodexCredentialModeSwitch,
   prepareLocalSessionCredentialModeSwitch,
   shouldCloseSessionForCredentialSwitch,
@@ -266,11 +269,15 @@ export interface MakerScheduleRunnerDeps {
     defaultEffort: string | null;
     supportsFastMode: boolean;
   } | null>;
-  /** Pi 空模型的实时默认路由；model/providerId 必须来自同一连接来源快照。 */
+  /**
+   * Headless 默认路由的实时快照。Pi 空模型用它成对解析 model/providerId；
+   * Claude fresh session 传 modelId，把隐式来源物化为真实 provider，避免凭证 fallback。
+   */
   resolveDefaultModelRoute?: (
     agent: AgentKind,
     preferredProviderId?: string | null,
-  ) => Promise<{ model: string; providerId: string } | null>;
+    modelId?: string,
+  ) => Promise<{ model: string; providerId: string | null; catalogKnown?: boolean } | null>;
 }
 
 /**
@@ -282,6 +289,9 @@ class QueuedRouteDisabledError extends Error {}
 
 /** Pi 原生路由热切失败；继续派发会把任务发给旧 provider，必须在 vendor 前站下。 */
 class QueuedPiRouteSyncError extends Error {}
+
+/** 当前 Codex provider store 与 live thread 身份错配；继续派发会把模型送到错误上游。 */
+class QueuedCodexThreadIdentityMismatchError extends Error {}
 
 /**
  * 排队等派发超过 QUEUED_DISPATCH_MAX_WAIT_MS。用独立类型让 dispatchGate 的 catch
@@ -310,14 +320,88 @@ interface TurnCompletionWaiterOptions {
   requireTurnOrigin?: boolean;
 }
 
+interface SchedulerRunContextOwner {
+  session: Pick<Session, 'id' | 'setVendorOptions'>;
+  runId: string;
+}
+
 export class MakerScheduleRunner implements ScheduleRunner {
   private scheduler: Scheduler | null = null;
+  /**
+   * The vendor option is a single session-level value, so a late finally from
+   * an older fire must not clear a newer fire's binding. The map is the host's
+   * ownership record for that value; it is deliberately not persisted.
+   */
+  private readonly schedulerRunContextOwners = new Map<string, SchedulerRunContextOwner>();
 
   constructor(private readonly deps: MakerScheduleRunnerDeps) {}
 
   /** scheduler-host/index.ts 在 startScheduler 内调一次，让 runner 反向 pause schedule */
   attachScheduler(scheduler: Scheduler): void {
     this.scheduler = scheduler;
+  }
+
+  /**
+   * Keep the scheduler's authoritative run id in the host-owned session
+   * context for the lifetime of the actual turn, including auto-resume
+   * continuations. The normal session→run mapping remains the primary path;
+   * this is the in-process fallback when that mapping is gone.
+   */
+  private async bindSchedulerRunContext(
+    session: Pick<Session, 'id' | 'setVendorOptions'>,
+    runId: string,
+    holder: EphemeralSessionHolder,
+  ): Promise<void> {
+    if (typeof session.setVendorOptions !== 'function') return;
+    const owner: SchedulerRunContextOwner = { session, runId };
+    // Publish ownership before the async write starts. setVendorOptions mutates
+    // the shared session context before its promise necessarily settles, so an
+    // older fire must already see this generation and skip its late cleanup.
+    this.schedulerRunContextOwners.set(session.id, owner);
+    holder.schedulerRunContextOwner = owner;
+    try {
+      await session.setVendorOptions({ [SCHEDULER_RUN_ID_VENDOR_OPTION]: runId });
+    } catch (err) {
+      if (this.schedulerRunContextOwners.get(session.id) === owner) {
+        this.schedulerRunContextOwners.delete(session.id);
+        holder.schedulerRunContextOwner = undefined;
+        try {
+          await session.setVendorOptions({ [SCHEDULER_RUN_ID_VENDOR_OPTION]: undefined });
+        } catch (rollbackErr) {
+          this.deps.logger.warn?.('[runner] scheduler run context rollback failed (non-fatal)', {
+            runId,
+            error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+          });
+        }
+      }
+      this.deps.logger.warn?.('[runner] scheduler run context bind failed (non-fatal)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private async clearSchedulerRunContext(holder: EphemeralSessionHolder): Promise<void> {
+    const holderOwner = holder.schedulerRunContextOwner;
+    holder.schedulerRunContextOwner = undefined;
+    if (!holderOwner) return;
+    const { session, runId } = holderOwner;
+    if (typeof session.setVendorOptions !== 'function') return;
+    const currentOwner = this.schedulerRunContextOwners.get(session.id);
+    if (currentOwner !== holderOwner) {
+      // Another fire now owns the shared session-level option. Do not let this
+      // older fire erase the newer run's auto-resume context.
+      return;
+    }
+    this.schedulerRunContextOwners.delete(session.id);
+    try {
+      await session.setVendorOptions({ [SCHEDULER_RUN_ID_VENDOR_OPTION]: undefined });
+    } catch (err) {
+      this.deps.logger.warn?.('[runner] scheduler run context clear failed (non-fatal)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
@@ -402,6 +486,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     } finally {
       holder.releaseAgentSwitchLock?.();
       holder.releaseAgentSwitchLock = undefined;
+      await this.clearSchedulerRunContext(holder);
       holder.headlessGhostSetupTurn?.close();
       if (
         holder.sessionId &&
@@ -618,7 +703,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
           }
           holder.releaseAgentSwitchLock?.();
           holder.releaseAgentSwitchLock = undefined;
-          return await this.fireHeartbeatViaQueue(schedule, ctx, sessionId, {
+          return await this.fireHeartbeatViaQueue(schedule, ctx, sessionId, holder, {
             model: meta?.model,
             effort: meta?.effort,
             fastMode: meta?.fastMode,
@@ -700,19 +785,50 @@ export class MakerScheduleRunner implements ScheduleRunner {
         : undefined;
     const explicitProviderId = schedule.providerId?.trim() ? schedule.providerId.trim() : null;
     const defaultRouteProviderId = explicitProviderId ?? (isHeartbeat ? heartbeatProviderId : null);
-    const dynamicDefaultRoute =
-      !rawModel?.trim() && effectiveAgentKind === 'pi'
-        ? ((await this.deps.resolveDefaultModelRoute?.(
-            effectiveAgentKind,
-            defaultRouteProviderId,
-          )) ?? null)
-        : null;
+    const modelHint = rawModel?.trim() ? rawModel : defaultModelFor(effectiveAgentKind);
+    // Fresh Claude schedules must freeze the same provider rail the UI would use for this model.
+    // Leaving providerId null delegates credential selection to the legacy auth fallback, which can
+    // silently choose the Cindy gateway even when the only usable source is an Anthropic subscription.
+    const shouldMaterializeFreshClaudeProvider =
+      !isHeartbeat && effectiveAgentKind === 'claude-code' && !explicitProviderId;
+    let dynamicDefaultRoute: {
+      model: string;
+      providerId: string | null;
+      catalogKnown?: boolean;
+    } | null = null;
+    if (!modelHint && effectiveAgentKind === 'pi') {
+      dynamicDefaultRoute =
+        (await this.deps.resolveDefaultModelRoute?.(
+          effectiveAgentKind,
+          defaultRouteProviderId,
+        )) ?? null;
+    } else if (shouldMaterializeFreshClaudeProvider) {
+      dynamicDefaultRoute =
+        (await this.deps.resolveDefaultModelRoute?.(
+          effectiveAgentKind,
+          defaultRouteProviderId,
+          modelHint,
+        )) ?? null;
+    }
     const model = rawModel?.trim()
       ? rawModel
       : (dynamicDefaultRoute?.model ?? defaultModelFor(effectiveAgentKind));
     if (!model) {
       throw new Error('schedule route unavailable: Pi has no connected model source');
     }
+    if (
+      shouldMaterializeFreshClaudeProvider &&
+      this.deps.resolveDefaultModelRoute &&
+      (!dynamicDefaultRoute ||
+        (dynamicDefaultRoute.providerId === null && dynamicDefaultRoute.catalogKnown !== false))
+    ) {
+      throw new Error(
+        `schedule route unavailable: Claude Code has no connected source for model "${model}"`,
+      );
+    }
+    const materializedDefaultProviderId = shouldMaterializeFreshClaudeProvider
+      ? (dynamicDefaultRoute?.providerId ?? null)
+      : null;
     const permissionMode = defaultPermissionModeForSchedule();
     // fastMode 对 Codex / Pi 生效（claude-code agent 忽略此字段）；Claude 恒不传，
     // 确保「不影响 Claude」。heartbeat 沿用 session meta 里的 fast 态，非 heartbeat 取 schedule。
@@ -738,7 +854,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
           `schedule route unavailable: model "${model}" is disabled in settings (${verdict.reason})`,
         );
       }
-      if (verdict.kind === 'reroute' && !createProviderId) {
+      if (verdict.kind === 'reroute' && shouldApplyExclusiveProviderRerouteLive(createProviderId)) {
         createProviderId = verdict.providerId;
         reroutedProviderId = verdict.providerId;
       }
@@ -794,25 +910,44 @@ export class MakerScheduleRunner implements ScheduleRunner {
       // 隐式改道(reroutedProviderId)也是本次 fire 的落地来源:跨凭证家族的改道
       // (如停用 XD 默认 → 改道 Anthropic)若不进本判定,会复用旧凭证 spawn 的
       // live session,请求仍走旧轨道或直接鉴权失败(PR #744 review 第二十三轮)。
-      const nextProviderId = explicitProviderId ?? reroutedProviderId ?? currentProviderId;
+      const nextProviderId =
+        explicitProviderId ??
+        reroutedProviderId ??
+        materializedDefaultProviderId ??
+        currentProviderId;
+      const credentialSwitchInput = liveSession
+        ? {
+            agentKind: liveSession.agentKind,
+            remoteHostId: liveSession.remoteHostId,
+            currentProviderId,
+            nextProviderId,
+            currentModel: liveSession.model,
+            nextModel: model,
+            currentCodexProxyActive: liveSession.codexProxyActive,
+            currentCodexThreadModelProviderId: liveSession.codexThreadModelProviderId,
+          }
+        : null;
       if (
         liveSession &&
-        shouldCloseSessionForCredentialSwitch({
-          agentKind: liveSession.agentKind,
-          remoteHostId: liveSession.remoteHostId,
-          currentProviderId,
-          nextProviderId,
-          currentModel: liveSession.model,
-          nextModel: model,
-          currentCodexProxyActive: liveSession.codexProxyActive,
-        })
+        credentialSwitchInput &&
+        shouldCloseSessionForCredentialSwitch(credentialSwitchInput)
       ) {
+        // provider store 可能已先于 runtime 被覆盖。若 live thread 连「当前已登记路由」
+        // 都不匹配，这是单 thread 陈旧，不是 shared host 凭证切换；只关目标会话，
+        // 避免无关 Codex 会话被关闭或因其中一个正忙而阻塞修复。
+        const currentThreadRouteMismatch =
+          liveSession.agentKind === 'codex' &&
+          isCodexThreadModelProviderIdentityMismatch({
+            ...credentialSwitchInput,
+            nextProviderId: currentProviderId,
+            nextModel: liveSession.model,
+          });
         if (isHeartbeat && isSessionInTurn(sessionId)) {
           return this.failOrDeferSessionRunning(schedule, ctx, sessionId, true);
         }
         try {
           throwIfFireAborted(ctx.signal, 'credential mode switch');
-          if (liveSession.agentKind === 'codex') {
+          if (liveSession.agentKind === 'codex' && !currentThreadRouteMismatch) {
             await prepareLocalCodexCredentialModeSwitch({
               maker: this.deps.maker,
               isSessionInTurn,
@@ -841,6 +976,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
           nextProviderId,
           fromModel: liveSession.model,
           toModel: model,
+          closeScope: currentThreadRouteMismatch ? 'session' : 'all-local-codex',
         });
       }
     }
@@ -914,7 +1050,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
           // 对 Pi 而言失败后来源未知；继续 send 可能把内容发给旧 BYOM endpoint，
           // 不能沿用 Claude/Codex 的 non-fatal 模型切换降级。
           throw new Error(
-            `schedule Pi route sync failed before dispatch (model "${model}", provider "${reusedPiRouteProviderId ?? 'cindy'}")`,
+            `schedule Pi route sync failed before dispatch (model "${model}", provider "${reusedPiRouteProviderId ?? 'cindy'}"): ${err instanceof Error ? err.message : String(err)}`,
             { cause: err },
           );
         }
@@ -977,8 +1113,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
     //   - heartbeat 且留空 → 沿用绑定会话的来源:hydrate 只在内存无条目时写,**不覆盖**
     //     用户在聊天里刚切的更新值(runner 绕过了 register 的 hydrate funnel,冷 resume
     //     时内存为空,这一步把 DB 里的 provider_id 补回来 → honor 聊天所选来源)。
-    //   - 非 heartbeat 且留空 → fresh session 保持默认(null)→ 原生默认路由,不动它。
-    // null 的字节级不变性见 session-provider-store 契约;空值全程不进新分支(no-break)。
+    //   - 非 heartbeat Claude 且留空 → 把实时解析出的默认来源显式写入，确保 spawn
+    //     credential mode、proxy 路由、coordinator baseline 与落库使用同一个 provider。
+    //   - 其它非 heartbeat 且留空 → 保持既有默认路由语义。
     if (explicitProviderId) {
       setSessionProvider(session.id, explicitProviderId);
     } else if (reroutedProviderId) {
@@ -987,6 +1124,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
       // 心跳生效,否则照旧经停用的隐式默认派发(PR #744 review 第十四轮)。fresh
       // spawn 时与 opts.providerId 幂等。
       setSessionProvider(session.id, reroutedProviderId);
+    } else if (materializedDefaultProviderId) {
+      setSessionProvider(session.id, materializedDefaultProviderId);
     } else if (isHeartbeat) {
       hydrateSessionProvider(session.id, heartbeatProviderId);
     }
@@ -1029,10 +1168,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
         // 下次 fire 读到的 meta.model 必须跟实际运行一致（4.4.1 已 setModel）。
         // 同 effort: 复用路径 setModel 失败时跳过, 留给下次 fire 重试。
         model: heartbeatModelChanged && modelSwitchApplied ? model : undefined,
-        // 任务级显式选了来源时落 sessions.provider_id —— 让聊天里打开这个会话时
-        // 来源 picker 与下次 fire / 冷 resume 的路由一致(register hydrate funnel 读它)。
-        // 留空(沿用默认 / 沿用会话)时不写,保留会话自己的 provider_id 不动(no-break)。
-        providerId: explicitProviderId ?? undefined,
+        // 显式来源或 fresh Claude 物化出的默认来源都要落 sessions.provider_id ——
+        // 聊天 picker、下次 heartbeat / 冷 resume 与本轮真实凭证/endpoint 才不会漂移。
+        // heartbeat 留空时仍不写,保留绑定会话自己的 provider_id。
+        providerId: explicitProviderId ?? materializedDefaultProviderId ?? undefined,
         // 回退分配了对话工作区的会话按 'dialogue' 落库 —— 侧边栏才会归入
         // "对话"分组(覆盖存量 workspaceKind='project' 但无目录的旧任务)。
         workspaceKind: !isHeartbeat
@@ -1076,6 +1215,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
         schedule,
         ctx,
         session.id,
+        holder,
         {
           model: session.model ?? model,
           effort: runtimeReconciledEffort,
@@ -1188,7 +1328,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
             `schedule route unavailable: model "${runtimeModel}" is disabled in settings (${verdict.reason}, revalidated before dispatch)`,
           );
         }
-        if (verdict.kind === 'reroute' && !dispatchProviderId) {
+        if (verdict.kind === 'reroute' && shouldApplyExclusiveProviderRerouteLive(dispatchProviderId)) {
           // 晚到的隐式改道(createSession 之后目录才变)跨凭证形态时不能只热换
           // provider store:进程是旧凭证形态 spawn 的,热换后这次 send 仍用旧凭证
           // 下单或直接鉴权失败。需要关会话重建的组合按明确错误失败收口 —— 下一轮
@@ -1203,6 +1343,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
               currentModel: runtimeModel,
               nextModel: runtimeModel,
               currentCodexProxyActive: session.codexProxyActive,
+              currentCodexThreadModelProviderId: session.codexThreadModelProviderId,
             })
           ) {
             throw new Error(
@@ -1214,7 +1355,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
               await session.setModel(runtimeModel, { providerId: verdict.providerId });
             } catch (err) {
               throw new Error(
-                `schedule Pi route sync failed after pre-dispatch reroute (model "${runtimeModel}", provider "${verdict.providerId}")`,
+                `schedule Pi route sync failed after pre-dispatch reroute (model "${runtimeModel}", provider "${verdict.providerId}"): ${err instanceof Error ? err.message : String(err)}`,
                 { cause: err },
               );
             }
@@ -1231,6 +1372,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
           // turn 误标成 headless；只在本轮 send 真正跨过接受边界后 acquire。
           // fire 已收口后才到达的迟发 callback 由 guard 拒绝，避免重新污染 session。
           if (!holder.headlessGhostSetupTurn?.markDispatched()) return;
+          // Bind only after Session.send accepts this turn. A competing fire
+          // rejected with SESSION_RUNNING must not overwrite the active run's
+          // shared auto-resume context before it is rejected.
+          await this.bindSchedulerRunContext(session, ctx.runId, holder);
           turnAccepted = true;
           // turn 已被会话接受 → 此刻才落定 sessionId → 本轮 runId 反向映射(供按
           // session 静默解析)。在 send 被接受这一刻写,被 SESSION_RUNNING 拒的并发 run
@@ -1439,6 +1584,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     schedule: Schedule,
     ctx: FireContext,
     sessionId: string,
+    holder: EphemeralSessionHolder,
     /** 绑定会话的当前路由基线(meta.model / meta.effort / sessions.provider_id)。 */
     routingBaseline: {
       model?: string;
@@ -1457,6 +1603,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
         schedule,
         ctx,
         sessionId,
+        holder,
         routingBaseline,
         () => {
           // A cancelled queue item may still report a late accept after the
@@ -1478,6 +1625,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     schedule: Schedule,
     ctx: FireContext,
     sessionId: string,
+    holder: EphemeralSessionHolder,
     routingBaseline: {
       model?: string;
       effort?: string;
@@ -1671,23 +1819,35 @@ export class MakerScheduleRunner implements ScheduleRunner {
           blockAcceptedDispatch(undefined, 'session unavailable for queued route sync');
           return;
         }
+        // Only bind at the accepted→vendor-dispatch boundary. Binding while
+        // the item is merely queued would let an unrelated interactive turn
+        // observe this scheduler run id.
+        await this.bindSchedulerRunContext(live, ctx.runId, holder);
         // 任务编辑器里选的 model/effort/来源在排队派发时刻热同步到会话(此回调
         // 运行于 vendor dispatch 之前,setModel 对本 turn 生效)—— 对齐直发路径
         // 的 4.4.1/4.4.2 语义,不让"任务改了模型且每轮都撞忙"的用户被静默忽略
-        // (PR #972 review P2)。凭证形态需要切换的场景无法热切,跳过并留日志。
+        // (PR #972 review P2)。凭证形态需要切换的场景无法热切；当前路由仍一致时
+        // 跳过并留日志，thread/store 已错配时 fail-closed。
         try {
           await this.applyQueuedHeartbeatRouting(schedule, live, routingBaseline);
         } catch (err) {
-          if (err instanceof QueuedRouteDisabledError || err instanceof QueuedPiRouteSyncError) {
-            // 停用轴准入拒绝(PR #744 review 第六轮):这次排队心跳是新的付费调用,
-            // 目标路由已被停用时不能"保持 live 路由继续派发"。此刻仍在 vendor
-            // dispatch 之前 —— 取消这次派发(同 late-dispatch 路径),run 以明确错误
-            // 失败收口(不含 abort 字样 ⇒ 引擎按 failed 记录)。
+          if (
+            err instanceof QueuedRouteDisabledError ||
+            err instanceof QueuedPiRouteSyncError ||
+            err instanceof QueuedCodexThreadIdentityMismatchError
+          ) {
+            // 停用轴拒绝、Pi 原生同步失败、Codex thread/store 错配都不能放行这次
+            // 新付费调用。此刻仍在 vendor dispatch 之前 —— 取消派发并让 run 以
+            // 明确错误失败收口(不含 abort 字样 ⇒ 引擎按 failed 记录)。
             failAfterAccept(err);
             failDispatch(err);
             blockAcceptedDispatch(
               live,
-              err instanceof QueuedPiRouteSyncError ? 'Pi route sync failed' : 'route disabled',
+              err instanceof QueuedPiRouteSyncError
+                ? 'Pi route sync failed'
+                : err instanceof QueuedCodexThreadIdentityMismatchError
+                  ? 'Codex thread provider identity mismatch'
+                  : 'route disabled',
             );
             return;
           }
@@ -1905,7 +2065,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
    * 排队派发时刻的路由热同步:schedule 显式设置的 model / effort / 来源(供应商)
    * 优先于绑定会话当前值(与直发路径 4.4.1/4.4.2 同语义);留空沿用会话当前值。
    * 凭证形态需要关会话重建的组合(shouldCloseSessionForCredentialSwitch)无法在
-   * 派发时刻热切 —— 跳过本轮同步,沿用会话当前路由,下次空闲直发照常收敛。
+   * 派发时刻热切 —— 当前 thread 与当前 provider store 一致时跳过本轮同步、沿用
+   * 当前路由；两者已经错配时必须在 vendor dispatch 前失败，不能把新模型送到旧身份。
    * setModel / setEffort 成功才落库 meta,失败保留旧值让下轮重试(与直发路径的
    * 复用会话语义一致)。
    */
@@ -1948,11 +2109,27 @@ export class MakerScheduleRunner implements ScheduleRunner {
           `schedule route unavailable: model "${targetModel}" is disabled in settings (${verdict.reason})`,
         );
       }
-      if (verdict.kind === 'reroute' && !routeProviderId) {
+      if (verdict.kind === 'reroute' && shouldApplyExclusiveProviderRerouteLive(routeProviderId)) {
         applyProviderId = verdict.providerId;
       }
     }
     const nextProviderId = applyProviderId ?? currentProviderId;
+    if (
+      isCodexThreadModelProviderIdentityMismatch({
+        agentKind: live.agentKind,
+        remoteHostId: live.remoteHostId,
+        currentProviderId,
+        nextProviderId: currentProviderId,
+        currentModel: live.model,
+        nextModel: live.model,
+        currentCodexProxyActive: live.codexProxyActive,
+        currentCodexThreadModelProviderId: live.codexThreadModelProviderId,
+      })
+    ) {
+      throw new QueuedCodexThreadIdentityMismatchError(
+        `queued heartbeat Codex thread provider identity does not match the current session route (session "${live.id}")`,
+      );
+    }
     if (
       shouldCloseSessionForCredentialSwitch({
         agentKind: live.agentKind,
@@ -1962,6 +2139,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
         currentModel: live.model,
         nextModel: targetModel,
         currentCodexProxyActive: live.codexProxyActive,
+        currentCodexThreadModelProviderId: live.codexThreadModelProviderId,
       })
     ) {
       // 早退 = 本轮沿用 live 当前路由派发:这条保留路由自己也要过停用裁决 ——
@@ -2012,7 +2190,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
         modelApplied = false;
         if (mustSyncPiNativeRoute) {
           throw new QueuedPiRouteSyncError(
-            `schedule Pi route sync failed before queued dispatch (model "${targetModel}", provider "${nextProviderId ?? 'cindy'}")`,
+            `schedule Pi route sync failed before queued dispatch (model "${targetModel}", provider "${nextProviderId ?? 'cindy'}"): ${err instanceof Error ? err.message : String(err)}`,
             { cause: err },
           );
         }
@@ -2472,6 +2650,8 @@ interface EphemeralSessionHolder {
   keepAlive?: boolean;
   /** heartbeat direct-send route lock; released immediately after Session.send settles. */
   releaseAgentSwitchLock?: () => void;
+  /** unique ownership generation for the session-level scheduler run context. */
+  schedulerRunContextOwner?: SchedulerRunContextOwner;
 }
 
 interface HeadlessGhostSetupTurnGuard {

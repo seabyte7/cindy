@@ -8,7 +8,7 @@ import { BUILTIN_REFRESHABLE_PROVIDER_IDS } from '../../../shared/providerModelR
 import type { DbClient } from '../../localDb/client/DbClient.js';
 import { clearCurrentDbClient, setCurrentDbClient } from '../../localDb/client/current.js';
 import * as schema from '../../localDb/schema.js';
-import { listCustomProviders } from '../../maker-host/custom-provider-store.js';
+import { getCustomProvider, listCustomProviders } from '../../maker-host/custom-provider-store.js';
 import { throwIpcError } from '../../utils/ipcValidate.js';
 import { MAKER_INVOKE } from '../channels.js';
 import { registerProviderHandlers, type ProviderHandlerDeps } from '../providerHandlers.js';
@@ -215,6 +215,7 @@ describe('provider:list IPC handler', () => {
           upstream: 'https://custom.example/v1',
           authStrategy: 'api-key-header',
           headerOverride: { Authorization: 'Bearer secret' },
+          headerOverrideState: 'configured',
         },
       },
     } as unknown as ProviderView;
@@ -227,6 +228,7 @@ describe('provider:list IPC handler', () => {
       providers: ProviderView[];
     };
     expect(result.providers[0].routing.pi?.headerOverride).toBeUndefined();
+    expect(result.providers[0].routing.pi?.headerOverrideState).toBe('configured');
     expect(result.providers[0].routing.pi?.upstream).toBe('https://custom.example/v1');
   });
 
@@ -241,6 +243,7 @@ describe('provider:list IPC handler', () => {
           upstream: 'https://custom.example/v1',
           authStrategy: 'api-key-header',
           headerOverride: { Authorization: 'Bearer secret' },
+          headerOverrideState: 'configured',
         },
       },
     } as unknown as ProviderView;
@@ -253,6 +256,7 @@ describe('provider:list IPC handler', () => {
       providers: ProviderView[];
     };
     expect(result.providers[0].routing.pi?.headerOverride).toBeUndefined();
+    expect(result.providers[0].routing.pi?.headerOverrideState).toBe('configured');
     // 非密字段仍完整回传,编辑表单据此渲染 endpoint/鉴权策略。
     expect(result.providers[0].routing.pi?.upstream).toBe('https://custom.example/v1');
   });
@@ -788,6 +792,28 @@ describe('provider:models-refresh handler', () => {
       message: '[MODEL_ACCESS_FAILED] Cindy AI model list refresh failed.',
     });
   });
+
+  it('dev 禁网走专用错误码透传,不伪装成可重试的 INTERNAL', async () => {
+    const harness = new IpcHarness();
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        refreshBuiltinModels: async () => {
+          throwIpcError(
+            'MODEL_CATALOG_FETCH_DISABLED',
+            '模型目录远程拉取未启用,本次未发起请求',
+          );
+        },
+      }),
+    );
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REFRESH, 'xai'),
+    ).rejects.toMatchObject({
+      code: 'MODEL_CATALOG_FETCH_DISABLED',
+      message: '[MODEL_CATALOG_FETCH_DISABLED] 模型目录远程拉取未启用,本次未发起请求',
+    });
+  });
 });
 
 describe('provider:models-auto-refresh handler', () => {
@@ -934,6 +960,7 @@ describe('provider:custom:* CRUD handlers', () => {
       runtimes: {
         pi: {
           baseUrl: 'https://header-auth.example/v1',
+          wireProtocol: 'openai-chat',
           models: [{ id: 'm', name: 'M' }],
           headers: {
             Authorization: 'Bearer top-secret',
@@ -982,6 +1009,7 @@ describe('provider:custom:* CRUD handlers', () => {
       runtimes: {
         pi: {
           baseUrl: 'https://header-rollback.example/v1',
+          wireProtocol: 'openai-chat',
           models: [{ id: 'm', name: 'M' }],
           headers: { Authorization: 'Bearer old' },
         },
@@ -1003,6 +1031,7 @@ describe('provider:custom:* CRUD handlers', () => {
       runtimes: {
         pi: {
           baseUrl: 'https://different-endpoint.example/v1',
+          wireProtocol: 'openai-chat',
           models: [{ id: 'm', name: 'M' }],
         },
       },
@@ -1036,6 +1065,7 @@ describe('provider:custom:* CRUD handlers', () => {
       runtimes: {
         pi: {
           baseUrl: 'https://keep.example/v1',
+          wireProtocol: 'openai-chat',
           models: [{ id: 'm', name: 'M' }],
           headers: { Authorization: 'Bearer keepme' },
         },
@@ -1052,6 +1082,7 @@ describe('provider:custom:* CRUD handlers', () => {
       runtimes: {
         pi: {
           baseUrl: 'https://keep.example/v1',
+          wireProtocol: 'openai-chat',
           models: [{ id: 'm', name: 'M renamed' }],
         },
       },
@@ -1071,6 +1102,7 @@ describe('provider:custom:* CRUD handlers', () => {
       runtimes: {
         pi: {
           baseUrl: 'http://127.0.0.1:8080/v1',
+          wireProtocol: 'openai-chat',
           models: [{ id: 'm', name: 'M' }],
         },
       },
@@ -1102,6 +1134,7 @@ describe('provider:custom:* CRUD handlers', () => {
       runtimes: {
         pi: {
           baseUrl: 'https://old-endpoint.example/v1',
+          wireProtocol: 'openai-chat',
           modelsUrl: 'https://old-endpoint.example/models',
           models: [{ id: 'm', name: 'M' }],
           headers: { Authorization: 'Bearer endpoint-bound' },
@@ -1116,6 +1149,7 @@ describe('provider:custom:* CRUD handlers', () => {
       runtimes: {
         pi: {
           baseUrl: 'https://new-endpoint.example/v1',
+          wireProtocol: 'openai-chat',
           modelsUrl: 'https://new-endpoint.example/models',
           models: [{ id: 'm', name: 'M' }],
         },
@@ -1124,6 +1158,72 @@ describe('provider:custom:* CRUD handlers', () => {
 
     expect(removeCustomProviderHeaders).toHaveBeenCalledWith('move-headers', 'pi');
     expect(headers.get('pi')).toBeUndefined();
+  });
+
+  it('clears a stored API key when an update moves the runtime to a different endpoint', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const keys = new Map<AgentKind, string>();
+    const removeCustomProviderKey = vi.fn((_providerId, agent: AgentKind) => {
+      keys.delete(agent);
+      return { success: true };
+    });
+    registerProviderHandlers(harness, makeDeps({
+      readCustomProviderKeyForMutation: vi.fn(
+        (_providerId, agent: AgentKind) => keys.get(agent) ?? null,
+      ),
+      storeCustomProviderKey: vi.fn((_providerId, agent: AgentKind, value: string) => {
+        keys.set(agent, value);
+        return true;
+      }),
+      removeCustomProviderKey,
+    }));
+    const config: CustomProviderConfig = {
+      id: 'move-api-key',
+      name: 'Move API key',
+      auth: { method: 'apiKey' },
+      runtimes: {
+        pi: {
+          baseUrl: 'https://old-endpoint.example/v1',
+          wireProtocol: 'openai-chat',
+          modelsUrl: 'https://old-endpoint.example/models',
+          models: [{ id: 'm', name: 'M' }],
+        },
+      },
+    };
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config, {
+      pi: 'endpoint-bound-key',
+    });
+    removeCustomProviderKey.mockClear();
+
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...config,
+      name: 'Move API key — model edit only',
+      runtimes: {
+        pi: {
+          ...config.runtimes.pi!,
+          models: [{ id: 'm', name: 'M renamed' }],
+        },
+      },
+    })).resolves.toEqual({ ok: true });
+    expect(removeCustomProviderKey).not.toHaveBeenCalledWith('move-api-key', 'pi');
+    expect(keys.get('pi')).toBe('endpoint-bound-key');
+    removeCustomProviderKey.mockClear();
+
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...config,
+      runtimes: {
+        pi: {
+          baseUrl: 'https://new-endpoint.example/v1',
+          wireProtocol: 'openai-chat',
+          modelsUrl: 'https://new-endpoint.example/models',
+          models: [{ id: 'm', name: 'M' }],
+        },
+      },
+    })).resolves.toEqual({ ok: true });
+
+    expect(removeCustomProviderKey).toHaveBeenCalledWith('move-api-key', 'pi');
+    expect(keys.get('pi')).toBeUndefined();
   });
 
   it('merges stored main-only headers into a saved-provider model fetch', async () => {
@@ -1302,6 +1402,81 @@ describe('provider:custom:* CRUD handlers', () => {
     expect(deps.refreshCatalog).not.toHaveBeenCalled();
   });
 
+  it('rejects managed local provider ids on the generic create/update path', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const deps = makeDeps();
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, {
+        ...validConfig,
+        id: 'cindy-local-ollama',
+      }),
+    ).rejects.toThrow(/PERMISSION_DENIED/);
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+        ...validConfig,
+        id: 'cindy-local-ollama',
+      }),
+    ).rejects.toThrow(/PERMISSION_DENIED/);
+    expect(await listCustomProviders()).toEqual([]);
+  });
+
+  it('reserves xai for new providers while preserving edits to an existing legacy row', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const deps = makeDeps({
+      stageClearProviderDisableOverrides: vi.fn(() => () => true),
+    });
+    registerProviderHandlers(harness, deps);
+    const legacyXai: CustomProviderConfig = {
+      id: 'xai',
+      name: 'Legacy custom xAI',
+      auth: { method: 'apiKey' },
+      runtimes: {
+        pi: {
+          baseUrl: 'https://private-xai.example/v1',
+          models: [{ id: 'private-grok', name: 'Private Grok' }],
+        },
+      },
+    };
+
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, legacyXai)).rejects.toThrow(
+      /INVALID_PARAMS/,
+    );
+
+    raw!
+      .prepare(
+        `INSERT INTO custom_providers
+       (id, name, runtimes, auth, sort_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 0, 1, 1)`,
+      )
+      .run(
+        legacyXai.id,
+        legacyXai.name,
+        JSON.stringify(legacyXai.runtimes),
+        JSON.stringify(legacyXai.auth),
+      );
+
+    const migratedLegacyXai = await getCustomProvider('xai');
+    expect(migratedLegacyXai?.runtimes.pi?.wireProtocol).toBe('openai-chat');
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+        ...migratedLegacyXai!,
+        name: 'Legacy custom xAI edited',
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect((await listCustomProviders())[0]?.name).toBe('Legacy custom xAI edited');
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, 'xai'),
+    ).resolves.toEqual({ ok: true });
+    expect(deps.stageClearProviderDisableOverrides).toHaveBeenCalledWith('custom:xai');
+    expect(deps.stageClearProviderModelPriceOverrides).toHaveBeenCalledWith('custom:xai');
+    expect(await listCustomProviders()).toEqual([]);
+  });
+
   it('rejects duplicate id with ALREADY_EXISTS', async () => {
     mountDb();
     const harness = new IpcHarness();
@@ -1352,6 +1527,7 @@ describe('provider:custom:* CRUD handlers', () => {
       runtimes: {
         pi: {
           baseUrl: 'https://owner-a.example/v1',
+          wireProtocol: 'openai-chat',
           models: [{ id: 'm', name: 'M' }],
           headers: { Authorization: 'Bearer owner-a' },
         },
@@ -2124,12 +2300,17 @@ describe('provider:test-connection handler', () => {
         baseUrl: 'https://pi.example/v1',
         modelId: 'pi-model',
         authMethod: 'apiKey',
+        requestPath: '/ignored-by-pi',
         apiKey: 'k',
       },
     })).resolves.toMatchObject({ ok: true });
     expect(testConnection).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'adhoc',
-      spec: expect.objectContaining({ agent: 'pi', wireProtocol: 'openai-chat' }),
+      spec: expect.objectContaining({
+        agent: 'pi',
+        wireProtocol: 'openai-chat',
+        requestPath: undefined,
+      }),
     }));
   });
 

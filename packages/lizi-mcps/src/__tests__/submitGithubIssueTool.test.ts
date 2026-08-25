@@ -31,6 +31,7 @@ function setup(opts?: {
         issueUrl: 'https://github.com/makecindy/cindy/issues/76',
         finalTitle: VALID_ARGS.title,
         editedByUser: false,
+        privacyRedacted: false,
       },
   );
   const registry = new XdtHelperToolRegistry();
@@ -54,6 +55,14 @@ function parse(result: XdtHelperToolResult) {
 }
 
 describe('submit_github_issue tool', () => {
+  it('要求按最小公开原则泛化用户原话与示例', () => {
+    const { registry } = setup();
+    const tool = registry.get('submit_github_issue');
+    expect(tool?.description).toContain('Bug 和功能建议都遵循最小公开原则');
+    expect(tool?.description).toContain('不要逐字复制用户消息');
+    expect(tool?.description).toContain('不能识别所有语义隐私');
+  });
+
   it('缺参数 → INVALID_ARGS, host 不被调', async () => {
     const { registry, submit } = setup();
     const res = await registry.call('submit_github_issue', {});
@@ -104,6 +113,13 @@ describe('submit_github_issue tool', () => {
       issue_url: 'https://github.com/makecindy/cindy/issues/76',
       final_title: VALID_ARGS.title,
       edited_by_user: false,
+      privacy_redacted: false,
+      open_source: {
+        repository_url: 'https://github.com/makecindy/cindy',
+        license: 'Apache-2.0',
+        invitation:
+          'Cindy is open source. If the user is interested, offer help with reproducing the issue, editing the source, adding tests, and preparing a pull request.',
+      },
     });
   });
 

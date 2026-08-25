@@ -99,6 +99,10 @@ export type OrcaInterAgentSendToSessionInternalResult =
         | 'DELETED'
         | 'BUSY'
         | 'AGENT_NOT_READY'
+        | 'UNSUPPORTED_CAPABILITY'
+        // create 显式执行配置专用;dispatcher 恒走 jump,仅镜像共用函数的联合形状。
+        | 'BUDGET_MODEL_REQUIRES_API_MODE'
+        | 'PROVIDER_ROUTE_UNAVAILABLE'
         | 'LEAD_NOT_SUPPORTED'
         // create + useWorktree 专用;dispatcher 恒走 jump,不会收到,仅为镜像 register.ts 联合形状。
         | 'WORKTREE_UNAVAILABLE'
@@ -131,6 +135,13 @@ export interface OrcaInterAgentDispatcherDeps<TSessionMeta> {
   getLiveSession: (sessionId: string) => PersistedUserMessageSession | null | undefined;
   shouldQueueNewTurn: (sessionId: string) => boolean;
   hasSendToSessionLock: (sessionId: string) => boolean;
+  /**
+   * 把 prepare → 重新取 live → send 整段串行化到与 sendToSessionInternal 同一把
+   * per-session 锁。占用中时 dispatcher 先排队，不自己再拿一层以免死锁。
+   */
+  withSendToSessionLock?: <T>(sessionId: string, task: () => Promise<T>) => Promise<T>;
+  /** 直发前与 sendToSessionInternal 共用同一套满窗 / compact 失败换窗预检。 */
+  prepareUnhealthySession?: (sessionId: string) => Promise<boolean | void>;
   buildCreateOptsForQueuedSession: (
     sessionId: string,
     meta: TSessionMeta,
@@ -141,8 +152,15 @@ export interface OrcaInterAgentDispatcherDeps<TSessionMeta> {
   ) => Promise<OrcaInterAgentSendToSessionInternalResult>;
   createDbMessage: (
     sessionId: string,
-    message: { clientId: string; role: 'user'; content: string },
+    message: {
+      clientId: string;
+      role: 'user';
+      content: string;
+      agentMeta?: Record<string, unknown>;
+    },
   ) => Promise<unknown>;
+  beginDirectTurnChangeSet: (sessionId: string, clientId: string) => Promise<void>;
+  abortDirectTurnChangeSet: (sessionId: string) => void;
   resolveWorkerSenderLabel: (workerId: string, fallback: string) => Promise<string>;
   isSessionRunningError: (err: unknown) => boolean;
   log?: OrcaInterAgentDispatcherLogger;
@@ -338,8 +356,47 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
     }
 
     try {
-      const live = deps.getLiveSession(params.targetSessionId);
-      if (live) {
+      const sendToInternal = async (): Promise<DispatchOrcaInterAgentMessageResult> => {
+        const result = await deps.sendToSessionInternal({
+          targetSessionId: params.targetSessionId,
+          message: agentMessageText,
+          persistedContent,
+          clientId,
+          onAccepted: runAccepted,
+          onAcceptedRollback: params.onAcceptedRollback,
+          origin: {
+            kind: 'orca',
+            senderLabel: await resolveSenderLabel(),
+            displayText: params.rawContent,
+          },
+        });
+        if (result.ok) {
+          return {
+            ok: true,
+            mode: result.wakeKind === 'queued' ? 'queued' : 'dispatched',
+            clientId,
+            dispatchOutcome: result.wakeKind === 'queued'
+              ? makeQueuedDispatchOutcome(params.meta.source)
+              : {
+                  kind: 'session-dispatch',
+                  source: params.meta.source,
+                  dispatched: true,
+                },
+            targetTitle: result.targetTitle,
+            targetLastUserSendAt: result.targetLastUserSendAt,
+          };
+        }
+        return failureResult({
+          ...createHostSendFailure(result.errorCode === 'BUSY' ? 'SESSION_RUNNING' : 'SEND_FAILED', result.message),
+          source: params.meta.source,
+          context: params.meta.context,
+        });
+      };
+      const dispatchLive = async (): Promise<DispatchOrcaInterAgentMessageResult | null> => {
+        await deps.prepareUnhealthySession?.(params.targetSessionId);
+        const live = deps.getLiveSession(params.targetSessionId);
+        if (!live) return null;
+        const senderLabel = await resolveSenderLabel();
         const result = await sendPersistedUserMessageToSession(deps, {
           session: live,
           dbContent: persistedContent,
@@ -347,6 +404,11 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
           clientId,
           source: params.meta.source,
           context: params.meta.context,
+          origin: {
+            kind: 'orca',
+            senderLabel,
+            displayText: params.rawContent,
+          },
           onAccepted: runAccepted,
         });
         if (result.dispatched) {
@@ -356,42 +418,12 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
           return enqueueQueuedMessage('orca inter-agent message queued after SESSION_RUNNING race');
         }
         return failureResult(result.dispatchOutcome);
-      }
-
-      const result = await deps.sendToSessionInternal({
-        targetSessionId: params.targetSessionId,
-        message: agentMessageText,
-        persistedContent,
-        clientId,
-        onAccepted: runAccepted,
-        onAcceptedRollback: params.onAcceptedRollback,
-        origin: {
-          kind: 'orca',
-          senderLabel: await resolveSenderLabel(),
-          displayText: params.rawContent,
-        },
-      });
-      if (result.ok) {
-        return {
-          ok: true,
-          mode: result.wakeKind === 'queued' ? 'queued' : 'dispatched',
-          clientId,
-          dispatchOutcome: result.wakeKind === 'queued'
-            ? makeQueuedDispatchOutcome(params.meta.source)
-            : {
-                kind: 'session-dispatch',
-                source: params.meta.source,
-                dispatched: true,
-              },
-          targetTitle: result.targetTitle,
-          targetLastUserSendAt: result.targetLastUserSendAt,
-        };
-      }
-      return failureResult({
-        ...createHostSendFailure(result.errorCode === 'BUSY' ? 'SESSION_RUNNING' : 'SEND_FAILED', result.message),
-        source: params.meta.source,
-        context: params.meta.context,
-      });
+      };
+      const liveResult = deps.withSendToSessionLock
+        ? await deps.withSendToSessionLock(params.targetSessionId, dispatchLive)
+        : await dispatchLive();
+      if (liveResult) return liveResult;
+      return await sendToInternal();
     } catch (err) {
       return failureResult({
         ...createHostSendFailure(deps.isSessionRunningError(err) ? 'SESSION_RUNNING' : 'SEND_FAILED', err instanceof Error ? err.message : String(err)),
@@ -420,11 +452,13 @@ async function sendPersistedUserMessageToSession<TSessionMeta>(
     clientId?: string;
     source: string;
     context: string;
+    origin?: AgentInputQueuedMessage['origin'];
     onAccepted?: () => void | Promise<void>;
   },
 ): Promise<CollabDirectDispatchResult> {
-  const { session, dbContent, agentMessage, clientId = deps.createId(), source, context, onAccepted } = params;
-  return resolveCollabDispatchResult(
+  const { session, dbContent, agentMessage, clientId = deps.createId(), source, context, origin, onAccepted } = params;
+  let turnChangeSetStarted = false;
+  const result = await resolveCollabDispatchResult(
     () => session.send(agentMessage, {
       planMode: false,
       throwOnStartFailure: true,
@@ -434,12 +468,19 @@ async function sendPersistedUserMessageToSession<TSessionMeta>(
           clientId,
           role: 'user',
           content: dbContent,
+          ...(origin ? { agentMeta: { origin } } : {}),
         });
+        await deps.beginDirectTurnChangeSet(session.id, clientId);
+        turnChangeSetStarted = true;
         await runAcceptedCallback(onAccepted, session.id, clientId, deps.log ?? defaultLog);
       },
     }),
     { source, context },
   );
+  if (turnChangeSetStarted && !result.dispatched) {
+    deps.abortDirectTurnChangeSet(session.id);
+  }
+  return result;
 }
 
 function makeQueuedDispatchOutcome(source: string): CollabDispatchQueuedOutcome {

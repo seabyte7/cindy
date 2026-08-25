@@ -28,10 +28,21 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     expect(source).toContain('data-testid="create-agent-quick-starts"');
     expect(source).toContain('createAgentQuickStarts.map');
     expect(source).toContain('<ChatInput');
-    expect(source).toContain('<AgentSelect');
-    // 引擎切换在工具条上已由分段器换成下拉(定宽触发器,引擎数量不影响布局)
+    // 引擎切换控件在新建对话工具条上**统一面板真正启用时才撤除**
+    // (model-selector-unified §1.1):分段器 → 下拉(AgentSelect)→ 统一模型选择器把引擎
+    // 收进模型行。判据必须是 `unifiedModelPanelActive`(能力 × 形态偏好),不是只看能力的
+    // `unifiedModelPanelEnabled`:后者在默认的 'original' 形态下也为 true,composer 明明
+    // 回落了旧的「先选引擎再选模型」面板,工具条却已经把引擎下拉撤了 —— 新建草稿就此
+    // 没有任何换引擎入口。两条降级路径(device-link 老被控端 capabilities-only、形态停在
+    // 'original')都由 active 一并表达。
     expect(source).not.toContain('<VendorSegmentedSwitcher');
-    expect(source).toContain('middleToolbarSlot={');
+    expect(source).toContain('unifiedModelPanelActive ? undefined : (');
+    expect(source).toMatch(/middleToolbarSlot=\{\s*\n\s*unifiedModelPanelActive \? undefined : \(/);
+    expect(source).toMatch(
+      /compactMiddleToolbarSlot=\{\s*\n\s*unifiedModelPanelActive \? undefined : \(/,
+    );
+    // active 必须真的把形态偏好叠进去(只改名不改语义就白修了)。
+    expect(source).toMatch(/unifiedModelPanelEnabled && modelPickerLayoutPref !== 'original'/);
     expect(source).not.toContain('<HomeUsageDashboard');
     expect(source).not.toContain('newChat.createAgent.more');
     expect(source).not.toContain('data-testid="create-agent-sidebar"');
@@ -69,7 +80,8 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     // 内容列宽度从死锁 800px 改为跟随 useProportionalWidth 的 inputWidth(与进行中
     // 对话页同源,封顶 914+20=934px):大屏留出左右呼吸空间、发送后同一 ChatInput 无宽度跳变。
     expect(source).toContain('relative flex w-full flex-col items-start');
-    expect(source).toContain('style={{ maxWidth: inputWidth || 800 }}');
+    expect(source).toContain('style={{ maxWidth: inputWidth }}');
+    expect(source).toContain('responsiveBreakpoints: DRAFT_INPUT_WIDTH_BREAKPOINTS');
     expect(source).not.toContain('max-w-[800px]');
     expect(source).toContain('absolute right-0 top-[22px]');
     // 快捷入口与输入框同宽(w-full 跟随父列 inputWidth),左右两缘对齐 ChatInput;
@@ -95,7 +107,7 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
       'sessionId={undefined}',
       'initialWorkingDir={effectiveWorkingDir}',
       'remoteHostId={draft.remoteHostId ?? null}',
-      'deviceLinkDeviceId={effectiveDeviceLinkDeviceId}',
+      'deviceLinkDeviceId={effectiveDeviceLinkDeviceId ?? null}',
       'modelMemoryOverride={deviceLinkDraftMemory}',
       'initialModel={draftInitialModel}',
       'initialEffort={draftInitialEffort}',
@@ -123,8 +135,11 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
       'rememberedEffortByModel={isDeviceLinkDraft ? undefined : draft.effortByModel}',
       'onRememberedEffortChange={',
       'isDeviceLinkDraft ? undefined : handleRememberedEffortChange',
-      'placeholder="Hi Cindy!"',
-      'middleToolbarSlot={',
+      "placeholder={t('newChat.chatInput.createAgentPlaceholder')}",
+      // 统一模型选择器(M5):新会话的选中直通 + 收藏锚点选中态。撤掉 AgentSelect 后,
+      // 「换引擎」这件事只剩这一条路径 —— 掉了它草稿就再也换不了引擎。
+      'onUnifiedDraftSelect={handleUnifiedDraftSelect}',
+      'selectedFavoriteUid={selectedFavoriteUid}',
     ]) {
       expect(chatInputBlock).toContain(invariant);
     }
@@ -147,7 +162,10 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
       "'group flex flex-col items-start justify-between gap-1 rounded-xl border",
     );
     expect(source).toContain("isDraftNarrow ? 'min-h-[84px] p-3' : 'min-h-[112px] p-4'");
-    expect(source).toContain('className="w-full min-w-0 text-13 font-semibold leading-[16px]"');
+    // 行高从 `leading-[16px]` 改成无单位 `leading-[1.231]`(= 16 ÷ 13):`text-13` 会随
+    // 「外观 → UI 字号」缩放,固定 px 行框不跟随,放大字号时标签会裁切。默认字号下
+    // 渲染不变(13 × 1.231 ≈ 16.003px)。见 DESIGN.md §3 non-goals 的行高例外条款。
+    expect(source).toContain('className="w-full min-w-0 text-13 font-semibold leading-[1.231]"');
     // 旧的窄态横排(items-center)/常态竖排(gap-3)特判已被统一竖排取代。
     expect(source).not.toContain("'flex min-h-[84px] items-center gap-3 p-3'");
     expect(source).not.toContain("'flex min-h-[112px] flex-col items-start gap-3 p-4'");
@@ -278,7 +296,9 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     expect(chatInputSource).not.toContain("isCreateAgentVariant ? 'flex-wrap gap-2' : 'min-w-0 gap-1'");
     expect(chatInputSource).not.toContain("'flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2'");
     expect(source).toContain('className="shrink-0"');
-    expect(extraDirsButtonSource).toContain("'flex shrink-0 items-center rounded-full transition-colors'");
+    expect(extraDirsButtonSource).toContain(
+      "'flex h-[30px] shrink-0 items-center rounded-full border border-transparent'",
+    );
     expect(permissionSelectorSource).toContain("'h-[30px] min-w-[72px] max-w-full shrink px-2.5'");
     expect(permissionSelectorSource).not.toContain("'h-[30px] min-w-[90px] max-w-none shrink-0");
     expect(permissionSelectorSource).not.toContain("'h-[30px] min-w-[72px] max-w-full shrink border border-[var(--create-agent-control-border)]");
@@ -300,15 +320,15 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     );
     // 本机会话可选附件,但远程或身份尚未回流的已建会话不能摄入控制端绝对路径。
     expect(chatInputSource).toContain('const localAttachmentPickerEnabled =');
-    expect(chatInputSource).toContain(
-      'localAttachmentPickerEnabled && !composerMutationLocked ? addFiles : undefined',
-    );
+    expect(chatInputSource).toContain('{localAttachmentPickerEnabled && (');
+    expect(chatInputSource).toContain('if (files.length > 0) void addFiles(files);');
+    expect(chatInputSource).toContain("id: 'attach-files'");
     expect(chatInputSource).not.toContain('(extraDirs !== undefined && onExtraDirsChange)');
     expect(chatInputSource).not.toContain(
       "vendorKey === 'cc' && extraDirs !== undefined && onExtraDirsChange",
     );
-    expect(extraDirsButtonSource).toContain(
-      'const hasReferenceDirs = onChange !== undefined',
+    expect(chatInputSource).toContain(
+      'hasReferenceDirs={!settingsLocked && onExtraDirsChange !== undefined}',
     );
     expect(extraDirsButtonSource).not.toContain("const isCc = agentKind === 'cc'");
     // ×N 角标在 create-agent(新建草稿)也要外显(2026-07-25 用户定稿):引用目录
@@ -330,13 +350,13 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
 
   it('keeps the worktree control visible for a detached HEAD checkout', () => {
     // currentBranch=null 是合法的 detached HEAD，不等于“不是 git 仓库”。
-    // 未勾选时仍展示 HEAD；若环境后来失效但记忆为 ON，也必须保留关闭入口。
+    // 未勾选时仍展示 HEAD;确认不合格(2026-08-07 裁决)才隐藏——探测中/失败
+    // (confirmedIneligible === null)且记忆 ON 时仍显示,由发送侧 fail closed。
     expect(worktreeChipsRowSource).toContain(
       "const branchLabel = sourceBranch || branches.current || currentBranch || 'HEAD';",
     );
-    expect(worktreeChipsRowSource).toContain(
-      'const showBranchChip = !advancedHidden && (enabled || !!detect.data?.isGitRepo);',
-    );
+    expect(worktreeChipsRowSource).toContain('confirmedIneligible !== true');
+    expect(worktreeChipsRowSource).toContain('&& (enabled || !!detect.data?.isGitRepo)');
     expect(worktreeChipsRowSource).not.toContain(
       'const showBranchChip = !advancedHidden && !!branchLabel',
     );

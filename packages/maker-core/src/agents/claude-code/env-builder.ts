@@ -285,11 +285,15 @@ export async function buildClaudeEnv(
   const cleanEnv = mode === 'remote' ? {} : cleanProcessEnv();
   const env: Record<string, string> = { ...cleanEnv };
 
-  // 函数形态按本次 spawn 的凭证形态求值(如 attribution 归因块只对 gateway-key 禁用);
-  // spawnMode 让 host 区分本机/远端(只对本机有意义的 flag 不注到远端)。
+  // 函数形态按本次 spawn 的 route context 求值(如 attribution 按凭证形态、Tool Search
+  // 按来源能力分叉);spawnMode 让 host 区分本机/远端(只对本机有意义的 flag 不注到远端)。
   const behaviorFlags =
     typeof runtimeConfig.behaviorFlags === 'function'
-      ? runtimeConfig.behaviorFlags({ credentialMode: options.credentialMode, spawnMode: mode })
+      ? runtimeConfig.behaviorFlags({
+          credentialMode: options.credentialMode,
+          sessionProviderId: options.sessionProviderId,
+          spawnMode: mode,
+        })
       : runtimeConfig.behaviorFlags;
   if (behaviorFlags) {
     Object.assign(env, behaviorFlags);
@@ -307,7 +311,17 @@ export async function buildClaudeEnv(
   const authOptions = options.credentialMode
     ? { credentialMode: options.credentialMode }
     : undefined;
-  Object.assign(env, await auth.getAuthEnv(authOptions));
+  const authEnv = { ...(await auth.getAuthEnv(authOptions)) };
+  if (mode === 'remote') {
+    // CLAUDE_CONFIG_DIR is a host-local path. Desktop dev sandboxes inject a
+    // Windows/macOS userData path through the auth adapter; forwarding that
+    // literal path to a different POSIX host makes Claude resolve it relative
+    // to the remote cwd and write configuration data into the repository.
+    // The remote cc-manager owns this path and replaces it with its isolated
+    // ~/.xdt-server/v1/claude-home directory at the RPC boundary.
+    delete authEnv.CLAUDE_CONFIG_DIR;
+  }
+  Object.assign(env, authEnv);
 
   // Claude Code's documented child-agent model override.
   //

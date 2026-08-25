@@ -30,6 +30,8 @@ export interface AgentInputSerializedFile {
   size: number;
   category: AgentInputFileCategory;
   mimeType: string;
+  /** Renderer-owned image path that originated on this Desktop host. */
+  pathOrigin?: 'desktop-host';
   url?: string;
   originalName?: string;
   base64?: string;
@@ -157,6 +159,33 @@ export interface AutoResumeInfo {
   sessionTotal: number;
 }
 
+/**
+ * Durable recovery context for a retry/continue action.
+ *
+ * This is deliberately a small, bounded handoff record rather than a copy of
+ * the transcript.  The transcript remains the source of truth; the checkpoint
+ * tells the next turn which interrupted input it belongs to, how many recovery
+ * attempts have already happened, and whether the previous durable progress
+ * was reconstructed under context pressure.
+ */
+export interface RecoveryCheckpoint {
+  version: 1;
+  source: 'manual' | 'automatic';
+  mode: 'fast' | 'checkpoint';
+  attempt: number;
+  failedUserClientId: string;
+  rootUserClientId: string;
+  contextTokens: number;
+  contextWindow: number;
+  contextRatio: number | null;
+  progressCount: number;
+  createdAt: string;
+  recentProgress: Array<{
+    role: 'assistant' | 'tool_use' | 'thinking' | 'ask_user' | 'plan_review';
+    summary: string;
+  }>;
+}
+
 export interface AgentInputQueuedMessage {
   clientId: string;
   text: string;
@@ -208,6 +237,13 @@ export interface AgentInputQueuedMessage {
         scheduleName: string;
         /** 老队列快照可能没有；新 scheduler run 始终写入。 */
         runId?: string;
+      }
+    | {
+        /** cindy_helper 的 send_to_session 入队来源；只用于本人排队消息控制授权。 */
+        kind: 'session';
+        senderSessionId: string;
+        /** 原始可编辑正文；单独保留以兼容未来可能加入的派发包装。 */
+        displayText: string;
       };
   /**
    * 本条由**手机控制端**入队 / 插入。
@@ -248,6 +284,8 @@ export interface AgentInputQueuedMessage {
    * 一起透传到落库 agentMeta，供「已重新连接」活动行的展开详情用。
    */
   autoResumeInfo?: AutoResumeInfo;
+  /** Bounded, durable handoff state shared by manual and automatic recovery. */
+  recoveryCheckpoint?: RecoveryCheckpoint;
   /**
    * 本条是零产出失败 turn 的克隆重发(错误横幅「重试」,见 performRetryLastError),
    * 值 = 被取代的那条已落库 user 行的 clientId。本条落库并派发成功后,host 据此把
@@ -904,12 +942,15 @@ export function buildMakerUserMessage(
   let hasAnnotatedImage = false;
   for (const f of queued.files ?? []) {
     const type = getAgentInputAttachmentBlockType(f.category, f.ext);
+    const pathOrigin = type === 'image' && f.pathOrigin === 'desktop-host'
+      ? { pathOrigin: f.pathOrigin }
+      : {};
     if (f.url) {
-      blocks.push({ type, path: f.url, mimeType: f.mimeType });
+      blocks.push({ type, path: f.url, mimeType: f.mimeType, ...pathOrigin });
     } else if (f.path && !f.path.startsWith('clipboard://')) {
-      blocks.push({ type, path: f.path, mimeType: f.mimeType });
+      blocks.push({ type, path: f.path, mimeType: f.mimeType, ...pathOrigin });
     } else if (f.base64) {
-      blocks.push({ type, base64: f.base64, mimeType: f.mimeType });
+      blocks.push({ type, base64: f.base64, mimeType: f.mimeType, ...pathOrigin });
     } else {
       continue;
     }

@@ -28,6 +28,20 @@ import type { BaseAgent } from 'ssh2';
 import { createFilteredAgentFromPubkey } from './filteredAgent.js';
 import type { HostConfig } from './types.js';
 
+/**
+ * Stable local code tagged onto the ENOENT identityFile error so the connect
+ * IPC layer can classify it as SSH_KEY_FILE_NOT_FOUND WITHOUT pattern-matching
+ * the message text (see resolveAuth). Only set by our own code — a remote SSH
+ * server can never produce it.
+ */
+export const KEY_FILE_NOT_FOUND_CODE = 'KEY_FILE_NOT_FOUND';
+/** 轮 21-W2 MEDIUM:本地 key 读取的其它确定性错误(EACCES/EISDIR/格式)——
+ *  与 ENOENT 一样是「本地配置问题」, 不能落进 SSH_AUTH_FAILED 语义。 */
+export const KEY_FILE_UNREADABLE_CODE = 'KEY_FILE_UNREADABLE';
+/** 轮 21-W2 MEDIUM:agent + pinned-key 解析失败(缺 .pub/内容非法/不匹配)——
+ *  确定性本地配置错误, 不应落进 SSH_CONNECT_FAILED(可重试语义)。 */
+export const PINNED_AGENT_FAILED_CODE = 'PINNED_AGENT_FAILED';
+
 export interface ResolvedAuth {
   /**
    * ssh2 agent option — either a socket path / pipe string (unfiltered) OR
@@ -76,11 +90,16 @@ export async function resolveAuth(host: HostConfig): Promise<ResolvedAuth> {
         const filtered = await createFilteredAgentFromPubkey(pubkeyPath, endpoint);
         return { agent: filtered, label: `ssh-agent[${baseName(pubkeyPath)}]` };
       } catch (err) {
-        throw new Error(
+        // 轮 21-W2 MEDIUM:tag PINNED_AGENT_FAILED —— 本地配置错误(缺 .pub /
+        // 内容非法 / 与 loaded key 不匹配), 不应落进 SSH_CONNECT_FAILED(可重试
+        // 语义)。classifyConnectFailure 按稳定 code 分类, 不 pattern-match 文本。
+        const e = new Error(
           `agent + pinned key failed (${(err as Error).message}). ` +
           `Make sure ${pubkeyPath} exists and is a valid SSH public key, ` +
           `and that the matching private key is loaded in ssh-agent ('ssh-add ${pubkeyPath.replace(/\.pub$/, '')}').`,
         );
+        (e as { code?: string }).code = PINNED_AGENT_FAILED_CODE;
+        throw e;
       }
     }
     return { agent: endpoint, label: 'ssh-agent' };
@@ -94,8 +113,20 @@ export async function resolveAuth(host: HostConfig): Promise<ResolvedAuth> {
     try {
       privateKey = await fs.readFile(host.identityFile);
     } catch (err) {
-      const msg = (err as Error).message;
-      throw new Error(`failed to read identityFile ${host.identityFile}: ${msg}`);
+      // Tag ENOENT with KEY_FILE_NOT_FOUND_CODE so classifyConnectFailure can
+      // distinguish a local path problem from network/remote errors without
+      // pattern-matching the message text (see connect-failure.ts).
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        const e = new Error(`identity file not found: ${host.identityFile}`);
+        (e as { code?: string }).code = KEY_FILE_NOT_FOUND_CODE;
+        throw e;
+      }
+      // 轮 21-W2 MEDIUM:非 ENOENT 本地读取错误(EACCES 权限/EISDIR/IO 错)也
+      // 是确定性本地配置问题 —— tag KEY_FILE_UNREADABLE, 防 classifyConnectFailure
+      // 按文本把 "permission denied" 误归成远端 SSH_AUTH_FAILED。
+      const e = new Error(`failed to read identityFile ${host.identityFile}: ${(err as Error).message}`);
+      (e as { code?: string }).code = KEY_FILE_UNREADABLE_CODE;
+      throw e;
     }
     return { privateKey, label: `key:${baseName(host.identityFile)}` };
   }

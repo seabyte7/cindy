@@ -1,4 +1,8 @@
 import type {
+  ConversationSearchRequest,
+  ConversationSearchResponse,
+} from '@cindy/maker-shared/conversation-search';
+import type {
   InputProjection,
   PendingInteraction,
   QueuedRemoteMessage,
@@ -389,6 +393,7 @@ export interface MobileMakerTransport {
     modelVisibilityOverrides?: Record<string, boolean>;
   }>;
   getSession(sessionId: string): Promise<RemoteSession>;
+  searchConversations(request: ConversationSearchRequest): Promise<ConversationSearchResponse>;
   patchSessionMeta(sessionId: string, patch: SessionMetaPatch): Promise<RemoteSession>;
   /**
    * error-tail「忽略」:被控端把该 role='error' 行的 content merge dismissed:true
@@ -499,7 +504,10 @@ export interface MobileMakerTransport {
       | { sessionId: string; recoveryKey: string; path?: never }
     ): Promise<{ discarded: true; branchDeleted?: boolean }>;
   };
-  listAgentCommands(agentKind: MobileAgentKind): Promise<MobileAgentCommandListResult>;
+  listAgentCommands(
+    agentKind: MobileAgentKind,
+    opts?: { sessionId?: string },
+  ): Promise<MobileAgentCommandListResult>;
   /** 被控端 desktop 自有 slash 命令清单(palette 展示;移动端只放行可执行子集)。 */
   listDesktopCommands(): Promise<MobileDesktopCommandListResult>;
   /**
@@ -507,7 +515,10 @@ export interface MobileMakerTransport {
    * 被控端执行,这里只拿 runId;评审 UI 暂只有桌面端,移动端以系统卡提示去桌面评审。
    */
   learnStart(req: MobileLearnStartRequest): Promise<{ runId: string }>;
-  listAgentSkills(agentKind: MobileAgentKind, opts: { workingDir?: string; forceReload?: boolean }): Promise<MobileAgentSkillListResult>;
+  listAgentSkills(
+    agentKind: MobileAgentKind,
+    opts: { workingDir?: string; forceReload?: boolean; sessionId?: string },
+  ): Promise<MobileAgentSkillListResult>;
   scanAtResources(agentKind: MobileAgentKind, opts: { workingDir: string; cap?: number; query?: string }): Promise<MobileAtResourceScanResult>;
   fetchRemoteMedia(url: string, opts?: { skipCache?: boolean; thumbnail?: boolean }): Promise<MobileRemoteMediaFetchResult>;
   transcribeVoice(input: MobileVoiceTranscribeRequest): Promise<MobileVoiceTranscribeResult>;
@@ -568,6 +579,12 @@ export interface MobileMakerTransport {
   projectAutomation: {
     removeSchedule(input: { workingDir: string; id: string }): Promise<unknown>;
   };
+  /** 手动压缩会话上下文(pi 原生 compact,capability-aware 的 maker:compact-session;
+   *  input.compact 是 Claude Code 专用的 maker:input:compact,两者不混)。 */
+  compactSession(
+    sessionId: string,
+    instructions?: string,
+  ): Promise<{ tokensBefore?: number; estimatedTokensAfter?: number; noop?: boolean } | null>;
   input: {
     getProjection(sessionId: string): Promise<InputProjection>;
     enqueue(sessionId: string, item: QueuedRemoteMessage, opts?: { sendAtMs?: number }): Promise<InputProjection>;
@@ -648,6 +665,7 @@ export function createMobileMakerTransport({
       capabilities: [CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2],
     }]),
     getSession: (sessionId) => call('local-db:sessions:get', [sessionId]),
+    searchConversations: (request) => call('local-db:conversations:search', [request]),
     patchSessionMeta: (sessionId, patch) => call('local-db:sessions:patch-meta', [sessionId, patch]),
     dismissErrorMessage: (sessionId, clientId) =>
       call('local-db:messages:dismiss-error', [sessionId, clientId]),
@@ -708,7 +726,8 @@ export function createMobileMakerTransport({
       create: (req) => call('worktree:create', [req]),
       discardPrecreated: (input) => call('worktree:discard-precreated', [input]),
     },
-    listAgentCommands: (agentKind) => call('maker:list-agent-commands', [agentKind]),
+    listAgentCommands: (agentKind, opts) =>
+      call('maker:list-agent-commands', opts ? [agentKind, opts] : [agentKind]),
     listDesktopCommands: () => call('maker:list-desktop-commands', []),
     learnStart: (req) => call('learn:start', [req]),
     listAgentSkills: (agentKind, opts) => call('maker:list-agent-skills', [agentKind, opts]),
@@ -769,6 +788,11 @@ export function createMobileMakerTransport({
     projectAutomation: {
       removeSchedule: (input) => call('maker:project-automation:remove-schedule', [input]),
     },
+    compactSession: (sessionId, instructions) =>
+      call(
+        'maker:compact-session',
+        instructions === undefined ? [sessionId] : [sessionId, instructions],
+      ),
     input: {
       getProjection: (sessionId) => call('maker:input:get-projection', [sessionId]),
       enqueue: (sessionId, item, opts) => call('maker:input:enqueue', [sessionId, item, opts]),

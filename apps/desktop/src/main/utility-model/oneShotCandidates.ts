@@ -1,9 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
-import { toSdkModelString, type AgentKind, type Maker } from '@cindy/maker-core';
-import { appendProviderRequestPath } from '@cindy/model-providers';
+import { type AgentKind, type Maker } from '@cindy/maker-core';
+import {
+  appendProviderRequestPath,
+  isModelSelectableForNewRoute,
+  storedCustomProviderId,
+} from '@cindy/model-providers';
 
 import { createLogger } from '../logger.js';
+import { getAppCapabilities } from '../appCapabilities.js';
 import { readClaudeApiKey } from '../maker-host/auth-adapters.js';
 import { getChatgptBridgeAuth } from '../maker-host/anthropic-responses-bridge-host.js';
 import { getValidClaudeAiOAuth } from '../maker-host/claude-oauth-refresh.js';
@@ -44,6 +49,12 @@ export type UtilityTextCapability = {
   transports: readonly UtilityModelTransport[];
 };
 
+export interface UtilityTextDispatchRoute {
+  providerId: string;
+  agentKind: AgentKind;
+  model: string;
+}
+
 export type UtilityTextCandidate = {
   providerId: string;
   model: string;
@@ -56,7 +67,21 @@ export type UtilityTextRequestOptions = {
   maxTokens?: number;
   timeoutMs?: number;
   /** Optional lightweight reasoning hint for short internal classifiers. */
-  reasoningEffort?: 'low' | 'medium' | 'high';
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  /**
+   * Disable provider-native thinking for strict short-output budgets. Messages
+   * and chat routes send `thinking.type=disabled`; Responses routes use the
+   * lowest supported effort because that protocol has no off value.
+   */
+  disableReasoning?: boolean;
+  /** Abort an in-flight direct HTTP request when the owning workflow ends. */
+  signal?: AbortSignal;
+  /** Provider-native system/instructions text, kept separate from reference data. */
+  systemPrompt?: string;
+  /** Additional output-shape instruction (mainly for Responses-compatible routes). */
+  responseInstructions?: string;
+  /** Final ownership/config guard immediately before an explicit HTTP dispatch. */
+  beforeDispatch?: (route: UtilityTextDispatchRoute) => Promise<boolean>;
   /** 显式任务来源；存在时禁止跨来源 fallback。 */
   providerId?: string;
   agentKind?: AgentKind;
@@ -271,6 +296,171 @@ export async function requestUtilityText(
   return requestDefaultUtilityText(maker, prompt, opts);
 }
 
+/** Execute one exact catalog route; failures never enter the default chain. */
+export async function requestExplicitUtilityText(
+  prompt: string,
+  opts: UtilityTextRequestOptions & { providerId: string },
+): Promise<UtilityTextResult> {
+  const providerId = opts.providerId.trim();
+  const explicitModel = opts.model?.trim();
+  if (!providerId) return { ok: false, reason: 'no_candidate', attempts: [] };
+
+  const disableOverrides = readModelDisableOverrides();
+  if (
+    isProviderDisabled(disableOverrides, providerId) ||
+    (explicitModel && isModelDisabled(disableOverrides, providerId, explicitModel))
+  ) {
+    log.warn('utility text route disabled in settings', {
+      providerId,
+      model: explicitModel ?? null,
+    });
+    return { ok: false, reason: 'no_candidate', attempts: [] };
+  }
+  return requestExplicitProviderText(prompt, {
+    ...opts,
+    providerId,
+    ...(explicitModel === undefined ? {} : { model: explicitModel }),
+  });
+}
+
+const DEDICATED_AUTO_REVIEW_MAX_TOKENS = 384;
+
+/**
+ * Auto-review 的封闭候选表。它刻意不接受调用方传 provider/model：待审内容只能
+ * 发往 Cindy 托管网关或用户已连接的 OpenAI/Anthropic 订阅，不能跟随主会话
+ * 落到 xAI、DeepSeek、Kimi 或自定义 BYOM。
+ */
+export const DEDICATED_AUTO_REVIEW_CANDIDATES = Object.freeze([
+  {
+    id: 'cindy-gateway',
+    providerId: 'xd',
+    agentKind: 'codex',
+    model: 'cindy/auto-review',
+    transport: 'litellm-chat-completions',
+    reasoningEffort: undefined,
+  },
+  {
+    id: 'chatgpt-nano',
+    providerId: 'openai',
+    agentKind: 'codex',
+    model: 'gpt-5.4-nano',
+    transport: 'codex-responses',
+    reasoningEffort: 'low',
+  },
+  {
+    id: 'chatgpt-luna',
+    providerId: 'openai',
+    agentKind: 'codex',
+    model: 'gpt-5.6-luna',
+    transport: 'codex-responses',
+    reasoningEffort: 'low',
+  },
+  {
+    id: 'claude-haiku',
+    providerId: 'anthropic',
+    agentKind: 'claude-code',
+    model: 'claude-haiku-4-5',
+    transport: 'litellm-chat-completions',
+    reasoningEffort: undefined,
+  },
+] as const satisfies ReadonlyArray<{
+  id: string;
+  providerId: 'xd' | 'openai' | 'anthropic';
+  agentKind: AgentKind;
+  model: string;
+  transport: UtilityModelTransport;
+  reasoningEffort: 'low' | undefined;
+}>);
+
+export type DedicatedAutoReviewCandidate = (typeof DEDICATED_AUTO_REVIEW_CANDIDATES)[number];
+
+/**
+ * 执行一个专用 Auto-review 候选。
+ *
+ * Gateway 别名不属于用户模型目录，必须走这条受限入口绕过普通显式路由的目录
+ * 校验；订阅候选反过来必须存在于实时目录，防止对账号不支持的模型盲发请求。
+ */
+export async function requestDedicatedAutoReviewCandidateText(
+  prompt: string,
+  candidate: DedicatedAutoReviewCandidate,
+  opts: { timeoutMs: number; signal?: AbortSignal },
+): Promise<UtilityTextResult> {
+  const profile: UtilityModelProfile = {
+    id: candidate.providerId,
+    model: candidate.model,
+    transport: candidate.transport,
+    auth: candidate.providerId === 'xd' ? 'api-key' : 'codex',
+    settingsTab: 'providers',
+    missingCredentialMessage: 'The Auto-review provider is not authenticated.',
+  };
+
+  if (opts.signal?.aborted) return cancelledUtilityTextResult(profile);
+  if (isProviderDisabled(readModelDisableOverrides(), candidate.providerId)) {
+    return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'model_unavailable')] };
+  }
+
+  if (candidate.id === 'cindy-gateway') {
+    if (!getAppCapabilities().canUseCindyGateway) {
+      return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'not_authenticated')] };
+    }
+    const apiKey = readClaudeApiKey();
+    const baseUrl = effectiveXdGatewayBaseUrl().trim();
+    if (!apiKey) {
+      return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'api_key_missing')] };
+    }
+    if (!baseUrl) {
+      return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'endpoint_missing')] };
+    }
+    return executeCandidates([{
+      providerId: candidate.providerId,
+      model: candidate.model,
+      transport: candidate.transport,
+      profile,
+      execute: (text, requestOpts) => requestProviderHttpText({
+        wire: 'chat-completions',
+        endpoint: joinProxyPath(baseUrl, '/v1/chat/completions'),
+        headers: { Authorization: `Bearer ${apiKey}` },
+        model: candidate.model,
+        prompt: text,
+        maxTokens: DEDICATED_AUTO_REVIEW_MAX_TOKENS,
+        timeoutMs: requestOpts?.timeoutMs ?? opts.timeoutMs,
+        signal: requestOpts?.signal ?? opts.signal,
+      }),
+    }], prompt, [], {
+      maxTokens: DEDICATED_AUTO_REVIEW_MAX_TOKENS,
+      timeoutMs: opts.timeoutMs,
+      signal: opts.signal,
+    });
+  }
+
+  const provider = getActiveCatalog().providers.find((item) => item.id === candidate.providerId);
+  const configured = provider?.models[candidate.agentKind] ?? [];
+  if (
+    !provider
+    || !provider.agents.includes(candidate.agentKind)
+    || !provider.routing[candidate.agentKind]
+  ) {
+    return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'agent_unavailable')] };
+  }
+  if (!configured.some((model) => model.id === candidate.model)) {
+    return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'model_unavailable')] };
+  }
+  if (isProviderModelRouteDisabled(candidate.providerId, candidate.model)) {
+    return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'model_unavailable')] };
+  }
+
+  return requestBuiltinProviderText(prompt, {
+    provider,
+    agentKind: candidate.agentKind,
+    model: candidate.model,
+    transport: candidate.transport,
+    maxTokens: DEDICATED_AUTO_REVIEW_MAX_TOKENS,
+    timeoutMs: opts.timeoutMs,
+    reasoningEffort: candidate.reasoningEffort,
+    signal: opts.signal,
+  });
+}
+
 /** Older remote/mobile callers may omit providerId; a model unique to one
  * non-XD provider is still enough to preserve the selected route. */
 function inferUniqueProviderId(agentKind: AgentKind | undefined, model: string | undefined): string | undefined {
@@ -339,6 +529,22 @@ async function requestDefaultUtilityText(
   return { ok: false, reason, attempts };
 }
 
+function stableSnapshot(value: unknown): string {
+  const normalize = (entry: unknown): unknown => {
+    if (Array.isArray(entry)) return entry.map(normalize);
+    if (entry && typeof entry === 'object') {
+      return Object.keys(entry as Record<string, unknown>)
+        .sort()
+        .reduce<Record<string, unknown>>((result, key) => {
+          result[key] = normalize((entry as Record<string, unknown>)[key]);
+          return result;
+        }, {});
+    }
+    return entry;
+  };
+  return JSON.stringify(normalize(value));
+}
+
 /**
  * Explicit task provider path. A selected custom provider is a single route,
  * not another entry in the XD fallback pool: a failed request must not leak
@@ -355,7 +561,8 @@ async function requestExplicitProviderText(
   // Model resolution is scoped to the selected agent. Never use provider.titleModel
   // here: that legacy field may belong to another runtime (for example Codex),
   // which would silently turn a Claude request into a Codex request.
-  const model = requestedModel || configuredModels[0]?.id || '';
+  const model = requestedModel || configuredModels.find((item) =>
+    isModelSelectableForNewRoute(item, { userProvider: provider?.source === 'user' }))?.id || '';
   const selectedRouting = agentKind ? provider?.routing[agentKind] : undefined;
   const transport: UtilityModelTransport =
     agentKind === 'codex' && selectedRouting?.wireProtocol !== 'openai-chat'
@@ -401,7 +608,9 @@ async function requestExplicitProviderText(
       }],
     };
   }
-  if (requestedModel && !configuredModels.some((item) => item.id === requestedModel)) {
+  if (requestedModel && !configuredModels.some((item) =>
+    item.id === requestedModel
+    && isModelSelectableForNewRoute(item, { userProvider: provider.source === 'user' }))) {
     return {
       ok: false,
       reason: 'no_candidate',
@@ -415,6 +624,35 @@ async function requestExplicitProviderText(
     };
   }
 
+  // 自定义供应商目录钉同样钳制到模型声明的输出上限(与 builtin 分支同口径,
+  // 见 requestBuiltinProviderText 开头)。Codex 2026-08-06。
+  const routeSnapshot = stableSnapshot({
+    routing: selectedRouting,
+    auth: provider.auth,
+    source: provider.source,
+  });
+  const routeStillCurrent = (): boolean => {
+    if (isProviderRouteMutationInProgress(provider.id)) return false;
+    if (isProviderModelRouteDisabled(provider.id, model)) return false;
+    const currentProvider = getActiveCatalog().providers.find((item) => item.id === provider.id);
+    if (!currentProvider || !currentProvider.agents.includes(agentKind)) return false;
+    const currentModel = currentProvider.models[agentKind]?.find((item) => item.id === model);
+    if (
+      !currentModel ||
+      !isModelSelectableForNewRoute(currentModel, { userProvider: currentProvider.source === 'user' })
+    ) return false;
+    return stableSnapshot({
+      routing: currentProvider.routing[agentKind],
+      auth: currentProvider.auth,
+      source: currentProvider.source,
+    }) === routeSnapshot;
+  };
+
+  const catalogModel = provider.models[agentKind]?.find((m) => m.id === model);
+  if (opts.maxTokens !== undefined && catalogModel?.maxOutput !== undefined) {
+    opts = { ...opts, maxTokens: Math.min(opts.maxTokens, catalogModel.maxOutput) };
+  }
+
   if (provider.id === 'xd' || provider.id === 'anthropic' || provider.id === 'openai' || provider.id === 'xai') {
     return requestBuiltinProviderText(prompt, {
       provider,
@@ -424,6 +662,12 @@ async function requestExplicitProviderText(
       maxTokens: opts.maxTokens,
       timeoutMs: opts.timeoutMs,
       reasoningEffort: opts.reasoningEffort,
+      disableReasoning: opts.disableReasoning,
+      signal: opts.signal,
+      systemPrompt: opts.systemPrompt,
+      responseInstructions: opts.responseInstructions,
+      beforeDispatch: opts.beforeDispatch,
+      routeStillCurrent,
     });
   }
 
@@ -463,7 +707,7 @@ async function requestExplicitProviderText(
   const isOAuth = authStrategy === 'oauth-token';
   const noAuth = authStrategy === 'none';
   const credential = isOAuth
-    ? readCachedGenericOAuthAccessToken(provider.id, provider.auth.oauth)
+    ? readCachedGenericOAuthAccessToken(storedCustomProviderId(provider.id), provider.auth.oauth)
     : noAuth
       ? null
       : readCustomProviderKey(provider.id, agentKind);
@@ -517,6 +761,26 @@ async function requestExplicitProviderText(
       maxTokens: requestOpts?.maxTokens,
       timeoutMs: requestOpts?.timeoutMs,
       reasoningEffort: requestOpts?.reasoningEffort,
+      disableReasoning: requestOpts?.disableReasoning,
+      signal: requestOpts?.signal,
+      systemPrompt: requestOpts?.systemPrompt,
+      responseInstructions: requestOpts?.responseInstructions,
+      beforeDispatch: requestOpts?.beforeDispatch
+        ? () => requestOpts.beforeDispatch!({ providerId: provider.id, agentKind, model })
+        : undefined,
+      credentialStillCurrent: requestOpts?.beforeDispatch
+        ? () => {
+            if (noAuth) return true;
+            if (isOAuth) {
+              return readCachedGenericOAuthAccessToken(
+                storedCustomProviderId(provider.id),
+                provider.auth.oauth,
+              ) === credential;
+            }
+            return readCustomProviderKey(provider.id, agentKind) === credential;
+          }
+        : undefined,
+      routeStillCurrent: requestOpts?.beforeDispatch ? routeStillCurrent : undefined,
     }),
   };
   return executeCandidates([candidate], prompt, [], opts);
@@ -535,6 +799,23 @@ function supportsXaiReasoning(model: string): boolean {
   return !(normalized.startsWith('grok-code') || normalized.startsWith('grok-build'));
 }
 
+function cancelledUtilityTextResult(profile: UtilityModelProfile): UtilityTextResult {
+  return {
+    ok: false,
+    reason: 'timeout',
+    attempts: [{
+      providerId: profile.id,
+      model: profile.model,
+      transport: profile.transport,
+      status: 'failed',
+      reason: 'timeout',
+    }],
+  };
+}
+
+// 内置供应商的执行分支只认下面硬编码的 xd/anthropic/openai/xai 四家;钉档
+// 清单侧(textOneshotPinOptions.isRoutableForOneshot)按同一集合过滤——新增
+// 第五个聊天型内置供应商时两边一起动,否则清单会列出这里接不住的模型。
 async function requestBuiltinProviderText(
   prompt: string,
   input: {
@@ -544,7 +825,13 @@ async function requestBuiltinProviderText(
     transport: UtilityModelTransport;
     maxTokens?: number;
     timeoutMs?: number;
-    reasoningEffort?: 'low' | 'medium' | 'high';
+    reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+    disableReasoning?: boolean;
+    signal?: AbortSignal;
+    systemPrompt?: string;
+    responseInstructions?: string;
+    beforeDispatch?: (route: UtilityTextDispatchRoute) => Promise<boolean>;
+    routeStillCurrent?: () => boolean;
   },
 ): Promise<UtilityTextResult> {
   const profile: UtilityModelProfile = {
@@ -555,9 +842,23 @@ async function requestBuiltinProviderText(
     settingsTab: 'providers',
     missingCredentialMessage: 'The selected provider is not authenticated.',
   };
+  if (input.signal?.aborted) return cancelledUtilityTextResult(profile);
   const routing = input.provider.routing[input.agentKind];
   if (!routing) {
     return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'agent_unavailable')] };
+  }
+  // 内置供应商同样要尊重 routing.disabled:目录钉指向的 runtime 被停用后,
+  // 不应再把 prompt 发过去(与自定义分支 430-431 同一判据,reason 同口径)。
+  // Codex 2026-08-06。
+  if (routing.disabled) {
+    return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'endpoint_missing')] };
+  }
+
+  // 插件显式传了 maxTokens 时,钳到该模型目录声明的输出上限(maxOutput),
+  // 避免发送超过模型能力的值被 provider 拒绝。缺省(未传)不钳,走模型自然输出。
+  const catalogModel = findProviderModel(input.provider, input.agentKind, input.model);
+  if (input.maxTokens !== undefined && catalogModel?.maxOutput !== undefined) {
+    input = { ...input, maxTokens: Math.min(input.maxTokens, catalogModel.maxOutput) };
   }
 
   if (input.provider.id === 'xd') {
@@ -579,12 +880,28 @@ async function requestBuiltinProviderText(
         maxTokens: requestOpts?.maxTokens ?? input.maxTokens,
         timeoutMs: requestOpts?.timeoutMs ?? input.timeoutMs,
         reasoningEffort: requestOpts?.reasoningEffort ?? input.reasoningEffort,
+        disableReasoning: requestOpts?.disableReasoning ?? input.disableReasoning,
+        signal: requestOpts?.signal ?? input.signal,
+        systemPrompt: requestOpts?.systemPrompt,
+        responseInstructions: requestOpts?.responseInstructions,
+        beforeDispatch: requestOpts?.beforeDispatch
+          ? () => requestOpts.beforeDispatch!({
+              providerId: input.provider.id,
+              agentKind: input.agentKind,
+              model: input.model,
+            })
+          : undefined,
+        credentialStillCurrent: requestOpts?.beforeDispatch
+          ? () => readClaudeApiKey() === apiKey && effectiveXdGatewayBaseUrl().trim() === baseUrl
+          : undefined,
+        routeStillCurrent: requestOpts?.beforeDispatch ? input.routeStillCurrent : undefined,
       }),
     }], prompt, [], input);
   }
 
   if (input.provider.id === 'anthropic') {
     const oauth = await getValidClaudeAiOAuth();
+    if (input.signal?.aborted) return cancelledUtilityTextResult(profile);
     if (!oauth?.accessToken) {
       return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'not_authenticated')] };
     }
@@ -601,11 +918,30 @@ async function requestBuiltinProviderText(
           'anthropic-version': '2023-06-01',
           'anthropic-beta': 'oauth-2025-04-20',
         },
-        model: toSdkModelString(input.model, findProviderModel(input.provider, input.agentKind, input.model)?.contextWindow),
+        // 直连 Anthropic API 用目录裸 id;不要复用 toSdkModelString——它会给 1M
+        // 目录模型追加 SDK 专用的 [1m] 后缀,/v1/messages 对该串返回 404(#2429)。
+        model: toAnthropicApiModelId(input.model),
         prompt: text,
-        maxTokens: requestOpts?.maxTokens ?? input.maxTokens,
+        // Anthropic API 协议必填 max_tokens:缺省时以模型目录声明的 maxOutput
+        // (模型自身输出能力)兜底,没有目录条目才回退 81920——宿主不设政策上限。
+        maxTokens: requestOpts?.maxTokens ?? input.maxTokens ?? catalogModel?.maxOutput ?? 81_920,
         timeoutMs: requestOpts?.timeoutMs ?? input.timeoutMs,
         reasoningEffort: requestOpts?.reasoningEffort ?? input.reasoningEffort,
+        disableReasoning: requestOpts?.disableReasoning ?? input.disableReasoning,
+        signal: requestOpts?.signal ?? input.signal,
+        systemPrompt: requestOpts?.systemPrompt,
+        responseInstructions: requestOpts?.responseInstructions,
+        beforeDispatch: requestOpts?.beforeDispatch
+          ? () => requestOpts.beforeDispatch!({
+              providerId: input.provider.id,
+              agentKind: input.agentKind,
+              model: input.model,
+            })
+          : undefined,
+        credentialStillCurrent: requestOpts?.beforeDispatch
+          ? async () => (await getValidClaudeAiOAuth())?.accessToken === oauth.accessToken
+          : undefined,
+        routeStillCurrent: requestOpts?.beforeDispatch ? input.routeStillCurrent : undefined,
       }),
     }], prompt, [], input);
   }
@@ -617,6 +953,7 @@ async function requestBuiltinProviderText(
     } catch {
       return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'not_authenticated')] };
     }
+    if (input.signal?.aborted) return cancelledUtilityTextResult(profile);
     if (!creds.accountId) {
       return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'not_authenticated')] };
     }
@@ -642,10 +979,32 @@ async function requestBuiltinProviderText(
         maxTokens: requestOpts?.maxTokens ?? input.maxTokens,
         timeoutMs: requestOpts?.timeoutMs ?? input.timeoutMs,
         reasoningEffort: requestOpts?.reasoningEffort ?? input.reasoningEffort,
+        disableReasoning: requestOpts?.disableReasoning ?? input.disableReasoning,
         // ChatGPT's private Codex Responses endpoint rejects this public API
         // parameter with HTTP 400. The Auto reviewer enforces its own compact
         // output ceiling after the response instead.
         supportsMaxOutputTokens: false,
+        signal: requestOpts?.signal ?? input.signal,
+        systemPrompt: requestOpts?.systemPrompt,
+        responseInstructions: requestOpts?.responseInstructions,
+        beforeDispatch: requestOpts?.beforeDispatch
+          ? () => requestOpts.beforeDispatch!({
+              providerId: input.provider.id,
+              agentKind: input.agentKind,
+              model: input.model,
+            })
+          : undefined,
+        credentialStillCurrent: requestOpts?.beforeDispatch
+          ? async () => {
+              try {
+                const current = await getChatgptBridgeAuth();
+                return current.accountId === accountId && current.accessToken === creds.accessToken;
+              } catch {
+                return false;
+              }
+            }
+          : undefined,
+        routeStillCurrent: requestOpts?.beforeDispatch ? input.routeStillCurrent : undefined,
       }),
     }], prompt, [], input);
   }
@@ -657,6 +1016,7 @@ async function requestBuiltinProviderText(
     } catch {
       return { ok: false, reason: 'no_candidate', attempts: [skippedAttempt(profile, 'not_authenticated')] };
     }
+    if (input.signal?.aborted) return cancelledUtilityTextResult(profile);
     return executeCandidates([{
       providerId: input.provider.id,
       model: input.model,
@@ -671,7 +1031,28 @@ async function requestBuiltinProviderText(
         maxTokens: requestOpts?.maxTokens ?? input.maxTokens,
         timeoutMs: requestOpts?.timeoutMs ?? input.timeoutMs,
         reasoningEffort: requestOpts?.reasoningEffort ?? input.reasoningEffort,
+        disableReasoning: requestOpts?.disableReasoning ?? input.disableReasoning,
         supportsReasoning: supportsXaiReasoning(input.model),
+        signal: requestOpts?.signal ?? input.signal,
+        systemPrompt: requestOpts?.systemPrompt,
+        responseInstructions: requestOpts?.responseInstructions,
+        beforeDispatch: requestOpts?.beforeDispatch
+          ? () => requestOpts.beforeDispatch!({
+              providerId: input.provider.id,
+              agentKind: input.agentKind,
+              model: input.model,
+            })
+          : undefined,
+        credentialStillCurrent: requestOpts?.beforeDispatch
+          ? async () => {
+              try {
+                return (await getGrokAccessToken()) === accessToken;
+              } catch {
+                return false;
+              }
+            }
+          : undefined,
+        routeStillCurrent: requestOpts?.beforeDispatch ? input.routeStillCurrent : undefined,
       }),
     }], prompt, [], input);
   }
@@ -787,6 +1168,7 @@ function resolveLiteLlmCandidate(profile: UtilityModelProfile): UtilityTextCandi
         maxTokens: opts?.maxTokens,
         timeoutMs: opts?.timeoutMs,
         reasoningEffort: opts?.reasoningEffort,
+        signal: opts?.signal,
       }),
     },
   };
@@ -799,10 +1181,14 @@ async function requestLiteLlmText(input: {
   prompt: string;
   maxTokens?: number;
   timeoutMs?: number;
-  reasoningEffort?: 'low' | 'medium' | 'high';
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  signal?: AbortSignal;
 }): Promise<string> {
   const controller = new AbortController();
   const timeoutMs = input.timeoutMs ?? 20_000;
+  const abortFromParent = () => controller.abort();
+  if (input.signal?.aborted) abortFromParent();
+  else input.signal?.addEventListener('abort', abortFromParent, { once: true });
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await undiciFetch(joinProxyPath(input.baseUrl, '/v1/chat/completions'), {
@@ -828,11 +1214,14 @@ async function requestLiteLlmText(input: {
     const parsed = await response.json() as {
       choices?: Array<{ message?: { content?: unknown } }>;
     };
-    const text = parsed.choices
-      ?.map((choice) => typeof choice.message?.content === 'string' ? choice.message.content : '')
+    const text = (parsed.choices ?? [])
+      .map((choice) => chatCompletionContentText(choice.message?.content))
       .join('')
-      .trim() ?? '';
-    if (!text) throw new UtilityTextExecutionError({ reason: 'empty_response' });
+      .trim();
+    if (!text) {
+      log.warn('utility text chat-completions empty content', chatCompletionEmptyFingerprint(parsed));
+      throw new UtilityTextExecutionError({ reason: 'empty_response' });
+    }
     return text;
   } catch (error) {
     if (error instanceof UtilityTextExecutionError) throw error;
@@ -842,6 +1231,7 @@ async function requestLiteLlmText(input: {
     throw new UtilityTextExecutionError({ reason: 'request_failed' });
   } finally {
     clearTimeout(timeout);
+    input.signal?.removeEventListener('abort', abortFromParent);
   }
 }
 
@@ -877,6 +1267,19 @@ function appendProviderPath(baseUrl: string, suffix: string): string {
   return url.toString();
 }
 
+/**
+ * catalog model id → 内置 Anthropic `/v1/messages` 直连请求体的 API model id。
+ *
+ * `[1m]` 是 Claude Code SDK 的 beta 通道后缀(由 toSdkModelString 按目录
+ * contextWindow 追加),不是 Anthropic API 模型名;直连 Messages API 时携带它
+ * 会被上游以 404 not_found 拒绝,进而让 Auto-review 持续 fail-closed(#2429)。
+ * 该转换仅用于内置 anthropic 直连分支——不对自定义供应商做全局字符串剥离,
+ * 部分兼容网关可能把 `[1m]` 作为自己的路由 id。
+ */
+export function toAnthropicApiModelId(model: string): string {
+  return model.endsWith('[1m]') ? model.slice(0, -'[1m]'.length) : model;
+}
+
 /** Claude providers may configure either the host root or an existing `/v1` base. */
 function joinAnthropicMessagesPath(baseUrl: string): string {
   const url = new URL(baseUrl);
@@ -905,34 +1308,55 @@ async function requestProviderHttpText(input: {
   prompt: string;
   maxTokens?: number;
   timeoutMs?: number;
-  reasoningEffort?: 'low' | 'medium' | 'high';
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  disableReasoning?: boolean;
   /** Some coding-specialized models reject their wire's reasoning field. */
   supportsReasoning?: boolean;
   /** Unknown custom routes may reject optional fields from an otherwise compatible wire. */
   retryWithMinimalBodyOnInvalidRequest?: boolean;
   /** Some private Responses-compatible endpoints reject max_output_tokens. */
   supportsMaxOutputTokens?: boolean;
+  /** Owning workflow cancellation; linked with the candidate timeout below. */
+  signal?: AbortSignal;
+  /** Provider-native system text, never concatenated with untrusted reference data. */
+  systemPrompt?: string;
+  /** Additional output-shape instructions. */
+  responseInstructions?: string;
+  /** Session/owner/config guard, evaluated immediately before each HTTP dispatch. */
+  beforeDispatch?: () => Promise<boolean>;
+  /** Re-read the credential captured by the request closure after the async guard. */
+  credentialStillCurrent?: () => boolean | Promise<boolean>;
+  /** Synchronous catalog/override snapshot guard. */
+  routeStillCurrent?: () => boolean;
 }): Promise<string> {
   const controller = new AbortController();
   const timeoutMs = input.timeoutMs ?? 90_000;
+  const abortFromParent = () => controller.abort();
+  if (input.signal?.aborted) abortFromParent();
+  else input.signal?.addEventListener('abort', abortFromParent, { once: true });
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const instructions = [input.systemPrompt, input.responseInstructions]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n');
+    const reasoningEffort = input.disableReasoning
+      ? 'minimal'
+      : input.reasoningEffort;
     const supportsRequestedReasoning = Boolean(
       input.wire !== 'anthropic-messages'
-      && input.reasoningEffort
+      && reasoningEffort
       && input.supportsReasoning !== false,
     );
     const hasOptionalRequestFields = input.wire === 'responses'
       || input.maxTokens !== undefined
+      || input.disableReasoning === true
       || supportsRequestedReasoning;
     const buildBody = (minimal: boolean) => input.wire === 'responses'
       ? {
         model: input.model,
         input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: input.prompt }] }],
+        ...(instructions ? { instructions } : {}),
         ...(!minimal ? {
-          tools: [],
-          tool_choice: 'auto',
-          parallel_tool_calls: false,
           store: false,
           stream: true,
         } : {}),
@@ -940,32 +1364,54 @@ async function requestProviderHttpText(input: {
           ? { max_output_tokens: input.maxTokens }
           : {}),
         ...(!minimal && supportsRequestedReasoning
-          ? { reasoning: { effort: input.reasoningEffort } }
+          ? { reasoning: { effort: reasoningEffort } }
           : {}),
       }
       : input.wire === 'anthropic-messages'
         ? {
           model: input.model,
-          max_tokens: input.maxTokens ?? 4096,
+          // Anthropic API 协议必填 max_tokens。缺省由调用方以模型目录声明的
+          // maxOutput 兜底(模型自身输出能力);81920 只是模型不在目录时的最后
+          // 回退,不是宿主承诺的输出上限。
+          max_tokens: input.maxTokens ?? 81_920,
+          ...(instructions ? { system: instructions } : {}),
+          ...(!minimal && input.disableReasoning ? { thinking: { type: 'disabled' } } : {}),
           messages: [{ role: 'user', content: input.prompt }],
         }
         : {
           model: input.model,
           ...(!minimal && input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
+          ...(!minimal && input.disableReasoning ? { thinking: { type: 'disabled' } } : {}),
           ...(!minimal && supportsRequestedReasoning
-            ? { reasoning_effort: input.reasoningEffort }
+            ? { reasoning_effort: reasoningEffort }
             : {}),
-          messages: [{ role: 'user', content: input.prompt }],
+          messages: [
+            ...(instructions ? [{ role: 'system', content: instructions }] : []),
+            { role: 'user', content: input.prompt },
+          ],
         };
-    const send = (minimal: boolean) => undiciFetch(input.endpoint, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        ...(input.headers ?? {}),
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(buildBody(minimal)),
-    });
+    const canDispatch = async (): Promise<boolean> => {
+      if (input.routeStillCurrent && !input.routeStillCurrent()) return false;
+      if (input.beforeDispatch && !(await input.beforeDispatch())) return false;
+      if (input.credentialStillCurrent && !(await input.credentialStillCurrent())) return false;
+      if (input.routeStillCurrent && !input.routeStillCurrent()) return false;
+      if (input.beforeDispatch && !(await input.beforeDispatch())) return false;
+      return !input.routeStillCurrent || input.routeStillCurrent();
+    };
+    const send = async (minimal: boolean) => {
+      if (!(await canDispatch())) {
+        throw new UtilityTextExecutionError({ reason: 'request_failed' });
+      }
+      return undiciFetch(input.endpoint, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          ...(input.headers ?? {}),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(buildBody(minimal)),
+      });
+    };
     let response = await send(false);
     if (
       !response.ok
@@ -988,7 +1434,16 @@ async function requestProviderHttpText(input: {
       : input.wire === 'anthropic-messages'
         ? parseAnthropicResponseText(raw)
         : parseChatCompletionText(raw);
-    if (!text) throw new UtilityTextExecutionError({ reason: 'empty_response' });
+    if (!text) {
+      if (input.wire === 'chat-completions') {
+        try {
+          log.warn('utility text chat-completions empty content', chatCompletionEmptyFingerprint(JSON.parse(raw)));
+        } catch {
+          // 指纹尽力而为,解析不了就不记。
+        }
+      }
+      throw new UtilityTextExecutionError({ reason: 'empty_response' });
+    }
     return text;
   } catch (error) {
     if (error instanceof UtilityTextExecutionError) throw error;
@@ -998,6 +1453,7 @@ async function requestProviderHttpText(input: {
     throw new UtilityTextExecutionError({ reason: 'request_failed' });
   } finally {
     clearTimeout(timeout);
+    input.signal?.removeEventListener('abort', abortFromParent);
   }
 }
 
@@ -1005,12 +1461,66 @@ function parseChatCompletionText(raw: string): string {
   try {
     const json = JSON.parse(raw) as { choices?: Array<{ message?: { content?: unknown } }> };
     return (json.choices ?? [])
-      .map((choice) => typeof choice.message?.content === 'string' ? choice.message.content : '')
+      .map((choice) => chatCompletionContentText(choice.message?.content))
       .join('')
       .trim();
   } catch {
     return '';
   }
+}
+
+/**
+ * chat-completions 的 message.content 归一:字符串直取;思考模型的 content 可能是
+ * parts 数组([{type:'text',text:…}]),只拼正文段——type 为 'text' 或缺省(最老
+ * 形态),字符串元素(旧网关偶见)直取。reasoning/thinking/tool_result 等带 text
+ * 的非正文段刻意跳过,与顶层 reasoning_content 不取同一立场:思维链不是答案,
+ * 拼进去 expectJson 必挂、普通调用被思维链污染。
+ */
+function chatCompletionContentText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (typeof part !== 'object' || part === null) return '';
+        const type = (part as { type?: unknown }).type;
+        if (type !== undefined && type !== 'text') return '';
+        const text = (part as { text?: unknown }).text;
+        return typeof text === 'string' ? text : '';
+      })
+      .join('');
+  }
+  return '';
+}
+
+/**
+ * 2xx 但取不到正文时的结构指纹:只记形状(content 类型/finish_reason/字段名),
+ * 不记内容——错误响应体可能回显请求元数据,模型正文不落盘全文。
+ * (2026-08-05 实证:deepseek-v4-flash 这类思考模型 200 空 content → empty_response,
+ * 没有指纹时无从区分"思考烧光预算"与"返回结构不认"。)
+ */
+function chatCompletionEmptyFingerprint(parsed: unknown): Record<string, unknown> {
+  if (typeof parsed !== 'object' || parsed === null) return { shape: 'non-object' };
+  const choices = (parsed as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) {
+    return { shape: 'no-choices', topKeys: Object.keys(parsed).slice(0, 8) };
+  }
+  const first = choices[0] as { message?: unknown; finish_reason?: unknown };
+  const message = (
+    typeof first?.message === 'object' && first.message !== null ? first.message : {}
+  ) as Record<string, unknown>;
+  const content = message.content;
+  return {
+    contentType: Array.isArray(content) ? 'array' : content === null ? 'null' : typeof content,
+    contentPartTypes: Array.isArray(content)
+      ? content
+          .slice(0, 6)
+          .map((part) => (typeof part === 'object' && part !== null ? (part as { type?: unknown }).type : typeof part))
+      : undefined,
+    hasReasoningContent: typeof message.reasoning_content === 'string' && message.reasoning_content.length > 0,
+    finishReason: first?.finish_reason,
+    messageKeys: Object.keys(message).slice(0, 8),
+  };
 }
 
 /** Direct request for a user provider runtime selected by the schedule. */
@@ -1026,12 +1536,25 @@ async function requestCustomProviderText(input: {
   prompt: string;
   maxTokens?: number;
   timeoutMs?: number;
-  reasoningEffort?: 'low' | 'medium' | 'high';
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  disableReasoning?: boolean;
+  signal?: AbortSignal;
+  systemPrompt?: string;
+  responseInstructions?: string;
+  beforeDispatch?: () => Promise<boolean>;
+  credentialStillCurrent?: () => boolean | Promise<boolean>;
+  routeStillCurrent?: () => boolean;
 }): Promise<string> {
   const headers: Record<string, string> = {
     ...(input.headers ?? {}),
     'Content-Type': 'application/json',
   };
+  const wire: ProviderWire =
+    input.agentKind === 'claude-code' || input.wireProtocol === 'anthropic-messages'
+      ? 'anthropic-messages'
+      : input.wireProtocol === 'openai-chat'
+        ? 'chat-completions'
+        : 'responses';
   // safeStorage 有当前凭证时覆盖历史 header；没有时仅 api-key 策略允许保留旧版
   // header-only 配置，以便用户升级后继续可用。OAuth 与 none 仍必须清掉复制进来的凭证头。
   const preserveLegacyApiKeyHeaders =
@@ -1044,19 +1567,13 @@ async function requestCustomProviderText(input: {
   }
   if (input.credential) {
     headers.Authorization = `Bearer ${input.credential}`;
-    if (input.agentKind === 'claude-code' && input.authStrategy === 'api-key-header') {
+    if (wire === 'anthropic-messages' && input.authStrategy === 'api-key-header') {
       headers['x-api-key'] = input.credential;
     }
   }
-  if (input.agentKind === 'claude-code') {
+  if (wire === 'anthropic-messages') {
     headers['anthropic-version'] = headers['anthropic-version'] ?? '2023-06-01';
   }
-  const wire: ProviderWire =
-    input.agentKind === 'claude-code'
-      ? 'anthropic-messages'
-      : input.wireProtocol === 'openai-chat'
-        ? 'chat-completions'
-        : 'responses';
   return requestProviderHttpText({
     wire,
     endpoint: input.requestPath
@@ -1072,7 +1589,14 @@ async function requestCustomProviderText(input: {
     maxTokens: input.maxTokens,
     timeoutMs: input.timeoutMs,
     reasoningEffort: input.reasoningEffort,
+    disableReasoning: input.disableReasoning,
     retryWithMinimalBodyOnInvalidRequest: true,
+    signal: input.signal,
+    systemPrompt: input.systemPrompt,
+    responseInstructions: input.responseInstructions,
+    beforeDispatch: input.beforeDispatch,
+    credentialStillCurrent: input.credentialStillCurrent,
+    routeStillCurrent: input.routeStillCurrent,
   });
 }
 

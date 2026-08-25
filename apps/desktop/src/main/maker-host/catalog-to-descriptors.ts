@@ -11,8 +11,9 @@
  * (issue #882 第 3 点:网关多返回的图像/视频/TTS/STT/实时/Embedding/压缩模型不进 Agent
  * availableModels,但仍在模型管理设置页可见——那边走完整 catalog,不走这个函数),按 id
  * **首见胜出**去重（provider 序即 anthropic → openai → xd）。不可选来源不占 seen，同 id
- * 仍可由后续可用来源补上。唯一例外是 Pi 的同 id 冲突涉及 user provider：扁平能力没有
- * provider provenance，effort 必须收敛为各可选来源的交集，不能宣称某条实际路由不支持的档位。
+ * 仍可由后续可用来源补上。例外有两项：Pi 的同 id 冲突涉及 user provider 时，扁平能力没有
+ * provider provenance，effort 必须收敛为各可选来源的交集；后见 XD 条目携带当前 agent 的
+ * 区域默认标记时，把该标记并入首见 descriptor，避免跨 provider 去重吞掉服务端策略。
  *
  * 顺序契约（no-break）：派生结果必须逐字逐序复现迁移前的有效列表
  * （cc = 旧 CLAUDE_MODELS 序 then XD 追加序；codex = 旧 CODEX_MODELS 序 then 折扣追加序）。
@@ -28,6 +29,11 @@ import {
 } from '@cindy/model-providers';
 import type { ModelDescriptor } from '@cindy/maker-core';
 import { resolveRetiredRegistryModelForPi } from './model-plane/modelPlanePolicy.js';
+import {
+  applyLocalOverridesToRetiredRootModel,
+  EMPTY_MODEL_CATALOG_OVERRIDES,
+  type ModelCatalogOverrides,
+} from './model-plane/localCatalogOverrides.js';
 
 /** Maker 能力读取面的最小形状；保留数组引用以让已创建 Session 同步看到新目录。 */
 interface ModelCapabilitiesTarget {
@@ -36,6 +42,10 @@ interface ModelCapabilitiesTarget {
 
 interface DescriptorProjectionOptions {
   preserveExplicitPiEfforts?: boolean;
+}
+
+function isOfficialGrok46Id(modelId: string): boolean {
+  return modelId === 'grok-4.6' || modelId.endsWith('/grok-4.6');
 }
 
 interface SeenModelProjection {
@@ -80,10 +90,14 @@ function toDescriptor(
   // 默认可见性要透传：渲染层的种子默认模型取「排序第一**且默认可见**」的那个，没有它就会
   // 把默认收起的 legacy 模型选成默认 —— 用户在选择器里根本看不到自己的默认模型。
   if (m.defaultEnabled !== undefined) d.defaultEnabled = m.defaultEnabled;
+  // 新对话默认种子标记要透传：渲染层 getDefaultModelForVendor 据它优先选中被标记的模型。
+  // v3 可携带 Pi 自己的标记；消费端按 Agent 严格解释，不跨 Agent 借用默认策略。
+  if (m.newSessionDefault !== undefined) d.newSessionDefault = m.newSessionDefault;
   if (m.cost !== undefined) d.cost = m.cost;
   if (m.maxOutput !== undefined) d.maxOutputTokens = m.maxOutput;
-  const supportsImageInput = m.supportsImageInput
-    ?? (m.modalities !== undefined ? m.modalities.input.includes('image') : undefined);
+  const supportsImageInput =
+    m.supportsImageInput ??
+    (m.modalities !== undefined ? m.modalities.input.includes('image') : undefined);
   if (supportsImageInput !== undefined) d.supportsImageInput = supportsImageInput;
   return d;
 }
@@ -108,7 +122,26 @@ function intersectPiEffortCapabilities(
   return { ...first, efforts, defaultEffort };
 }
 
-/** 派生 availableModels：字段按 id 首见胜出；Pi + BYOM 同 id 时 effort 取安全交集。 */
+/**
+ * availableModels 按 id 拍平后仍要保留 XD 区域策略。展示/能力字段继续首见胜出；这里只把
+ * 当前 agent 对应的默认标记并到首见 descriptor，不把其它 Agent 的默认策略跨投影进来。
+ */
+function mergeNewSessionDefaultMarker(
+  first: ModelDescriptor,
+  next: ModelDescriptor,
+  agent: AgentKind,
+): ModelDescriptor {
+  const hasNewMarker =
+    next.newSessionDefault?.includes(agent) === true &&
+    first.newSessionDefault?.includes(agent) !== true;
+  if (!hasNewMarker) return first;
+  return {
+    ...first,
+    newSessionDefault: [...(first.newSessionDefault ?? []), agent],
+  };
+}
+
+/** 派生 availableModels：字段按 id 首见胜出；另收敛 Pi BYOM effort 与 XD 区域默认标记。 */
 export function deriveAvailableModels(catalog: Catalog, agent: AgentKind): ModelDescriptor[] {
   const seen = new Map<string, SeenModelProjection>();
   const out: ModelDescriptor[] = [];
@@ -123,14 +156,21 @@ export function deriveAvailableModels(catalog: Catalog, agent: AgentKind): Model
       const userProvider = provider.source === 'user';
       if (!isModelSelectableForNewRoute(m, { userProvider })) continue;
       const descriptor = toDescriptor(m, agent, {
-        preserveExplicitPiEfforts: userProvider,
+        preserveExplicitPiEfforts: userProvider || (provider.id === 'xai' && isOfficialGrok46Id(m.id)),
       });
       const previous = seen.get(m.id);
       if (previous) {
+        let merged = out[previous.index];
         if (agent === 'pi' && (previous.includesUserProvider || userProvider)) {
-          out[previous.index] = intersectPiEffortCapabilities(out[previous.index], descriptor);
+          merged = intersectPiEffortCapabilities(merged, descriptor);
           previous.includesUserProvider ||= userProvider;
         }
+        // 只有鉴权后的 XD /models 会被 active-catalog 投影成区域默认；公共 Registry 与
+        // user provider 均不能借同 id 碰撞改变默认策略。
+        if (provider.id === 'xd') {
+          merged = mergeNewSessionDefaultMarker(merged, descriptor, agent);
+        }
+        out[previous.index] = merged;
         continue;
       }
       seen.set(m.id, { index: out.length, includesUserProvider: userProvider });
@@ -150,26 +190,45 @@ export function resolvePiRuntimeModelDescriptor(
   catalog: Catalog,
   providerId: string | null | undefined,
   modelId: string,
+  options: { localOverrides?: ModelCatalogOverrides } = {},
 ): ModelDescriptor | null {
-  const providers = providerId === 'cindy'
-    ? catalog.providers.filter((provider) => provider.source !== 'user')
-    : providerId
-      ? catalog.providers.filter((provider) => provider.id === providerId)
-      : catalog.providers;
+  const providers =
+    providerId === 'cindy'
+      ? catalog.providers.filter((provider) => provider.source !== 'user')
+      : providerId
+        ? catalog.providers.filter((provider) => provider.id === providerId)
+        : catalog.providers;
   for (const provider of providers) {
     const model = (provider.models.pi ?? []).find((candidate) => candidate.id === modelId);
     if (model && isAgentSelectableModel(model, { userProvider: provider.source === 'user' })) {
       return toDescriptor(model, 'pi', {
-        preserveExplicitPiEfforts: provider.source === 'user',
+        preserveExplicitPiEfforts:
+          provider.source === 'user' || (provider.id === 'xai' && isOfficialGrok46Id(model.id)),
       });
     }
   }
 
   for (const provider of providers) {
-    const retired = resolveRetiredRegistryModelForPi(catalog.modelRegistry, provider.id, modelId);
+    const retired = resolveRetiredRegistryModelForPi(catalog.modelRegistry, provider.id, modelId, {
+      prepareRootModel: ({ providerId: matchedProviderId, rootAgent, model }) =>
+        applyLocalOverridesToRetiredRootModel(
+          matchedProviderId,
+          rootAgent,
+          model,
+          options.localOverrides ?? EMPTY_MODEL_CATALOG_OVERRIDES,
+        ),
+    });
     if (retired) return toDescriptor(retired, 'pi');
   }
   return null;
+}
+
+/** Pi 默认 gateway 的 v3 transport 来自 XD；描述符必须使用同一来源。 */
+export function resolvePiGatewayDescriptorProviderId(
+  providerId: string | null | undefined,
+): string {
+  const source = providerId?.trim();
+  return !source || source === 'cindy' ? 'xd' : source;
 }
 
 /**

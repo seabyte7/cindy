@@ -73,17 +73,18 @@ describe('buildClaudeEnv', () => {
     expect(env.ANTHROPIC_API_KEY).toBe('key');
   });
 
-  it('evaluates function-form behaviorFlags with the spawn credentialMode and spawnMode', async () => {
+  it('evaluates function-form behaviorFlags with the spawn route context', async () => {
     const behaviorFlags = vi.fn(() => ({ CLAUDE_CODE_ATTRIBUTION_HEADER: '0' }));
 
     const env = await buildClaudeEnv(
       createAuthAdapter(),
       { behaviorFlags },
-      { credentialMode: 'gateway-key' },
+      { credentialMode: 'gateway-key', sessionProviderId: 'xd' },
     );
 
     expect(behaviorFlags).toHaveBeenCalledWith({
       credentialMode: 'gateway-key',
+      sessionProviderId: 'xd',
       spawnMode: 'local',
     });
     expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe('0');
@@ -100,8 +101,23 @@ describe('buildClaudeEnv', () => {
 
     expect(behaviorFlags).toHaveBeenCalledWith({
       credentialMode: 'gateway-key',
+      sessionProviderId: undefined,
       spawnMode: 'remote',
     });
+  });
+
+  it('does not forward a controller-local CLAUDE_CONFIG_DIR to a remote host', async () => {
+    const env = await buildClaudeEnv(
+      createAuthAdapter({
+        ANTHROPIC_API_KEY: 'sk-gw',
+        CLAUDE_CONFIG_DIR: 'C:\\Users\\Admin\\AppData\\Roaming\\Cindy-dev2\\claude-home',
+      }),
+      {},
+      { credentialMode: 'gateway-key', mode: 'remote' },
+    );
+
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-gw');
+    expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
   });
 
   it('lets behaviorFlags override an inherited CLAUDE_CODE_ATTRIBUTION_HEADER from the host env', async () => {

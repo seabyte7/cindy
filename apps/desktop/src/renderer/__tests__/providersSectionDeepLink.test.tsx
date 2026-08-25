@@ -15,7 +15,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ProviderView } from '@cindy/model-providers';
 
-const { wizardSpy, providersState, codexAuthState, codexAuthActions, toastError } = vi.hoisted(
+const {
+  wizardSpy,
+  providersState,
+  codexAuthState,
+  codexAuthActions,
+  toastError,
+  setModelVisibilitiesSpy,
+} = vi.hoisted(
   () => ({
     wizardSpy: vi.fn(),
     providersState: { providers: [] as unknown[], order: [] as string[] },
@@ -31,6 +38,7 @@ const { wizardSpy, providersState, codexAuthState, codexAuthActions, toastError 
       logout: vi.fn(async () => undefined),
     },
     toastError: vi.fn(),
+    setModelVisibilitiesSpy: vi.fn(() => true),
   }),
 );
 
@@ -93,7 +101,7 @@ vi.mock('@/lib/providerSubtitle', () => ({
 
 vi.mock('@/state/modelVisibilityPrefs', () => ({
   isModelEnabled: () => true,
-  setManyVisibility: vi.fn(),
+  setModelVisibilities: setModelVisibilitiesSpy,
   setModelVisibility: vi.fn(),
   useModelVisibilityVersion: () => 0,
 }));
@@ -178,7 +186,7 @@ afterEach(() => {
 });
 
 describe('ProvidersSection — 深链定位', () => {
-  it('ChatGPT 系统共享登录失效时显示来源说明并打开 ChatGPT App', async () => {
+  it('ChatGPT 系统共享登录失效时显示来源说明并在 Cindy 中重新登录', async () => {
     codexAuthState.state = {
       kind: 'reconnect-required',
       reason: 'token_revoked',
@@ -201,13 +209,13 @@ describe('ProvidersSection — 深链定位', () => {
       'var(--remote-status-failed)',
     );
     expect(await screen.findByText('chatgptAuthRecovery.systemSharedInvalidated')).not.toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'chatgptAuthRecovery.openApp' }));
+    fireEvent.click(screen.getByRole('button', { name: 'chatgptAuthRecovery.relogin' }));
 
-    await waitFor(() => expect(window.electronAPI.openChatGPTApp).toHaveBeenCalledOnce());
-    expect(codexAuthActions.triggerLogin).not.toHaveBeenCalled();
+    await waitFor(() => expect(codexAuthActions.triggerLogin).toHaveBeenCalledOnce());
+    expect(window.electronAPI.openChatGPTApp).not.toHaveBeenCalled();
   });
 
-  it('ChatGPT App 打开失败时保留恢复入口并提示用户', async () => {
+  it('ChatGPT 系统共享重新登录被取消时保留恢复入口', async () => {
     codexAuthState.state = {
       kind: 'reconnect-required',
       reason: 'token_revoked',
@@ -222,18 +230,15 @@ describe('ProvidersSection — 深链定位', () => {
         models: { codex: [], 'claude-code': [] },
       }),
     ];
-    vi.mocked(window.electronAPI.openChatGPTApp).mockRejectedValueOnce(
-      new Error('bridge unavailable'),
-    );
+    codexAuthActions.triggerLogin.mockResolvedValueOnce('cancelled');
     renderAt('?tab=providers&connect=openai');
 
-    fireEvent.click(await screen.findByRole('button', { name: 'chatgptAuthRecovery.openApp' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'chatgptAuthRecovery.relogin' }));
 
-    await waitFor(() =>
-      expect(toastError).toHaveBeenCalledWith('chatgptAuthRecovery.openAppFailed'),
-    );
-    expect(screen.getByRole('button', { name: 'chatgptAuthRecovery.openApp' })).not.toBeNull();
-    expect(codexAuthActions.triggerLogin).not.toHaveBeenCalled();
+    await waitFor(() => expect(codexAuthActions.triggerLogin).toHaveBeenCalledOnce());
+    expect(toastError).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'chatgptAuthRecovery.relogin' })).not.toBeNull();
+    expect(window.electronAPI.openChatGPTApp).not.toHaveBeenCalled();
   });
 
   it('connect=anthropic(未占行内置渠道)→ 向导 builtin 直达;参数消费后清除', async () => {
@@ -301,6 +306,53 @@ describe('ProvidersSection — 深链定位', () => {
     await waitFor(() => expect(screen.queryByTestId('wizard-stub')).not.toBeNull());
     expect(wizardSpy).toHaveBeenCalledWith(undefined);
     await waitFor(() => expect(screen.getByTestId('search').textContent).toBe('?tab=providers'));
+  });
+
+  it('统一模型开关跨 agent 一次提交，失败时提示用户', async () => {
+    providersState.providers = [
+      makeProvider('dual', {
+        name: 'Dual',
+        connected: true,
+        agents: ['claude-code', 'codex'],
+        models: {
+          'claude-code': [
+            {
+              id: 'shared',
+              name: 'Shared',
+              contextWindow: 200_000,
+              efforts: [],
+              defaultEffort: null,
+            },
+          ],
+          codex: [
+            {
+              id: 'shared',
+              name: 'Shared',
+              contextWindow: 272_000,
+              efforts: [],
+              defaultEffort: null,
+            },
+          ],
+        },
+      }),
+    ];
+    setModelVisibilitiesSpy.mockReturnValueOnce(false);
+    renderAt('?tab=providers');
+
+    fireEvent.click(await screen.findByRole('switch', { name: 'Shared' }));
+
+    expect(setModelVisibilitiesSpy).toHaveBeenCalledOnce();
+    expect(setModelVisibilitiesSpy).toHaveBeenCalledWith(
+      'dual',
+      [
+        { agent: 'claude-code', modelId: 'shared' },
+        { agent: 'codex', modelId: 'shared' },
+      ],
+      false,
+    );
+    expect(toastError).toHaveBeenCalledWith(
+      'settings.providers.models.visibilityWriteFailed',
+    );
   });
 
   it('authorization-code 自定义供应商登录期间卸载时取消本视图拥有的授权', async () => {

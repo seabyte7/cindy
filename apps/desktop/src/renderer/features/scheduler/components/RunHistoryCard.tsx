@@ -51,7 +51,7 @@ function StatusChip({ status }: { status: RunStatus }) {
       className={cn(
         // 高度去掉固定值，由 py + 文字行高决定，避免 13px 字号被 18px 框压扁
         'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1',
-        'text-[12px] font-medium leading-none whitespace-nowrap',
+        'text-12 font-medium leading-none whitespace-nowrap',
         filled
           ? 'bg-[var(--chat-input-chip-bg)] text-[var(--msg-assistant-text)]'
           : 'border border-[var(--cmd-palette-border)] bg-transparent text-[var(--cmd-palette-item-meta)]',
@@ -155,7 +155,7 @@ export function RunHistoryCard({
 
   const metaText =
     run.status === 'running'
-      ? formatStartedAgo(run.firedAt)
+      ? formatStartedAgo(run.firedAt, Date.now(), t)
       : t('scheduler.runs.took', { duration: formatDuration(run.firedAt, run.finishedAt) });
   const costText = run.status === 'running'
     ? null
@@ -276,7 +276,7 @@ export function RunHistoryCard({
             )}
           </span>
           <span className="truncate text-14 font-medium text-[var(--msg-assistant-text)]">
-            {formatRunTimestamp(run.firedAt)}
+            {formatRunTimestamp(run.firedAt, Date.now(), t)}
           </span>
         </div>
         <StatusChip status={run.status} />

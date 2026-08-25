@@ -1,6 +1,6 @@
 /**
- * Auto-review 接线集成测试:官方 Claude OAuth 保留原生 Auto classifier；第三方路由
- * 映射到 SDK default，让 canUseTool 走 Cindy 当前模型轻量 fallback。
+ * Auto-review 接线集成测试:官方 Claude OAuth 在没有 host MCP 时保留原生 Auto classifier；
+ * 一旦有 host MCP 或使用第三方路由,映射到 SDK default，让 canUseTool 走 Cindy 当前模型轻量 fallback。
  *
  * 覆盖(靶心是接线,而非策略本身 —— 策略逐规则由 auto-review-policy.test.ts 覆盖):
  *   - auto + 安全内置(只读 / 区内写 / 只读 shell)→ 静默 allow,不惊动 resolver
@@ -16,8 +16,17 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { AgentDeps, AgentSessionHandle } from '../../base-agent.js';
-import type { AutoReviewRequest } from '../../shared/auto-review-decision.js';
+import type {
+  AgentDeps,
+  AgentSessionHandle,
+  McpToolApprovalContext,
+  McpToolApprovalPolicy,
+} from '../../base-agent.js';
+import {
+  AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE,
+  AUTO_REVIEW_UNAVAILABLE_CODE,
+  type AutoReviewRequest,
+} from '../../shared/auto-review-decision.js';
 import type { PermissionMode } from '../../../types/common.js';
 import type { AuthAdapter } from '../../../interfaces/auth-adapter.js';
 import type { InteractionDecision, InteractionRequest } from '../../../types/events.js';
@@ -45,6 +54,8 @@ function noopLogger(): Logger {
 function createDeps(options: {
   authSource?: 'oauth' | 'api-key';
   reviewAutoPermissionAction?: AgentDeps['reviewAutoPermissionAction'];
+  mcpProviderNames?: readonly string[];
+  getMcpToolApprovalPolicy?: (context: McpToolApprovalContext) => McpToolApprovalPolicy;
 } = {}): AgentDeps {
   const auth: AuthAdapter = {
     async getState() { return { authenticated: true, authSource: options.authSource }; },
@@ -57,22 +68,52 @@ function createDeps(options: {
     runtimeConfig: {},
     binaryPath: process.execPath,
     logger: noopLogger(),
-    mcpProviders: [],
+    mcpProviders: (options.mcpProviderNames ?? []).map((name) => ({
+      name,
+      toClaudeSdkConfig: () => ({ type: 'stdio', command: 'true' }),
+    })),
     reviewAutoPermissionAction: options.reviewAutoPermissionAction,
+    getMcpToolApprovalPolicy: options.getMcpToolApprovalPolicy,
   };
 }
 
-function createFakeQuery() {
+function createFakeQuery(
+  initMcpServerNames: readonly string[] = [],
+  blockMcpServerStatus = false,
+  rejectPermissionModeChange = false,
+) {
+  let initEmitted = false;
   return {
     [Symbol.asyncIterator]() {
-      return { next: () => new Promise<IteratorResult<unknown>>(() => {}) };
+      return {
+        next: () => {
+          if (!initEmitted && initMcpServerNames.length > 0) {
+            initEmitted = true;
+            return Promise.resolve({
+              done: false as const,
+              value: {
+                type: 'system',
+                subtype: 'init',
+                session_id: 'sdk-auto-review',
+                mcp_servers: initMcpServerNames.map((name) => ({ name, status: 'connected' })),
+              },
+            });
+          }
+          return new Promise<IteratorResult<unknown>>(() => {});
+        },
+      };
     },
-    setPermissionMode: vi.fn(async () => {}),
+    setPermissionMode: vi.fn(async () => {
+      if (rejectPermissionModeChange) throw new Error('permission transport failed');
+    }),
     setModel: vi.fn(async () => {}),
     applyFlagSettings: vi.fn(async () => {}),
     interrupt: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
     rewindFiles: vi.fn(async () => ({ canRewind: false })),
+    ...(blockMcpServerStatus
+      ? { mcpServerStatus: vi.fn(() => new Promise<never>(() => {})) }
+      : {}),
   };
 }
 
@@ -97,12 +138,21 @@ async function startSession(
     reviewer?: AgentDeps['reviewAutoPermissionAction'];
     attachResolver?: boolean;
     model?: string;
+    mcpProviderNames?: readonly string[];
+    initMcpServerNames?: readonly string[];
+    blockMcpServerStatus?: boolean;
+    rejectPermissionModeChange?: boolean;
+    mcpToolApprovalPolicy?: (context: McpToolApprovalContext) => McpToolApprovalPolicy;
   } = {},
 ) {
   const configDir = await makeTempDir();
   process.env.CLAUDE_CONFIG_DIR = configDir;
   const workingDir = await makeTempDir();
-  const fakeQuery = createFakeQuery();
+  const fakeQuery = createFakeQuery(
+    options.initMcpServerNames,
+    options.blockMcpServerStatus,
+    options.rejectPermissionModeChange,
+  );
   sdkMock.query.mockReturnValue(fakeQuery);
 
   const reviewAutoPermissionAction = options.reviewer ?? vi.fn(async () => ({
@@ -112,6 +162,8 @@ async function startSession(
   const agent = new ClaudeCodeAgent(createDeps({
     authSource: options.authSource,
     reviewAutoPermissionAction,
+    mcpProviderNames: options.mcpProviderNames,
+    getMcpToolApprovalPolicy: options.mcpToolApprovalPolicy,
   }));
   const handle = await agent.startSession({
     sessionId: 'session-auto-review',
@@ -172,13 +224,99 @@ afterEach(async () => {
 });
 
 describe('Auto-review wiring: native first, Cindy fallback', () => {
-  it('keeps SDK auto for official Claude OAuth', async () => {
+  it('keeps SDK auto for official Claude OAuth without host MCPs', async () => {
     const { handle, queryPermissionMode, reviewAutoPermissionAction } = await startSession('auto', {
       providerId: 'anthropic',
       authSource: 'oauth',
     });
     expect(queryPermissionMode).toBe('auto');
     expect(reviewAutoPermissionAction).not.toHaveBeenCalled();
+    await handle.close();
+  });
+
+  it('downgrades native OAuth Auto after SDK init reveals a settings MCP', async () => {
+    const { handle, fakeQuery, queryPermissionMode } = await startSession('auto', {
+      providerId: 'anthropic',
+      authSource: 'oauth',
+      initMcpServerNames: ['settings_prompt_mcp'],
+      blockMcpServerStatus: true,
+    });
+
+    // Settings MCPs are not host-injected, so startup legitimately begins native Auto.
+    expect(queryPermissionMode).toBe('auto');
+    await vi.waitFor(() => expect(fakeQuery.setPermissionMode).toHaveBeenCalledWith('default'));
+    await handle.close();
+  });
+
+  it('closes instead of leaving settings MCPs in native Auto when downgrade fails', async () => {
+    const { handle, fakeQuery } = await startSession('auto', {
+      providerId: 'anthropic',
+      authSource: 'oauth',
+      initMcpServerNames: ['settings_prompt_mcp'],
+      rejectPermissionModeChange: true,
+    });
+
+    await vi.waitFor(() => expect(fakeQuery.close).toHaveBeenCalledTimes(1));
+    await handle.close();
+  });
+
+  it('does not close an already-default host-MCP session when SDK init reports settings MCPs', async () => {
+    const { handle, fakeQuery, queryPermissionMode } = await startSession('auto', {
+      providerId: 'anthropic',
+      authSource: 'oauth',
+      mcpProviderNames: ['cindy_orca'],
+      initMcpServerNames: ['cindy_orca', 'settings_prompt_mcp'],
+      blockMcpServerStatus: true,
+      rejectPermissionModeChange: true,
+    });
+
+    expect(queryPermissionMode).toBe('default');
+    await vi.waitFor(() => expect(fakeQuery.mcpServerStatus).toHaveBeenCalled());
+    expect(fakeQuery.setPermissionMode).not.toHaveBeenCalled();
+    expect(fakeQuery.close).not.toHaveBeenCalled();
+    await handle.close();
+  });
+
+  it('uses SDK default for official Claude OAuth when a host MCP is registered', async () => {
+    const { handle, canUseTool, queryPermissionMode, seen } = await startSession('auto', {
+      providerId: 'anthropic',
+      authSource: 'oauth',
+      mcpProviderNames: ['cindy_orca'],
+      mcpToolApprovalPolicy: () => 'auto-approve',
+    });
+    expect(queryPermissionMode).toBe('default');
+
+    const result = await canUseTool(
+      'mcp__cindy_orca__create_workers',
+      { workers: [] },
+      { toolUseID: 'oauth-orca-mcp' },
+    );
+    expect(result.behavior).toBe('allow');
+    expect(seen).toHaveLength(0);
+    await handle.close();
+  });
+
+  it('shows a real permission interaction for prompt MCPs in official Claude OAuth Auto', async () => {
+    const { handle, canUseTool, queryPermissionMode, seen } = await startSession('auto', {
+      providerId: 'anthropic',
+      authSource: 'oauth',
+      mcpProviderNames: ['custom_prompt_mcp'],
+      mcpToolApprovalPolicy: () => 'prompt',
+    });
+    expect(queryPermissionMode).toBe('default');
+
+    const result = await canUseTool(
+      'mcp__custom_prompt_mcp__write_record',
+      { value: 'approved by the interaction resolver' },
+      { toolUseID: 'oauth-prompt-mcp' },
+    );
+
+    expect(result.behavior).toBe('allow');
+    expect(permissionRequests(seen)).toHaveLength(1);
+    expect(permissionRequests(seen)[0]).toMatchObject({
+      kind: 'permission',
+      toolName: 'mcp__custom_prompt_mcp__write_record',
+    });
     await handle.close();
   });
 
@@ -450,9 +588,11 @@ describe('Auto-review wiring: reviewer outages surface once per session', () => 
     expect(second.behavior).toBe('deny');
     await settle();
 
-    // 两次都被拒,但只说一次 —— 逐条提示会把 Auto 退化成比 Ask 更烦的东西。
-    expect(notices).toHaveLength(1);
-    expect(notices[0]).toContain('[AUTO_REVIEW_UNAVAILABLE]');
+    // 两次都被拒,但每种提示只说一次 —— 逐条提示会把 Auto 退化成比 Ask 更烦的东西。
+    // 没有 resolver 时确认卡也送不出去,所以还会有一条未送达纠正,同样去重。
+    expect(notices.filter((message) => message.includes('[AUTO_REVIEW_UNAVAILABLE]'))).toHaveLength(1);
+    expect(notices.filter((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toHaveLength(1);
+    expect(notices).toHaveLength(2);
     await handle.close();
   });
 
@@ -467,6 +607,102 @@ describe('Auto-review wiring: reviewer outages surface once per session', () => 
     // 模型判定的 block 按 Auto 本意保持静默 —— 只把 reason 喂给模型,不打扰用户。
     expect(notices).toHaveLength(0);
     await handle.close();
+  });
+
+  it.each([
+    'timeout',
+    'hook_interaction_timeout',
+    'no_resolver_attached',
+    'resolver_threw',
+    'card send failed: slack timeout',
+  ] as const)('does not treat a missing confirmation as a user rejection after auto-review fails (%s)', async (reason) => {
+    const { handle, canUseTool } = await startSession('auto', {
+      reviewer: async () => {
+        throw new Error('reviewer offline');
+      },
+      attachResolver: false,
+    });
+    handle.setInteractionResolver(async () => ({
+      kind: 'permission',
+      behavior: 'deny',
+      reason,
+    }));
+    const { notices } = startNoticeCollector(handle);
+
+    const result = await canUseTool(
+      'Bash',
+      { command: 'npx tsc --noEmit' },
+      { toolUseID: `undelivered-${reason}` },
+    );
+    expect(result.behavior).toBe('deny');
+    await settle();
+
+    expect(notices.some((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toBe(true);
+    expect(notices.some((message) => message.includes('not a user rejection'))).toBe(true);
+    await handle.close();
+  });
+
+  it('keeps a real user deny distinct from a missing confirmation', async () => {
+    const { handle, canUseTool } = await startSession('auto', {
+      reviewer: async () => {
+        throw new Error('reviewer offline');
+      },
+      attachResolver: false,
+    });
+    handle.setInteractionResolver(async () => ({
+      kind: 'permission',
+      behavior: 'deny',
+      reason: 'User denied',
+    }));
+    const { notices } = startNoticeCollector(handle);
+
+    const result = await canUseTool(
+      'Bash',
+      { command: 'npx tsc --noEmit' },
+      { toolUseID: 'user-deny' },
+    );
+    expect(result.behavior).toBe('deny');
+    await settle();
+
+    expect(notices.some((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toBe(false);
+    await handle.close();
+  });
+
+  it.each([
+    'close',
+    'setPermissionMode',
+  ] as const)('does not treat a system-dismissed confirmation as a user rejection after auto-review fails (%s)', async (action) => {
+    const { handle, canUseTool } = await startSession('auto', {
+      reviewer: async () => {
+        throw new Error('reviewer offline');
+      },
+      attachResolver: false,
+    });
+    let resolverCalled = false;
+    handle.setInteractionResolver(() => {
+      resolverCalled = true;
+      return new Promise<InteractionDecision>(() => {});
+    });
+    const { notices } = startNoticeCollector(handle);
+
+    const pending = canUseTool(
+      'Bash',
+      { command: 'npx tsc --noEmit' },
+      { toolUseID: `dismissed-${action}` },
+    );
+    await vi.waitFor(() => expect(resolverCalled).toBe(true));
+
+    if (action === 'close') {
+      await handle.close();
+    } else {
+      await handle.setPermissionMode?.('ask');
+    }
+    await expect(pending).resolves.toMatchObject({ behavior: 'deny' });
+    await settle();
+
+    expect(notices.some((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toBe(true);
+    expect(notices.some((message) => message.includes('not a user rejection'))).toBe(true);
+    if (action !== 'close') await handle.close();
   });
 
   /**
@@ -518,12 +754,14 @@ describe('Auto-review wiring: reviewer outages surface once per session', () => 
     await canUseTool('Write', { file_path: '/tmp/t1.conf' }, { toolUseID: 'turn1-a' });
     await canUseTool('Write', { file_path: '/tmp/t2.conf' }, { toolUseID: 'turn1-b' });
     await settle();
-    expect(notices).toHaveLength(1); // 同一轮内两次被拒 → 仍只一条
+    expect(notices.filter((message) => message.includes(`[${AUTO_REVIEW_UNAVAILABLE_CODE}]`))).toHaveLength(1);
+    expect(notices.filter((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toHaveLength(1);
 
     await handle.send({ type: 'user', content: 'Try something else then.' });
     await canUseTool('Write', { file_path: '/tmp/t3.conf' }, { toolUseID: 'turn2-a' });
     await settle();
-    expect(notices).toHaveLength(2); // 新一轮 → 重新武装
+    expect(notices.filter((message) => message.includes(`[${AUTO_REVIEW_UNAVAILABLE_CODE}]`))).toHaveLength(2);
+    expect(notices.filter((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toHaveLength(2);
     await handle.close();
   });
 
@@ -538,14 +776,16 @@ describe('Auto-review wiring: reviewer outages surface once per session', () => 
 
     await canUseTool('Write', { file_path: '/tmp/c.conf' }, { toolUseID: 'n4' });
     await settle();
-    expect(notices).toHaveLength(1);
+    expect(notices.filter((message) => message.includes(`[${AUTO_REVIEW_UNAVAILABLE_CODE}]`))).toHaveLength(1);
+    expect(notices.filter((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toHaveLength(1);
 
     // 用户自己动过档位之后又回到 Auto、又不可用 → 有权再看到一次。
     await handle.setPermissionMode?.('ask');
     await handle.setPermissionMode?.('auto');
     await canUseTool('Write', { file_path: '/tmp/d.conf' }, { toolUseID: 'n5' });
     await settle();
-    expect(notices).toHaveLength(2);
+    expect(notices.filter((message) => message.includes(`[${AUTO_REVIEW_UNAVAILABLE_CODE}]`))).toHaveLength(2);
+    expect(notices.filter((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toHaveLength(2);
     await handle.close();
   });
 });

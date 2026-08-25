@@ -79,13 +79,17 @@ describe('PluginMarketApi', () => {
         nextCursor: null,
       },
     );
-    const api = new PluginMarketApi(fetcher);
+    const api = new PluginMarketApi(fetcher, () => '1.2.3');
 
     await expect(api.listAll()).resolves.toMatchObject({
       plugins: [{ id: PLUGIN_A }, { id: PLUGIN_B }],
       removals: [],
     });
     expect(fetcher.mock.calls[1]?.[0]).toContain(`cursor=${PLUGIN_A}`);
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+      headers: { 'x-cindy-version': '1.2.3' },
+      timeoutMs: 15_000,
+    });
   });
 
   it('deduplicates removals by pluginId across pages keeping the first-seen notice', async () => {
@@ -156,5 +160,60 @@ describe('PluginMarketApi', () => {
     const api = new PluginMarketApi(fetcher);
 
     await expect(api.listAll()).rejects.toThrow('游标未前进');
+  });
+
+  it('surfaces currentOrganization from the completed list response', async () => {
+    const fetcher = pagedFetcher(
+      {
+        plugins: [summary(PLUGIN_A, 'alpha')],
+        nextCursor: PLUGIN_A,
+        currentOrganization: { organizationId: 'org-acme', pluginPrefix: 'acme' },
+      },
+      {
+        plugins: [summary(PLUGIN_B, 'beta')],
+        nextCursor: null,
+        currentOrganization: { organizationId: 'org-acme', pluginPrefix: 'acme' },
+      },
+    );
+
+    await expect(new PluginMarketApi(fetcher).listAll()).resolves.toMatchObject({
+      plugins: [{ id: PLUGIN_A }, { id: PLUGIN_B }],
+      currentOrganization: { organizationId: 'org-acme', pluginPrefix: 'acme' },
+    });
+  });
+
+  // 服务端是否每页都重复下发 currentOrganization 没有写进契约。若它只在首页带,
+  // 逐页覆盖会让后续页的 null 抹掉身份事实,多页目录的组织就永远缓存不到前缀。
+  // 上面那条用例两页都带了值,所以在"每页重复"的假设下必过、抓不到这个问题。
+  it('keeps the first non-null currentOrganization across later pages that omit it', async () => {
+    const fetcher = pagedFetcher(
+      {
+        plugins: [summary(PLUGIN_A, 'alpha')],
+        nextCursor: PLUGIN_A,
+        currentOrganization: { organizationId: 'org-acme', pluginPrefix: 'acme' },
+      },
+      {
+        plugins: [summary(PLUGIN_B, 'beta')],
+        nextCursor: null,
+        currentOrganization: null,
+      },
+    );
+
+    await expect(new PluginMarketApi(fetcher).listAll()).resolves.toMatchObject({
+      plugins: [{ id: PLUGIN_A }, { id: PLUGIN_B }],
+      currentOrganization: { organizationId: 'org-acme', pluginPrefix: 'acme' },
+    });
+  });
+
+  it('keeps a null currentOrganization as a personal-identity fact', async () => {
+    const fetcher = pagedFetcher({
+      plugins: [summary(PLUGIN_A, 'alpha')],
+      nextCursor: null,
+      currentOrganization: null,
+    });
+
+    await expect(new PluginMarketApi(fetcher).listAll()).resolves.toMatchObject({
+      currentOrganization: null,
+    });
   });
 });

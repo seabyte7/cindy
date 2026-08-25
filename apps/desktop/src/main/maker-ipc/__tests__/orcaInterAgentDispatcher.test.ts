@@ -82,6 +82,12 @@ function createHarness(overrides: Partial<OrcaInterAgentDispatcherDeps<TestSessi
     createDbMessage: vi.fn(async () => {
       order.push('db');
     }),
+    beginDirectTurnChangeSet: vi.fn(async () => {
+      order.push('change-set');
+    }),
+    abortDirectTurnChangeSet: vi.fn(() => {
+      order.push('abort-change-set');
+    }),
     resolveWorkerSenderLabel: vi.fn(async (_workerId, fallback) => fallback),
     isSessionRunningError: vi.fn((err) =>
       err instanceof Error && (err as { code?: string }).code === 'SESSION_RUNNING'
@@ -128,11 +134,16 @@ describe('Orca lead/worker dispatcher', () => {
       targetTitle: 'Target Session',
       targetLastUserSendAt: '2026-06-12T01:02:03.000Z',
     });
-    expect(h.order).toEqual(['send-called', 'db', 'accepted', 'vendor-released']);
+    expect(h.order).toEqual(['send-called', 'db', 'change-set', 'accepted', 'vendor-released']);
+    expect(h.deps.beginDirectTurnChangeSet).toHaveBeenCalledWith('target-session', 'client-1');
+    expect(h.deps.abortDirectTurnChangeSet).not.toHaveBeenCalled();
     expect(h.deps.createDbMessage).toHaveBeenCalledWith('target-session', {
       clientId: 'client-1',
       role: 'user',
       content: '{"orcaSource":"lead","content":"Implement feature"}',
+      agentMeta: {
+        origin: { kind: 'orca', senderLabel: 'Lead', displayText: 'Implement feature' },
+      },
     });
     expect(h.liveSession.send).toHaveBeenCalledWith(
       {
@@ -142,6 +153,116 @@ describe('Orca lead/worker dispatcher', () => {
       },
       expect.objectContaining({ throwOnStartFailure: true }),
     );
+  });
+
+  it('prepares an unhealthy live session before direct send and does not reuse the closed handle', async () => {
+    const closed = { current: false };
+    const liveSession = createLiveSession(async (_message, opts) => {
+      await opts?.onAccepted?.();
+      return { accepted: true };
+    });
+    const prepareUnhealthySession = vi.fn(async () => {
+      closed.current = true;
+      return true;
+    });
+    const h = createHarness({
+      getLiveSession: vi.fn(() => (closed.current ? null : liveSession)),
+      prepareUnhealthySession,
+    });
+
+    const result = await h.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session',
+      rawContent: 'Continue after compact failure',
+      source: 'lead',
+      senderLabel: 'Lead',
+      meta: { source: 'orca', context: 'prepare-test' },
+    });
+
+    expect(result).toMatchObject({ ok: true, mode: 'dispatched' });
+    expect(prepareUnhealthySession).toHaveBeenCalledWith('target-session');
+    expect(h.deps.sendToSessionInternal).toHaveBeenCalledWith(expect.objectContaining({
+      targetSessionId: 'target-session',
+      clientId: 'client-1',
+    }));
+    expect(liveSession.send).not.toHaveBeenCalled();
+  });
+
+  it('still sends through the live handle after prepare leaves it open', async () => {
+    const prepareUnhealthySession = vi.fn(async () => false);
+    const h = createHarness({ prepareUnhealthySession });
+
+    const result = await h.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session',
+      rawContent: 'Healthy live send',
+      source: 'lead',
+      senderLabel: 'Lead',
+      meta: { source: 'orca', context: 'healthy-prepare-test' },
+    });
+
+    expect(result).toMatchObject({ ok: true, mode: 'dispatched' });
+    expect(prepareUnhealthySession).toHaveBeenCalledWith('target-session');
+    expect(h.liveSession.send).toHaveBeenCalled();
+    expect(h.deps.sendToSessionInternal).not.toHaveBeenCalled();
+  });
+
+  it('serializes concurrent live prepare/send on the per-session lock', async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let lockChain: Promise<unknown> = Promise.resolve();
+    let lockHeld = false;
+    let overlapping = false;
+    const withSendToSessionLock = async <T>(_sessionId: string, task: () => Promise<T>): Promise<T> => {
+      const run = lockChain.then(async () => {
+        if (lockHeld) overlapping = true;
+        lockHeld = true;
+        try {
+          return await task();
+        } finally {
+          lockHeld = false;
+        }
+      });
+      lockChain = run.then(() => undefined, () => undefined);
+      return run;
+    };
+    const prepareUnhealthySession = vi.fn(async () => {
+      if (prepareUnhealthySession.mock.calls.length === 1) await firstGate;
+      return false;
+    });
+    const h = createHarness({
+      createId: vi.fn()
+        .mockReturnValueOnce('client-1')
+        .mockReturnValueOnce('client-2'),
+      withSendToSessionLock,
+      prepareUnhealthySession,
+    });
+
+    const first = h.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session',
+      rawContent: 'First',
+      source: 'lead',
+      senderLabel: 'Lead',
+      meta: { source: 'orca', context: 'lock-first' },
+    });
+    const second = h.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session',
+      rawContent: 'Second',
+      source: 'lead',
+      senderLabel: 'Lead',
+      meta: { source: 'orca', context: 'lock-second' },
+    });
+    await vi.waitFor(() => {
+      expect(prepareUnhealthySession).toHaveBeenCalledTimes(1);
+    });
+    releaseFirst();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ ok: true, mode: 'dispatched', clientId: 'client-1' }),
+      expect.objectContaining({ ok: true, mode: 'dispatched', clientId: 'client-2' }),
+    ]);
+    expect(overlapping).toBe(false);
+    expect(prepareUnhealthySession).toHaveBeenCalledTimes(2);
+    expect(h.liveSession.send).toHaveBeenCalledTimes(2);
   });
 
   it('delays queued accepted side effects until the coordinator accepted hook runs', async () => {
@@ -162,6 +283,7 @@ describe('Orca lead/worker dispatcher', () => {
     expect(result).toMatchObject({ ok: true, mode: 'queued' });
     expect(accepted).not.toHaveBeenCalled();
     expect(h.queuedItems).toHaveLength(1);
+    expect(h.deps.beginDirectTurnChangeSet).not.toHaveBeenCalled();
 
     await h.dispatcher.runQueuedOrcaInterAgentAcceptedCallback('target-session', firstQueuedItem(h.queuedItems));
 
@@ -267,8 +389,39 @@ describe('Orca lead/worker dispatcher', () => {
         reason: 'cancelled-before-dispatch',
       },
     });
-    expect(h.order).toEqual(['send-called', 'db', 'accepted', 'send-returned-cancelled', 'rollback']);
+    expect(h.order).toEqual([
+      'send-called',
+      'db',
+      'change-set',
+      'accepted',
+      'send-returned-cancelled',
+      'abort-change-set',
+      'rollback',
+    ]);
+    expect(h.deps.abortDirectTurnChangeSet).toHaveBeenCalledWith('target-session');
     expect(rollback).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves lazy-resume turn capture to sendToSessionInternal', async () => {
+    const h = createHarness({
+      getLiveSession: vi.fn(() => null),
+    });
+
+    const result = await h.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session',
+      rawContent: 'Resume target',
+      source: 'lead',
+      senderLabel: 'Lead',
+      meta: { source: 'orca', context: 'resume-test' },
+    });
+
+    expect(result).toMatchObject({ ok: true, mode: 'dispatched' });
+    expect(h.deps.sendToSessionInternal).toHaveBeenCalledWith(expect.objectContaining({
+      targetSessionId: 'target-session',
+      clientId: 'client-1',
+    }));
+    expect(h.deps.beginDirectTurnChangeSet).not.toHaveBeenCalled();
+    expect(h.deps.abortDirectTurnChangeSet).not.toHaveBeenCalled();
   });
 
   it('rolls back queued accepted side effects when dispatch settles as not dispatched', async () => {

@@ -1,4 +1,4 @@
-import { memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import { Fragment, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowLeftRight,
@@ -19,6 +19,7 @@ import {
   Layers,
   ListTodo,
   LoaderCircle,
+  RefreshCw,
   PencilLine,
   Share as ShareIcon,
   Send,
@@ -46,6 +47,7 @@ import {
   StatusBar,
   useWindowDimensions,
   View,
+  type GestureResponderEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   type LayoutChangeEvent,
@@ -71,6 +73,11 @@ import { motionDuration, motionEasing } from '@/theme/tokens';
 import { mobileAgentLabelFromUnknown } from '@/session/sessionAgentSwitch';
 import { MessageActionSheet } from '@/session/MessageActionSheet';
 import { buildMobileMessageMenu, type MobileMessageMenuActionId } from '@/session/messageActionMenu';
+import { isShareableMessage } from '@/session/shareSelectionStore';
+import {
+  ShareMessageCheckbox,
+  useCancelShareSelectionRowTap,
+} from '@/session/ShareMessageCheckbox';
 import { SentInlineAtomBody } from '@/session/SentInlineAtomBody';
 import {
   composerDocumentFromSerializedMessage,
@@ -154,6 +161,7 @@ import {
 import {
   groupMobileMarkdownSelectableBlocks,
   isMobileMarkdownImageDirectUrl,
+  mobileMarkdownImageAltChipText,
   mobileMarkdownImageTitle,
   mobileMarkdownImageUrlForWorkdir,
   mobileMarkdownInlineImageSize,
@@ -161,6 +169,7 @@ import {
   parseMobileMarkdownInlines,
   type MobileMarkdownBlockGroup,
   type MobileMarkdownInline,
+  type MobileMarkdownTextRunGroupingOptions,
 } from '@/session/messageMarkdown';
 import {
   extractSessionLinkIds,
@@ -211,6 +220,7 @@ import {
 } from '@/session/messageHierarchyLayout';
 import {
   buildMessageContentLayout,
+  nextSettledContentWidth,
   type MessageContentLayout,
 } from '@/session/messageContentLayout';
 import { buildMobileReadableViewportLayout } from '@/session/responsiveViewportLayout';
@@ -232,6 +242,7 @@ import {
   PendingSendBubble,
   type PendingSendBubbleActions,
 } from '@/session/PendingSendBubble';
+import { buildMobileMessageListExtraData } from '@/session/pendingSendItems';
 import { dedupeToolMediaByUrl } from '@cindy/maker-shared/message-render';
 import { tokenizeThinkingText } from '@cindy/maker-shared/thinking-text';
 import {
@@ -272,6 +283,12 @@ import type {
 } from '@/session/mediaPlayerWebViewHtml';
 import { formatMobileSystemCard } from '@/session/systemCard';
 import {
+  getMobileAutoResumePresentation,
+  isMobileAutoResumeRowInFlight,
+  toggleMobileAutoResumeExpanded,
+} from '@/session/autoResumePresentation';
+import type { ContinuationInFlightProjectionCapability } from '@/session/types';
+import {
   projectMobileWorkActivities,
   projectRecentMobileWorkActivities,
   type MobileProjectedThinkingActivity,
@@ -285,6 +302,10 @@ import {
   evaluateMessageWindowUpdate,
   evaluateMobileAnchorVerify,
   evaluateMobileFollowEndContentSizePin,
+  isMobileMvcpSettling,
+  mobileFollowVerifyStartDelayMs,
+  mobileMessageListKeysSignature,
+  mobileMvcpSettleDeadline,
   mobileMessageListTopPadding,
   MOBILE_FOLLOW_END_PIN_SUPPRESS_MS,
   MOBILE_MESSAGE_LIST_BOTTOM_PADDING,
@@ -309,6 +330,13 @@ import { iconSize, iconStroke, monoFont, useTheme, useThemedStyles, type ThemeCo
 import { i18n } from '@/i18n';
 
 const MESSAGE_CONTROL_HIT_SLOP = { bottom: 10, left: 10, right: 10, top: 10 };
+const MESSAGE_CONTROL_TOUCH_SIZE = 44;
+const MESSAGE_LIST_VISIBLE_PERCENT_THRESHOLD = 5;
+
+/** 分享模式吸顶 check 与行内 check 共用 44px 触达高度。 */
+const SHARE_STICKY_CHECK_HEIGHT = 44;
+const STICKY_SHARE_CHECK_THROTTLE_MS = 150;
+const SCREENSHOT_SHARE_VISIBLE_PERCENT_THRESHOLD = 10;
 // LegendList 变高 item 的初始估高(仅影响首帧布局定位,LegendList 挂载后按实测尺寸修正)。
 /**
  * 冷开落底的 settle 窗口(ms):rAF 落底 + 初窗测量 + 贴底补滚在此窗口内基本结算,
@@ -324,6 +352,12 @@ const MOBILE_PROGRAMMATIC_ANIMATED_SCROLL_SETTLE_MS = 1400;
 /** Cold-open history fill is useful, but bounded so a short/duplicate host page cannot drain history forever. */
 const MAX_INITIAL_HISTORY_AUTOFILL_PAGES = 3;
 const MOBILE_MESSAGE_ESTIMATED_ITEM_SIZE = 140;
+const ANDROID_SELECTABLE_TEXT_RUN_MAX_BLOCKS = 12;
+const ANDROID_SELECTABLE_TEXT_RUN_MAX_UTF16_LENGTH = 1800;
+const ANDROID_SELECTABLE_TEXT_RUN_GROUPING_OPTIONS: MobileMarkdownTextRunGroupingOptions = {
+  maxTextRunBlocks: ANDROID_SELECTABLE_TEXT_RUN_MAX_BLOCKS,
+  maxTextRunUtf16Length: ANDROID_SELECTABLE_TEXT_RUN_MAX_UTF16_LENGTH,
+};
 /** Running work groups expose only the same latest-five activity window as desktop. */
 const MAX_LIVE_WORK_ACTIVITIES = 5;
 // LegendList 预渲距离(px,视口外每侧):约 1 屏,挂载集小 → 滚动 mount 帧压进一帧内(见 listperf 实测)。
@@ -419,7 +453,24 @@ function MarkdownSelectableText({
  * 混入 RN Text 会破坏原生文本树。仅由 renderInline 在「块可选中且 iOS」时使用。
  */
 function MarkdownSelectableSpan(props: ComponentProps<typeof Text>) {
-  return <UITextView maxFontSizeMultiplier={MAX_FONT_SIZE_MULTIPLIER} {...props} />;
+  const cancelShareSelectionRowTap = useCancelShareSelectionRowTap();
+  const handlePress = props.onPress
+    ? (event: GestureResponderEvent) => {
+      cancelShareSelectionRowTap?.();
+      props.onPress?.(event);
+    }
+    : undefined;
+  return (
+    <UITextView
+      maxFontSizeMultiplier={MAX_FONT_SIZE_MULTIPLIER}
+      {...props}
+      onPress={handlePress}
+    />
+  );
+}
+
+function isTextRunContinuationGroup(group: MobileMarkdownBlockGroup): boolean {
+  return group.type === 'text_run' && group.textRunContinuation === true;
 }
 
 /** Composer-ready user message body with product quotes kept out of raw text. */
@@ -432,6 +483,11 @@ export interface MobileMessageDraft {
 }
 
 export type MobileMessageActionBusyKind = 'fork' | 'rewind' | 'delete';
+
+export interface ShareableMessageViewport {
+  visibleBottom: number;
+  visibleTop: number;
+}
 
 interface MessageActions {
   /** 长按/操作条「复制消息链接」:复制该消息的会话深链(带 ?message= 锚点)。 */
@@ -449,9 +505,15 @@ interface MessageActions {
   onLoadEarlier?: () => void | Promise<void>;
   onOpenForkOrigin?: () => void;
   onOpenPayload?: (payload: MessagePayload) => void;
+  onBlockingOverlayChange?: (blocked: boolean) => void;
+  onMessageActionSheetOpenChange?: (clientId: string, open: boolean) => void;
   /** 正文里会话深链 chip(xdt-maker://session/…)点击回调,app 内跳转。 */
   onOpenSessionLink?: (url: string) => void;
   onPreviewRewind?: (clientId: string, draft: MobileMessageDraft) => void;
+  onEnterShareSelection?: (clientId: string) => void;
+  onShareableMessageViewChange?: (clientId: string, view: View | null) => void;
+  shareSelectionActive?: boolean;
+  shareSelectionBusy?: boolean;
   /** 待发送气泡(pending_send 项)的展开态与队列操作回调。 */
   pendingSend?: PendingSendBubbleActions;
   onReadTextFilePreview?: (filePath: string) => Promise<RemoteTextFilePreviewResult>;
@@ -464,6 +526,14 @@ interface MessageActions {
   screenWidth?: number;
   /** 会话是否流式中:驱动工具行 running/done 状态(未 settled 且流式中才显示进行中)。 */
   isSessionStreaming?: boolean;
+  /** 当前 maker vendor turn 是否仍在运行；旧端续跑归属兜底只允许使用这条窄信号。 */
+  makerTurnRunning?: boolean;
+  /** 当前 vendor turn 的自动续跑 owner。 */
+  continuationTurnClientId?: string | null;
+  /** 只有明确识别为 legacy 的投影才允许使用最后一条输入的兼容判据。 */
+  continuationInFlightProjectionCapability?: ContinuationInFlightProjectionCapability;
+  /** 含自动续跑合成行、排除 steer 的最后一条用户输入。 */
+  lastUserInputClientId?: string | null;
 }
 
 export function MessageRenderer({
@@ -477,8 +547,13 @@ export function MessageRenderer({
   onDeleteMessage,
   onLoadEarlier,
   onOpenForkOrigin,
+  onBlockingOverlayChange,
   onOpenSessionLink,
   onPreviewRewind,
+  onEnterShareSelection,
+  onVisibleShareableMessageIdsReaderChange,
+  shareSelectionActive,
+  shareSelectionBusy,
   onQuoteSelection,
   pendingSend,
   onReadTextFilePreview,
@@ -492,6 +567,9 @@ export function MessageRenderer({
   emptyTestID,
   bottomOverlayHeight,
   isSessionStreaming,
+  makerTurnRunning,
+  continuationTurnClientId,
+  continuationInFlightProjectionCapability,
   loadingEarlier,
   focusedRequestKey,
   queueFooter,
@@ -524,6 +602,12 @@ export function MessageRenderer({
   ) => void | Promise<void>;
   /** 全屏图片查看器的圈点标注配置(画笔 → 发送到对话;由会话屏接线附件管线)。 */
   imageAnnotation?: ImageLightboxAnnotationConfig;
+  onEnterShareSelection?: (clientId: string) => void;
+  onVisibleShareableMessageIdsReaderChange?: (
+    reader: ((viewport: ShareableMessageViewport) => Promise<readonly string[]>) | null,
+  ) => void;
+  shareSelectionActive?: boolean;
+  shareSelectionBusy?: boolean;
   /** DEV-only:把内部列表控制器暴露给性能 harness 驱动自动滚动(临时,profiling/回归测量用)。 */
   devExposeList?: (api: {
     scrollTo: (y: number) => void;
@@ -534,14 +618,19 @@ export function MessageRenderer({
   const { t } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const firstUserMessageClientId = findFirstUserMessageClientId(items);
+  const lastUserInputClientId = findLastUserInputClientId(items);
   const focusedItemKeyRef = useRef(focusedItemKey);
   focusedItemKeyRef.current = focusedItemKey;
   const listRef = useRef<LegendListRef>(null);
+  const shareableMessageViewsRef = useRef(new Map<string, View>());
   const windowDimensions = useWindowDimensions();
   const viewportLayout = useMemo(() => buildMobileReadableViewportLayout({
     screenHeight: windowDimensions.height,
     screenWidth: windowDimensions.width,
   }), [windowDimensions.height, windowDimensions.width]);
+  const wideContentInset = viewportLayout.wideViewport
+    ? Math.max(0, (windowDimensions.width - viewportLayout.contentMaxWidth) / 2)
+    : 0;
   const nearBottomRef = useRef(true);
   // ── 拖动手势追踪(贴底跟随的意图解除用)──
   // 拖动期间(onScrollBeginDrag ~ onScrollEndDrag)相对起点累计上移超过死区
@@ -565,9 +654,15 @@ export function MessageRenderer({
   const readingOlderRef = useRef(false);
   // 每次补页分配 generation：旧会话 / 旧请求的异步 settle 不得清掉新请求的抑制态。
   const readingOlderRequestGenerationRef = useRef(0);
+  // LegendList mVCP 始终开启；普通尾部 append / 流式 resize 同样会触发 native 锚点
+  // 调整，不能只拿 readingOlderRef 代表 settle 状态。每次 data / size 变化延长一个短
+  // 安静窗，verifier 在窗内只等待，不消耗 6 次补滚预算。
+  const mvcpSettleAtRef = useRef(0);
   const programmaticScrollGenerationRef = useRef(0);
   const programmaticScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const programmaticScrollInFlightRef = useRef(false);
+  const programmaticAnimatedScrollInFlightRef = useRef(false);
+  const programmaticScrollSettleAtRef = useRef(0);
   const previousFollowLatestRequestKeyRef = useRef(followLatestRequestKey);
   const previousItemKeysRef = useRef<readonly string[]>([]);
   const scrollMetricsRef = useRef<MessageScrollMetrics>({
@@ -590,6 +685,11 @@ export function MessageRenderer({
   // 落底 rAF / verify loop / 揭开 timer 的句柄(生命周期 = 每个 scrollResetKey 一轮)。
   const initialAnchorFrameRef = useRef<number | null>(null);
   const initialRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 贴底跟随的落底校验/补滚环(runStickToLatestVerify,独立于冷开锚定的 generation/frame——
+  // 两条校验环可能各自独立触发,互不打断/互不清对方的句柄)。
+  const followVerifyGenerationRef = useRef(0);
+  const followVerifyFrameRef = useRef<number | null>(null);
+  const followVerifyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // settle 遮罩:落底两段式期间列表保持 opacity 0,settle 窗口后揭开(规则 7 防跳动)。
   const [listRevealed, setListRevealed] = useState(false);
   // 会话切换(scrollResetKey)的 ref 复位必须在渲染期同步完成,不能只靠下方的 reset effect:
@@ -608,8 +708,11 @@ export function MessageRenderer({
     lastAutoLoadEarlierKeyRef.current = null;
     readingOlderRef.current = false;
     readingOlderRequestGenerationRef.current += 1;
+    mvcpSettleAtRef.current = 0;
     programmaticScrollGenerationRef.current += 1;
     programmaticScrollInFlightRef.current = false;
+    programmaticAnimatedScrollInFlightRef.current = false;
+    programmaticScrollSettleAtRef.current = 0;
     if (programmaticScrollTimerRef.current !== null) {
       clearTimeout(programmaticScrollTimerRef.current);
       programmaticScrollTimerRef.current = null;
@@ -627,6 +730,15 @@ export function MessageRenderer({
       cancelAnimationFrame(initialAnchorVerifyFrameRef.current);
       initialAnchorVerifyFrameRef.current = null;
     }
+    followVerifyGenerationRef.current += 1;
+    if (followVerifyTimerRef.current !== null) {
+      clearTimeout(followVerifyTimerRef.current);
+      followVerifyTimerRef.current = null;
+    }
+    if (followVerifyFrameRef.current !== null) {
+      cancelAnimationFrame(followVerifyFrameRef.current);
+      followVerifyFrameRef.current = null;
+    }
     // settle 遮罩复位必须与列表重挂同帧(渲染期 setState,React 官方 prop-change 模式):
     // 走 effect 会晚一帧,新列表以旧 revealed=true 裸挂一帧,未锚定内容闪现。
     setListRevealed(false);
@@ -636,14 +748,35 @@ export function MessageRenderer({
   const [isAwayFromBottom, setIsAwayFromBottom] = useState(false);
   const [firstVisibleIndex, setFirstVisibleIndex] = useState(0);
   const [payload, setPayload] = useState<MessagePayload | null>(null);
+  const payloadRef = useRef(payload);
+  payloadRef.current = payload;
+  const openMessageActionSheetsRef = useRef(new Set<string>());
+  const handleMessageActionSheetOpenChange = useCallback((clientId: string, open: boolean) => {
+    if (open) openMessageActionSheetsRef.current.add(clientId);
+    else openMessageActionSheetsRef.current.delete(clientId);
+    onBlockingOverlayChange?.(
+      payloadRef.current !== null || openMessageActionSheetsRef.current.size > 0,
+    );
+  }, [onBlockingOverlayChange]);
+  useEffect(() => {
+    onBlockingOverlayChange?.(
+      payload !== null || openMessageActionSheetsRef.current.size > 0,
+    );
+    return () => onBlockingOverlayChange?.(false);
+  }, [onBlockingOverlayChange, payload]);
   // 关闭回调必须引用稳定:内联闭包每次渲染换新,会经 ImageLightbox 透传成
   // LightboxPage 手势 useMemo 的依赖,流式回复期间每 token 重建手势图,
   // 可能打断进行中的捏合/拖动手势(rule 7)。
   const closePayload = useCallback(() => setPayload(null), []);
   const markProgrammaticScroll = useCallback((animated: boolean) => {
     const generation = programmaticScrollGenerationRef.current + 1;
+    const settleMs = animated
+      ? MOBILE_PROGRAMMATIC_ANIMATED_SCROLL_SETTLE_MS
+      : MOBILE_PROGRAMMATIC_SCROLL_SETTLE_MS;
     programmaticScrollGenerationRef.current = generation;
     programmaticScrollInFlightRef.current = true;
+    programmaticAnimatedScrollInFlightRef.current = animated;
+    programmaticScrollSettleAtRef.current = Date.now() + settleMs;
     if (programmaticScrollTimerRef.current !== null) {
       clearTimeout(programmaticScrollTimerRef.current);
     }
@@ -651,18 +784,27 @@ export function MessageRenderer({
       if (programmaticScrollGenerationRef.current !== generation) return;
       programmaticScrollTimerRef.current = null;
       programmaticScrollInFlightRef.current = false;
-    }, animated
-      ? MOBILE_PROGRAMMATIC_ANIMATED_SCROLL_SETTLE_MS
-      : MOBILE_PROGRAMMATIC_SCROLL_SETTLE_MS);
+      programmaticAnimatedScrollInFlightRef.current = false;
+      programmaticScrollSettleAtRef.current = 0;
+    }, settleMs);
   }, []);
 
   const clearProgrammaticScroll = useCallback(() => {
     programmaticScrollGenerationRef.current += 1;
     programmaticScrollInFlightRef.current = false;
+    programmaticAnimatedScrollInFlightRef.current = false;
+    programmaticScrollSettleAtRef.current = 0;
     if (programmaticScrollTimerRef.current !== null) {
       clearTimeout(programmaticScrollTimerRef.current);
       programmaticScrollTimerRef.current = null;
     }
+  }, []);
+
+  const markMobileMvcpSettle = useCallback(() => {
+    mvcpSettleAtRef.current = mobileMvcpSettleDeadline(
+      mvcpSettleAtRef.current,
+      Date.now(),
+    );
   }, []);
 
   const scrollToEndProgrammatically = useCallback((animated: boolean) => {
@@ -679,6 +821,80 @@ export function MessageRenderer({
     markProgrammaticScroll(true);
     void listRef.current?.scrollToIndex({ animated: true, index, viewPosition });
   }, [markProgrammaticScroll]);
+
+  // 贴底跟随的落底校验/补滚环:两条手动补滚路径——「跳到最新」(followLatestRequestKey)
+  // 与 handleContentSize 的贴底追赶——都只发一次命令式 scrollToEnd,不校验是否真的到达内容
+  // 末端。落地一刻的 native metrics 可能仍是陈旧值(测量结算未完成),或 mVCP 尚未真正关闭
+  // 吸收了这次滚动:两者都会让最新消息静默停在 composer 浮层后面(bug 现场)。复用冷开锚定
+  // 同一判定(evaluateMobileAnchorVerify)、同样的双帧节奏 + 有界重试,命中 settled/give-up
+  // 就收手——不吃冷开锚定的 generation/frame ref,两条校验环各自独立生命周期,互不打断。
+  const runStickToLatestVerify = useCallback(() => {
+    const generation = followVerifyGenerationRef.current + 1;
+    followVerifyGenerationRef.current = generation;
+    if (followVerifyFrameRef.current !== null) {
+      cancelAnimationFrame(followVerifyFrameRef.current);
+      followVerifyFrameRef.current = null;
+    }
+    if (followVerifyTimerRef.current !== null) {
+      clearTimeout(followVerifyTimerRef.current);
+      followVerifyTimerRef.current = null;
+    }
+    const step = (attempts: number, waitRounds: number) => {
+      if (followVerifyGenerationRef.current !== generation) return;
+      // 贴底跟随意图只认 nearBottomRef:死区内轻触 / 小幅拖动并没有真实解除贴底,
+      // 不能让 userScrollForOlderRef 这根“允许加载历史”的手势记录把校验永久关掉。
+      // 真正上移超过死区时 shouldUnpinMobileFollowOnDrag 会把 nearBottomRef 翻 false,
+      // 下一轮判定自然 settle。
+      const action = evaluateMobileAnchorVerify({
+        attempts,
+        listVisible: true,
+        metrics: scrollMetricsRef.current,
+        preserveVisibleContentPosition: readingOlderRef.current
+          || isMobileMvcpSettling(Date.now(), mvcpSettleAtRef.current),
+        stickToLatest: nearBottomRef.current,
+        waitRounds,
+      });
+      if (action === 'settled' || action === 'give-up') {
+        followVerifyFrameRef.current = null;
+        return;
+      }
+      if (action === 'retry') scrollToEndProgrammatically(false);
+      followVerifyFrameRef.current = requestAnimationFrame(() => {
+        followVerifyFrameRef.current = requestAnimationFrame(() => {
+          followVerifyFrameRef.current = null;
+          step(
+            attempts + (action === 'retry' ? 1 : 0),
+            waitRounds + (action === 'wait' ? 1 : 0),
+          );
+        });
+      });
+    };
+    const start = () => {
+      if (followVerifyGenerationRef.current !== generation) return;
+      // 双帧等待:与冷开锚定环同源——命令式 scrollToEnd 已由调用方发出,这里只负责校验,
+      // 给原生布局至少一帧结算再读 metrics,不把「刚发出去还没生效」误判成落空。
+      followVerifyFrameRef.current = requestAnimationFrame(() => {
+        followVerifyFrameRef.current = requestAnimationFrame(() => {
+          followVerifyFrameRef.current = null;
+          step(0, 0);
+        });
+      });
+    };
+    const startDelayMs = mobileFollowVerifyStartDelayMs({
+      animatedScrollInFlight: programmaticAnimatedScrollInFlightRef.current,
+      now: Date.now(),
+      settleAt: programmaticScrollSettleAtRef.current,
+    });
+    if (startDelayMs > 0) {
+      followVerifyTimerRef.current = setTimeout(() => {
+        if (followVerifyGenerationRef.current !== generation) return;
+        followVerifyTimerRef.current = null;
+        start();
+      }, startDelayMs);
+    } else {
+      start();
+    }
+  }, [scrollToEndProgrammatically]);
 
   // DEV-only:把列表控制器 + 滚动 metrics 暴露给性能 harness(临时,profiling/回归测量用)。
   useEffect(() => {
@@ -703,6 +919,14 @@ export function MessageRenderer({
     prevListLengthRef.current = listData.length;
   }
   const itemKeys = useMemo(() => listData.map((item) => item.key), [listData]);
+  const itemKeysSignature = useMemo(
+    () => mobileMessageListKeysSignature(itemKeys),
+    [itemKeys],
+  );
+  // 只认行身份（追加 / 换行 / 重排）。流式改内容会换 items 引用，但不能续安静窗。
+  useEffect(() => {
+    markMobileMvcpSettle();
+  }, [itemKeysSignature, markMobileMvcpSettle]);
   const firstItemKey = itemKeys[0] ?? null;
   // 本地缩略兜底映射版本:collect 内部对 cindy-oss-attach:// 附件读全局 store 做 overlay,
   // hydrate / 新注册后 gallery 需要重建,否则点开气泡本地图时 initialUrl 对不上图集条目。
@@ -761,16 +985,21 @@ export function MessageRenderer({
     const micCenterFromRight = touchLayout.composerPaddingHorizontal
       + MOBILE_COMPOSER_VOICE_ANCHOR_RIGHT
       + MOBILE_COMPOSER_CONTROL_SIZE / 2;
-    const wideInset = viewportLayout.wideViewport
-      ? Math.max(0, (windowDimensions.width - viewportLayout.contentMaxWidth) / 2)
-      : 0;
-    return Math.round(wideInset + micCenterFromRight - SCROLL_TO_BOTTOM_FAB_SIZE / 2);
-  }, [viewportLayout.contentMaxWidth, viewportLayout.wideViewport, windowDimensions.width]);
+    return Math.round(wideContentInset + micCenterFromRight - SCROLL_TO_BOTTOM_FAB_SIZE / 2);
+  }, [wideContentInset, windowDimensions.width]);
   const loadEarlierAction = buildMessageLoadEarlierAction({
     hasOlderMessages: canLoadEarlier === true,
     loading: loadingEarlier === true,
     visibleMessageCount: listData.length,
   });
+  const handleShareableMessageViewChange = useCallback((clientId: string, view: View | null) => {
+    if (view) {
+      shareableMessageViewsRef.current.set(clientId, view);
+    } else {
+      shareableMessageViewsRef.current.delete(clientId);
+    }
+    if (shareSelectionActiveRef.current) scheduleStickyShareCheckRef.current?.(true);
+  }, []);
   const actions: MessageActions & { firstUserMessageClientId?: string } = useMemo(() => ({
     onAddMessageToComposer,
     onCopyMessageLink,
@@ -779,21 +1008,34 @@ export function MessageRenderer({
     onOpenForkOrigin,
     onOpenSessionLink,
     onPreviewRewind,
+    onEnterShareSelection,
+    onShareableMessageViewChange: handleShareableMessageViewChange,
     onOpenPayload: setPayload,
+    onMessageActionSheetOpenChange: handleMessageActionSheetOpenChange,
     onResolveRemoteMedia,
     // 待发送气泡(pending_send 项)的展开态与队列操作:漏了这一项 actions.pendingSend 就是
     // undefined,渲染分支直接 null —— 气泡整个不画,乐观显示消失。
     pendingSend,
+    shareSelectionActive,
+    shareSelectionBusy,
     busyClientId,
     busyAction,
     firstUserMessageClientId,
+    lastUserInputClientId,
+    makerTurnRunning,
+    continuationTurnClientId,
+    continuationInFlightProjectionCapability,
     isSessionStreaming,
     screenWidth: viewportLayout.contentWidth,
   }), [
     busyClientId,
     busyAction,
+    continuationInFlightProjectionCapability,
+    continuationTurnClientId,
     firstUserMessageClientId,
     isSessionStreaming,
+    lastUserInputClientId,
+    makerTurnRunning,
     onCopyMessageLink,
     onAddMessageToComposer,
     onDeleteMessage,
@@ -801,8 +1043,13 @@ export function MessageRenderer({
     onOpenForkOrigin,
     onOpenSessionLink,
     onPreviewRewind,
+    onEnterShareSelection,
+    handleShareableMessageViewChange,
+    handleMessageActionSheetOpenChange,
     onResolveRemoteMedia,
     pendingSend,
+    shareSelectionActive,
+    shareSelectionBusy,
     viewportLayout.contentWidth,
   ]);
   // chat-text-quote:选区采集 context。仅「会话页传了采集回调 + iOS」时启用
@@ -828,7 +1075,77 @@ export function MessageRenderer({
   const focusRunKey = focusedItemKey
     ? `${focusedRequestKey ?? 'default'}:${focusedItemKey}`
     : null;
-  const viewabilityConfigRef = useRef({ itemVisiblePercentThreshold: 5 });
+  const viewabilityConfigRef = useRef({
+    itemVisiblePercentThreshold: MESSAGE_LIST_VISIBLE_PERCENT_THRESHOLD,
+  });
+  const shareSelectionActiveRef = useRef(shareSelectionActive);
+  shareSelectionActiveRef.current = shareSelectionActive;
+  const topOverlayHeightRef = useRef(topOverlayHeight);
+  topOverlayHeightRef.current = topOverlayHeight;
+  const [stickyShareClientId, setStickyShareClientId] = useState<string | null>(null);
+  const stickyCheckSeqRef = useRef(0);
+  const stickyCheckLastRunAtRef = useRef(0);
+  const stickyCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const runStickyShareCheck = useCallback(async () => {
+    const seq = ++stickyCheckSeqRef.current;
+    if (!shareSelectionActiveRef.current) {
+      setStickyShareClientId(null);
+      return;
+    }
+    const shareableViews = Array.from(shareableMessageViewsRef.current.entries());
+    const list = listRef.current;
+    if (!list || shareableViews.length === 0) {
+      setStickyShareClientId(null);
+      return;
+    }
+    const [listFrame, candidates] = await Promise.all([
+      measureInWindow(list.getNativeScrollRef()),
+      Promise.all(shareableViews.map(async ([clientId, view]) => ({
+        clientId,
+        frame: await measureInWindow(view),
+      }))),
+    ]);
+    if (seq !== stickyCheckSeqRef.current) return;
+    if (!listFrame) {
+      setStickyShareClientId(null);
+      return;
+    }
+    const dockY = listFrame.y + (topOverlayHeightRef.current ?? 0) + spacing.sm;
+    candidates.sort((a, b) => (a.frame?.y ?? Number.POSITIVE_INFINITY)
+      - (b.frame?.y ?? Number.POSITIVE_INFINITY));
+    const pinned = candidates.find(({ frame }) => frame
+      && frame.height > 0
+      && frame.y + spacing.sm < dockY
+      && frame.y + frame.height > dockY + SHARE_STICKY_CHECK_HEIGHT);
+    setStickyShareClientId((prev) => {
+      const next = pinned?.clientId ?? null;
+      return prev === next ? prev : next;
+    });
+  }, []);
+  const scheduleStickyShareCheck = useCallback((immediate = false) => {
+    const now = Date.now();
+    const elapsed = now - stickyCheckLastRunAtRef.current;
+    if (immediate || elapsed >= STICKY_SHARE_CHECK_THROTTLE_MS) {
+      stickyCheckLastRunAtRef.current = now;
+      void runStickyShareCheck();
+      return;
+    }
+    if (stickyCheckTimerRef.current) return;
+    stickyCheckTimerRef.current = setTimeout(() => {
+      stickyCheckTimerRef.current = null;
+      stickyCheckLastRunAtRef.current = Date.now();
+      void runStickyShareCheck();
+    }, STICKY_SHARE_CHECK_THROTTLE_MS - elapsed);
+  }, [runStickyShareCheck]);
+  const scheduleStickyShareCheckRef = useRef(scheduleStickyShareCheck);
+  scheduleStickyShareCheckRef.current = scheduleStickyShareCheck;
+  useEffect(() => {
+    if (!shareSelectionActive) setStickyShareClientId(null);
+    else scheduleStickyShareCheck(true);
+  }, [shareSelectionActive, scheduleStickyShareCheck, topOverlayHeight]);
+  useEffect(() => () => {
+    if (stickyCheckTimerRef.current) clearTimeout(stickyCheckTimerRef.current);
+  }, []);
   const handleViewableItemsChangedRef = useRef((info: {
     viewableItems: ViewToken<MobileMessageRenderItem>[];
   }) => {
@@ -839,12 +1156,50 @@ export function MessageRenderer({
     }
     if (nextIndex !== null) setFirstVisibleIndex(nextIndex);
   });
+  const readActuallyVisibleShareableMessageIds = useCallback(async (
+    viewport: ShareableMessageViewport,
+  ): Promise<readonly string[]> => {
+    const list = listRef.current;
+    if (!list) return [];
+    const listFrame = await measureInWindow(list.getNativeScrollRef());
+    if (!listFrame || listFrame.height <= 0) return [];
+    const visibleTop = Math.max(listFrame.y, viewport.visibleTop);
+    const visibleBottom = Math.min(
+      listFrame.y + listFrame.height,
+      viewport.visibleBottom,
+    );
+    if (visibleBottom <= visibleTop) return [];
+    const measuredItems = await Promise.all(
+      Array.from(shareableMessageViewsRef.current.entries()).map(async ([clientId, view]) => {
+        const frame = await measureInWindow(view);
+        if (!frame || frame.height <= 0) return null;
+        const visibleHeight = Math.max(
+          0,
+          Math.min(frame.y + frame.height, visibleBottom) - Math.max(frame.y, visibleTop),
+        );
+        if (
+          visibleHeight / frame.height
+          < SCREENSHOT_SHARE_VISIBLE_PERCENT_THRESHOLD / 100
+        ) return null;
+        return { clientId, y: frame.y };
+      }),
+    );
+    return measuredItems
+      .filter((item): item is { clientId: string; y: number } => item !== null)
+      .sort((left, right) => left.y - right.y)
+      .map((item) => item.clientId);
+  }, []);
+  useEffect(() => {
+    onVisibleShareableMessageIdsReaderChange?.(readActuallyVisibleShareableMessageIds);
+    return () => onVisibleShareableMessageIdsReaderChange?.(null);
+  }, [onVisibleShareableMessageIdsReaderChange, readActuallyVisibleShareableMessageIds]);
 
   // 贴底跟随由 handleContentSize 的手动补滚承担(nearBottomRef 是跟随意图的唯一真相);
-  // 跳底直接命令式 scrollToEnd。
+  // 跳底先命令式 scrollToEnd,随后复用同一轮有界落底校验。
   const scrollToBottom = useCallback(() => {
     nearBottomRef.current = true;
     readingOlderRef.current = false;
+    userScrollForOlderRef.current = false;
     // 用户主动跳底是明确的重锚意图:重建补滚护栏(清掉可能仍开着的断路窗,
     // 让跳底后的贴底跟随立即恢复;振荡若还在会重新跳闸,review P2)。在飞的
     // 断路清账 timer 一并作废——本次显式跳底就是清账。
@@ -856,7 +1211,8 @@ export function MessageRenderer({
     setIsAwayFromBottom(false);
     setHasNewMessages(false);
     scrollToEndProgrammatically(true);
-  }, [scrollToEndProgrammatically]);
+    runStickToLatestVerify();
+  }, [runStickToLatestVerify, scrollToEndProgrammatically]);
 
   const jumpToPreviousUserMessage = useCallback(() => {
     if (!previousUserTarget) return;
@@ -870,13 +1226,20 @@ export function MessageRenderer({
     scrollToIndexProgrammatically(previousUserTarget.index, 0.12);
   }, [previousUserTarget, scrollToIndexProgrammatically]);
 
-  // 「跳到最新」请求(会话外部触发):命令式滚到底,之后由 handleContentSize 补滚维持贴底。
+  // 「跳到最新」请求(会话外部触发,含发送消息后的跟随):命令式滚到底,随后跑一轮有界
+  // 校验/补滚(runStickToLatestVerify)——单发的 scrollToEnd 落地一刻的 metrics 可能仍陈旧,
+  // 或被仍开着的 mVCP 吸收掉,不校验就会静默停在旧消息上(bug 现场,与冷开锚定同一根因)。
+  // 之后的贴底由 handleContentSize 补滚维持。
   useEffect(() => {
     if (previousFollowLatestRequestKeyRef.current === followLatestRequestKey) return;
     previousFollowLatestRequestKeyRef.current = followLatestRequestKey;
     if (followLatestRequestKey === null || followLatestRequestKey === undefined) return;
     nearBottomRef.current = true;
     readingOlderRef.current = false;
+    // 发送后的显式贴底已经取代旧的历史浏览意图。先清掉该标记,否则 verifier 的
+    // stickToLatest 会被一次更早的拖动永久压成 false,退化回不可靠的单次 scrollToEnd。
+    // 用户若在校验期间再次拖动,onScrollBeginDrag 会重新置 true 并自然中止补滚。
+    userScrollForOlderRef.current = false;
     // 与 scrollToBottom 同语义:显式重锚清掉补滚护栏的断路窗与在飞清账 timer。
     followEndPinStateRef.current = createMobileFollowEndPinState();
     if (followEndPinRecoveryTimerRef.current) {
@@ -886,7 +1249,8 @@ export function MessageRenderer({
     setHasNewMessages(false);
     setIsAwayFromBottom(false);
     scrollToEndProgrammatically(true);
-  }, [followLatestRequestKey, scrollToEndProgrammatically]);
+    runStickToLatestVerify();
+  }, [followLatestRequestKey, runStickToLatestVerify, scrollToEndProgrammatically]);
 
   // 自动加载更早:电平触发判定(shouldAutoLoadEarlier),在所有可能改变判定结果的时机重评估
   // (scroll 事件 / LegendList onStartReached 边沿 / eligibility 变化 effect)。
@@ -962,6 +1326,8 @@ export function MessageRenderer({
       viewportHeight: event.nativeEvent.layoutMeasurement.height,
     };
     const previousOffsetY = scrollMetricsRef.current.offsetY;
+    const wasNearBottom = nearBottomRef.current;
+    const scrollDelta = readingOlderRef.current ? 0 : metrics.offsetY - previousOffsetY;
     scrollMetricsRef.current = metrics;
     if (
       nearBottomRef.current
@@ -978,17 +1344,25 @@ export function MessageRenderer({
         wasNearBottom: nearBottomRef.current,
         metrics,
         programmaticScrollInFlight: programmaticScrollInFlightRef.current,
-        scrollDelta: readingOlderRef.current ? 0 : metrics.offsetY - previousOffsetY,
+        scrollDelta,
         bottomOverlayHeight,
       });
       nearBottomRef.current = nearBottom;
+      // A genuine downward false→true transition means the user manually returned to the
+      // latest edge. The old history-browsing intent no longer owns follow verification;
+      // a later drag will set it again before any new upward browse.
+      if (!wasNearBottom && nearBottom && scrollDelta > 0) {
+        userScrollForOlderRef.current = false;
+      }
       setIsAwayFromBottom(!nearBottom);
       if (nearBottom) setHasNewMessages(false);
     }
     // 拖动进近顶区时 onStartReached 边沿可能早已被消费(见 attemptAutoLoadEarlier 注释),
     // 滚动事件兜底重评估;前置短路让稳态滚动只付 1~2 次 ref 比较的成本。
     attemptAutoLoadEarlier();
-  }, [attemptAutoLoadEarlier, bottomOverlayHeight]);
+    // 分享模式:滚动驱动吸顶 check 的几何重判(内部节流,非分享模式直接返回)。
+    if (shareSelectionActiveRef.current) scheduleStickyShareCheck();
+  }, [attemptAutoLoadEarlier, bottomOverlayHeight, scheduleStickyShareCheck]);
 
   // 用户开始拖动 → 标记「上翻意图」,放行自动加载更早(onScrollBeginDrag 仅用户手势触发,
   // 程序化 scrollToEnd 不会触发,故不会误置);同时记录拖动起点 offset,供
@@ -1039,11 +1413,19 @@ export function MessageRenderer({
   // 上翻历史时 nearBottomRef=false,不打断。animated:false → 即时跟随、不排队动画。
   // LegendList 内置 maintainScrollAtEnd 已弃用(见 LegendList props 注释),不存在双机制叠加。
   const handleContentSize = useCallback((_width: number, height: number) => {
+    markMobileMvcpSettle();
     const { viewportHeight } = scrollMetricsRef.current;
     scrollMetricsRef.current = { ...scrollMetricsRef.current, contentHeight: height };
     // readingOlderRef:load-earlier 的 prepend 也会撑高 contentHeight,但那是顶部增长、不该贴底(review P1)。
     if (readingOlderRef.current) return;
     if (nearBottomRef.current && viewportHeight > 0 && height > viewportHeight) {
+      // Animated jump/send follow owns the viewport until its settle window closes. Content
+      // growth during that animation only reschedules the verifier; a false-animated pin here
+      // would visibly cut the smooth scroll short and jump straight to the end.
+      if (programmaticAnimatedScrollInFlightRef.current) {
+        runStickToLatestVerify();
+        return;
+      }
       // 补滚护栏:死区去噪 + 振荡断路,掐断「scrollToEnd → 重测 → onContentSizeChange」
       // 洪泛环(JS 忙死、冷开消息区空白;语义与参数见 messageScroll.ts 护栏段)。
       // 单调增长(流式/冷开/回填)不限流,每次跟进;只有高度往返振荡才跳闸。
@@ -1067,14 +1449,19 @@ export function MessageRenderer({
           followEndPinRecoveryTimerRef.current = null;
           if (nearBottomRef.current && !readingOlderRef.current) {
             scrollToEndProgrammatically(false);
+            // 清账补滚同样不保证真的落底(measurement 结算 / mVCP 吸收的静默落空同源风险),
+            // 跑一轮校验/补滚兜底。
+            runStickToLatestVerify();
           }
         }, MOBILE_FOLLOW_END_PIN_SUPPRESS_MS + 50);
       }
       if (decision.shouldScroll) {
         scrollToEndProgrammatically(false);
+        // 贴底追赶的落底一样不校验就可能落空(陈旧 metrics / mVCP 吸收),补一轮有界校验。
+        runStickToLatestVerify();
       }
     }
-  }, []);
+  }, [markMobileMvcpSettle, runStickToLatestVerify, scrollToEndProgrammatically]);
 
   // 冷开落底(替代 initialScrollAtEnd,弃用原因见 LegendList props 注释):首批 items
   // commit 后先命令式落底,随后双帧校验 native metrics 是否真的到达 content end。
@@ -1109,7 +1496,8 @@ export function MessageRenderer({
     const startedAt = Date.now();
     const verify = (attempts: number, waitRounds: number) => {
       if (initialAnchorGenerationRef.current !== generation) return;
-      const preserveVisibleContentPosition = readingOlderRef.current;
+      const preserveVisibleContentPosition = readingOlderRef.current
+        || isMobileMvcpSettling(Date.now(), mvcpSettleAtRef.current);
       const action = evaluateMobileAnchorVerify({
         attempts,
         listVisible: true,
@@ -1170,10 +1558,13 @@ export function MessageRenderer({
   // 但不留悬挂句柄)。
   useEffect(() => () => {
     initialAnchorGenerationRef.current += 1;
+    followVerifyGenerationRef.current += 1;
     if (followEndPinRecoveryTimerRef.current) clearTimeout(followEndPinRecoveryTimerRef.current);
     clearProgrammaticScroll();
     if (initialAnchorFrameRef.current !== null) cancelAnimationFrame(initialAnchorFrameRef.current);
     if (initialAnchorVerifyFrameRef.current !== null) cancelAnimationFrame(initialAnchorVerifyFrameRef.current);
+    if (followVerifyFrameRef.current !== null) cancelAnimationFrame(followVerifyFrameRef.current);
+    if (followVerifyTimerRef.current !== null) clearTimeout(followVerifyTimerRef.current);
     if (initialRevealTimerRef.current) clearTimeout(initialRevealTimerRef.current);
   }, [clearProgrammaticScroll]);
 
@@ -1243,6 +1634,16 @@ export function MessageRenderer({
       item={item}
     />
   ), [actions, focusedItemKey]);
+  // pending_send 的展开态不改变 listData；LegendList 会复用现有行，单靠 renderItem
+  // 闭包更新不足以保证可见行重绘。把选中项显式纳入 extraData，确保轻点气泡后
+  // 「取消 / 编辑 / 插话」操作行立即出现，不依赖滚动触发回收重渲染。
+  const messageListExtraData = useMemo(
+    () => buildMobileMessageListExtraData(
+      pendingSend?.selectedClientId ?? null,
+      shareSelectionActive === true,
+    ),
+    [pendingSend?.selectedClientId, shareSelectionActive],
+  );
 
   return (
     // chat-text-quote:Provider 恒挂载(值可为 null),避免启用态翻转时整棵消息树
@@ -1254,6 +1655,7 @@ export function MessageRenderer({
         // (替代手搓的隐藏+rAF 落底 + open-settle)。
         key={scrollResetKey}
         data={listData}
+        extraData={messageListExtraData}
         keyExtractor={(item) => item.key}
         renderItem={renderMessageItem}
         recycleItems={false}
@@ -1314,6 +1716,24 @@ export function MessageRenderer({
         >
           <ArrowUp color={colors.textPrimary} size={iconSize.md} strokeWidth={iconStroke.regular} />
         </MessageListActionButton>
+      ) : null}
+      {shareSelectionActive && stickyShareClientId ? (
+        // 与分享消息行同构，保持吸顶 check 和行内 check 水平对齐。
+        <View
+          pointerEvents="box-none"
+          style={[styles.stickyShareOverlay, { top: (topOverlayHeight ?? 0) + spacing.sm }]}
+          testID="message.shareStickyCheck"
+        >
+          <View
+            pointerEvents="box-none"
+            style={[styles.stickyShareControl, { marginLeft: wideContentInset + spacing.lg }]}
+          >
+            <ShareMessageCheckbox
+              clientId={stickyShareClientId}
+              disabled={shareSelectionBusy === true}
+            />
+          </View>
+        </View>
       ) : null}
       {hasNewMessages || showJumpToLatest ? (
         // 跳到底部浮标(Telegram 风):右下角半透明圆形 chevron,弱存在感;
@@ -1677,14 +2097,26 @@ function MessageBubble({
   const isUser = presentation.isUserAligned;
   const isStreamingAssistant = item.message.kind === 'assistant' && item.message.isStreaming === true;
   const clientId = messageClientId(item);
+  useEffect(() => {
+    if (!actionSheetOpen) return undefined;
+    actions.onMessageActionSheetOpenChange?.(clientId, true);
+    return () => actions.onMessageActionSheetOpenChange?.(clientId, false);
+  }, [actionSheetOpen, actions.onMessageActionSheetOpenChange, clientId]);
+  const shareableMessage = isShareableMessage(item.message);
+  const handleShareableMessageViewChange = useCallback((view: View | null) => {
+    actions.onShareableMessageViewChange?.(clientId, view);
+  }, [actions.onShareableMessageViewChange, clientId]);
+  const shareSelectionActive = actions.shareSelectionActive === true
+    && shareableMessage;
   const isFirstUserMessage = item.message.kind === 'user' && clientId === actions.firstUserMessageClientId;
   const copyText = buildMobileMessageCopyText(item.message);
   const canUseCompletedActions = !isStreamingAssistant;
   // 操作行只挂在每轮收尾正文、且该行确实是一条发言(判据见
   // mobileMessageShowsActionBar):中间句不再逐条带复制/分叉/时间,系统边界卡整行
-  // 不挂。user 消息、流式「生成中」状态与正文的文本选择(canSelectVisibleText)
+  // 不挂。分享态只保留与导出图片一致的消息内容,不显示操作图标、时间或费用。
+  // user 消息、流式「生成中」状态与正文的文本选择(canSelectVisibleText)
   // 不受影响。
-  const showCompletedActionBar = mobileMessageShowsActionBar({
+  const showCompletedActionBar = !shareSelectionActive && mobileMessageShowsActionBar({
     hasSystemCard: !!item.message.systemCardType,
     isStreamingAssistant,
     isTurnFinalAssistant: item.message.isTurnFinalAssistant === true,
@@ -1723,6 +2155,14 @@ function MessageBubble({
   );
   const canCopyLink = !!(showCompletedActionBar && clientId && actions.onCopyMessageLink);
   const canAddToChat = !!(showCompletedActionBar && clientId && actions.onAddMessageToComposer);
+  const canShare = !!(
+    showCompletedActionBar
+    && clientId
+    && shareableMessage
+    && actions.onEnterShareSelection
+    && !actions.shareSelectionActive
+    && !actions.busyClientId
+  );
   const contentLayout = useMemo(() => buildMessageContentLayout({
     screenWidth: actions.screenWidth,
   }), [actions.screenWidth]);
@@ -1753,7 +2193,10 @@ function MessageBubble({
   // 实测行数与被测 body 绑定存储:FlatList 复用组件实例时 body 可能原地变化
   // (服务端同步补丁等),旧实测值若不随内容失效,会在下一次 onTextLayout 到达
   // 前产生"过期行数"的错误收起判定;body 不匹配时视为未测量,回落估算兜底。
-  const [measuredBody, setMeasuredBody] = useState<{ body: string; lines: number } | null>(null);
+  const [measuredBody, setMeasuredBody] = useState<{
+    body: string;
+    lines: number;
+  } | null>(null);
   const measuredBodyLines =
     measuredBody && measuredBody.body === displayBubbleBody ? measuredBody.lines : null;
   const [longMessageExpanded, setLongMessageExpanded] = useState(false);
@@ -1791,7 +2234,7 @@ function MessageBubble({
     hasTurnCost: !!turnCost || !!turnTokens,
     isStreaming: isStreamingAssistant,
   }), [canCopy, canFork, isStreamingAssistant, isUser, messageMenu.length, relativeTime, turnCost, turnTokens]);
-  const hasActions = actionBar.items.length > 0;
+  const hasActions = actionBar.items.length > 0 || canShare;
   const actionBusy = !!clientId && actions.busyClientId === clientId;
   const forkBusy = actionBusy && actions.busyAction === 'fork';
   const disabled = !!actions.busyClientId;
@@ -1939,6 +2382,13 @@ function MessageBubble({
       ) : null}
       {item.message.systemCardType ? (
         <MobileSystemCard
+          autoResumeInFlight={isMobileAutoResumeRowInFlight({
+            isContinuationTurnOwner: clientId === actions.continuationTurnClientId,
+            makerTurnRunning: actions.makerTurnRunning === true,
+            isLastUserInput: clientId === actions.lastUserInputClientId,
+            projectionCapability:
+              actions.continuationInFlightProjectionCapability ?? 'unknown',
+          })}
           data={item.message.systemCardData}
           type={item.message.systemCardType}
         />
@@ -1977,6 +2427,7 @@ function MessageBubble({
                   markdownImageCacheKey={item.message.key}
                   onOpenPayload={actions.onOpenPayload}
                   onOpenSessionLink={actions.onOpenSessionLink}
+                  pinContentWidth={!isUser}
                   selectable={canSelectVisibleText}
                   sessionReferences={item.message.sessionReferences}
                   streaming={false}
@@ -1993,6 +2444,7 @@ function MessageBubble({
             layout={contentLayout}
             onOpenPayload={actions.onOpenPayload}
             onOpenSessionLink={actions.onOpenSessionLink}
+            pinContentWidth={!isUser}
             sessionReferences={item.message.sessionReferences}
             selectable={canSelectVisibleText}
             streaming={isStreamingAssistant}
@@ -2052,8 +2504,9 @@ function MessageBubble({
     </View>
   );
 
-  return (
+  const messageNode = (
     <View
+      ref={shareableMessage ? handleShareableMessageViewChange : undefined}
       style={[
         styles.messageItem,
         isUser ? styles.userMessageItem : styles.agentMessageItem,
@@ -2114,20 +2567,35 @@ function MessageBubble({
             }
             if (isMessageControlActionId(id)) {
               return (
-                <MessageControlButton
-                  buttonSize={actionBar.buttonSize}
-                  busy={id === 'fork' && forkBusy}
-                  copyState={copyState}
-                  disabled={disabled || actionBusy || (id === 'copy' && copyState === 'copying')}
-                  id={id}
-                  key={id}
-                  iconSize={actionBar.iconSize}
-                  onPress={() => selectControlAction(id)}
-                />
+                <Fragment key={id}>
+                  <MessageControlButton
+                    buttonSize={actionBar.buttonSize}
+                    busy={id === 'fork' && forkBusy}
+                    copyState={copyState}
+                    disabled={disabled || actionBusy || (id === 'copy' && copyState === 'copying')}
+                    id={id}
+                    iconSize={actionBar.iconSize}
+                    onPress={() => selectControlAction(id)}
+                  />
+                  {id === 'copy' && canShare ? (
+                    <MessageShareButton
+                      buttonSize={actionBar.buttonSize}
+                      iconSize={actionBar.iconSize}
+                      onPress={() => actions.onEnterShareSelection?.(clientId)}
+                    />
+                  ) : null}
+                </Fragment>
               );
             }
             return null;
           })}
+          {canShare && !actionBar.items.includes('copy') ? (
+            <MessageShareButton
+              buttonSize={actionBar.buttonSize}
+              iconSize={actionBar.iconSize}
+              onPress={() => actions.onEnterShareSelection?.(clientId)}
+            />
+          ) : null}
         </View>
       ) : null}
       <MessageActionSheet
@@ -2138,6 +2606,19 @@ function MessageBubble({
         visible={actionSheetOpen}
       />
     </View>
+  );
+
+  if (!shareSelectionActive) return messageNode;
+  return (
+    <ShareMessageCheckbox
+      clientId={clientId}
+      disabled={actions.shareSelectionBusy === true}
+      fill
+    >
+      <View style={styles.shareSelectionContent}>
+        {messageNode}
+      </View>
+    </ShareMessageCheckbox>
   );
 }
 
@@ -2600,9 +3081,10 @@ function AgentTaskCard({
       toolName: item.toolCall?.label,
       toolInput: readAgentTaskToolInput(item.toolCall),
       update: item.update,
-      // 重连后 agent_task_update(live-only)为空,已完成子任务的唯一完成信号是配对工具结果
-      // (持久化在 secondaryBody)。喂给 model 后 status 兜底为 completed、summary 显示结果(与 desktop 对齐)。
+      // 重连后 live update 为空：结构化终态优先，存量历史再由配对结果兜底 completed。
+      // summary 仍来自 secondaryBody，与 desktop 对齐。
       result: item.toolCall?.secondaryBody,
+      persistedStatus: item.toolCall?.agentTaskStatus,
     }),
     [item.toolCall, item.update],
   );
@@ -2893,11 +3375,9 @@ function SubagentCard({
   const title = item.header.subagentType
     ? t('message.renderer.subagentTyped', { type: item.header.subagentType })
     : t('message.renderer.subagent');
-  const statusText = item.status === 'running'
-    ? t('message.renderer.statusRunning')
-    : item.durationMs !== undefined
+  const statusText = item.status === 'completed' && item.durationMs !== undefined
       ? t('message.renderer.workedDuration', { duration: formatDuration(item.durationMs) })
-      : t('message.renderer.statusCompleted');
+      : agentTaskStatusLabel(item.status);
   const subtitle = [item.header.description, statusText].filter(Boolean).join(' · ');
   return (
     <CollabCardShell
@@ -3216,15 +3696,22 @@ function MobileAgentSwitchCard({ data }: { data?: Record<string, unknown> }) {
 }
 
 function MobileSystemCard({
+  autoResumeInFlight,
   data,
   type,
 }: {
+  autoResumeInFlight?: boolean;
   data?: Record<string, unknown>;
   type: NonNullable<NormalizedRemoteMessage['systemCardType']>;
 }) {
   const styles = useThemedStyles(makeStyles);
   // agent-switch 走专用「分隔线 + 药丸」渲染(对齐桌面),不落通用盒子卡片。
   if (type === 'agent-switch') return <MobileAgentSwitchCard data={data} />;
+  // auto-resume 复用桌面 AgentActionRow 的单行状态布局:默认只显示当前状态和压缩后的
+  // 中断原因,完整诊断按需展开,避免底层错误全文把手机消息流撑成一张大卡片。
+  if (type === 'auto-resume') {
+    return <MobileAutoResumeActionRow data={data} inFlight={autoResumeInFlight === true} />;
+  }
   const card = formatMobileSystemCard(type, data);
   return (
     <View style={styles.systemCard} testID={`message.systemCard.${type}`}>
@@ -3239,6 +3726,125 @@ function MobileSystemCard({
               <Text style={styles.systemCardValue}>{row.value}</Text>
             </View>
           ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function MobileAutoResumeActionRow({
+  data,
+  inFlight,
+}: {
+  data?: Record<string, unknown>;
+  inFlight: boolean;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const { colors } = useTheme();
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const presentation = getMobileAutoResumePresentation(data, inFlight);
+  const { canExpand, hasProgress, info, state, summary } = presentation;
+
+  if (state === 'separator') {
+    const label = t('message.systemCard.autoResume.separator');
+    return (
+      <View style={styles.autoResumeSeparator} testID="message.systemCard.auto-resume-separator">
+        <View style={styles.autoResumeDivider} />
+        <View style={styles.autoResumeSeparatorPill}>
+          <RefreshCw color={colors.textTertiary} size={iconSize.xs} strokeWidth={iconStroke.regular} />
+          <Text style={styles.autoResumeSeparatorText}>{label}</Text>
+        </View>
+        <View style={styles.autoResumeDivider} />
+      </View>
+    );
+  }
+
+  const label = state === 'live'
+    ? hasProgress
+      ? t('message.systemCard.autoResume.pendingWithProgress', {
+          attempt: info.attempt,
+          total: info.maxAttempts,
+        })
+      : t('message.systemCard.autoResume.pending')
+    : state === 'succeeded'
+      ? t('message.systemCard.autoResume.succeeded')
+      : state === 'failed'
+        ? t('message.systemCard.autoResume.failed')
+        : t('message.systemCard.autoResume.neutral');
+  const accessibilityLabel = summary ? `${label}: ${summary}` : label;
+
+  return (
+    <View style={styles.autoResumeRow} testID="message.systemCard.auto-resume">
+      <Pressable
+        accessibilityLabel={accessibilityLabel}
+        accessibilityRole={canExpand ? 'button' : undefined}
+        accessibilityState={canExpand ? { expanded } : undefined}
+        disabled={!canExpand}
+        onPress={canExpand
+          ? () => setExpanded((value) => toggleMobileAutoResumeExpanded(value, canExpand))
+          : undefined}
+        style={({ pressed }) => [styles.autoResumeHeader, pressed && styles.pressed]}
+      >
+        <View
+          accessible={false}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          style={styles.autoResumeIconSlot}
+        >
+          {state === 'live' ? (
+            <CompactActivityIndicator color={colors.textTertiary} size={iconSize.sm} />
+          ) : state === 'succeeded' ? (
+            <Check color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          ) : state === 'failed' ? (
+            <X color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          ) : (
+            <RefreshCw color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          )}
+        </View>
+        <Text style={styles.autoResumeTitle} numberOfLines={1}>{label}</Text>
+        {summary ? (
+          <Text style={styles.autoResumeSummary} numberOfLines={1}>{summary}</Text>
+        ) : (
+          <View style={styles.autoResumeHeaderSpacer} />
+        )}
+        {canExpand ? (
+          expanded ? (
+            <ChevronDown color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          ) : (
+            <ChevronRight color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          )
+        ) : null}
+      </Pressable>
+      {expanded && canExpand ? (
+        <View style={styles.autoResumeDetailPanel}>
+          {info.error ? (
+            <>
+              <Text style={styles.autoResumeDetailLabel}>
+                {t('message.systemCard.autoResume.detail.reason')}
+              </Text>
+              <Text selectable style={styles.autoResumeDetailText}>{info.error}</Text>
+            </>
+          ) : null}
+          {(hasProgress || info.sessionTotal !== undefined) ? (
+            <View style={[styles.autoResumeDetailMeta, info.error && styles.autoResumeDetailMetaWithReason]}>
+              {hasProgress ? (
+                <Text style={styles.autoResumeDetailMetaText}>
+                  {t('message.systemCard.autoResume.detail.attempt', {
+                    attempt: info.attempt,
+                    total: info.maxAttempts,
+                  })}
+                </Text>
+              ) : null}
+              {info.sessionTotal !== undefined ? (
+                <Text style={styles.autoResumeDetailMetaText}>
+                  {t('message.systemCard.autoResume.detail.sessionTotal', {
+                    count: info.sessionTotal,
+                  })}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       ) : null}
     </View>
@@ -3289,6 +3895,7 @@ function MarkdownBody({
   layout,
   onOpenPayload,
   onOpenSessionLink,
+  pinContentWidth = false,
   sessionReferences,
   selectable,
   streaming,
@@ -3302,6 +3909,11 @@ function MarkdownBody({
   onOpenPayload?: (payload: MessagePayload) => void;
   /** 会话深链 chip 点击回调(app 内跳转)。 */
   onOpenSessionLink?: (url: string) => void;
+  /**
+   * 仅 agent 拉伸气泡启用:用户气泡是 hug + maxWidth 86%,钉死测宽会把展开态撑出
+   * 气泡(长代码围栏横向裁切 + 纵向巨高空白)。
+   */
+  pinContentWidth?: boolean;
   /** 当前落库消息里的展示安全引用摘要，按 sessionId + anchor 精确匹配链接。 */
   sessionReferences?: readonly MobilePersistedSessionReferenceMetadata[];
   /** 完成态消息为 true:各块 Text 开原生选中(含内嵌图片 View 的块除外,Android 上有风险)。 */
@@ -3314,6 +3926,20 @@ function MarkdownBody({
   const { t } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const chatFilePathContext = useContext(ChatFilePathContext);
+  // iOS UITextView 在 stretch/百分比宽度下会偶发只量出部分高度,LegendList 按这次
+  // 偏矮的 onLayout 裁切 agent 回复;点分享会换上确定宽度的容器从而完整显示。
+  // 外层始终 stretch 测可用宽,内层再钉像素宽:测宽不能钉在自己身上,否则旋转/
+  // 分屏变宽后 onLayout 仍报旧值。1px 内抖动忽略,避免公式 WebView 重挂。
+  const [contentWidth, setContentWidth] = useState(0);
+  const handleSettledWidthLayout = useCallback((event: LayoutChangeEvent) => {
+    if (!pinContentWidth) return;
+    const nextWidth = Math.round(event.nativeEvent.layout.width);
+    setContentWidth((current) => nextSettledContentWidth(current, nextWidth));
+  }, [pinContentWidth]);
+  const pinSettledWidth = pinContentWidth && contentWidth > 0;
+  const settledTextStyle = pinSettledWidth
+    ? [styles.messageText, { width: contentWidth }]
+    : styles.messageText;
   const blocks = useMemo(() => parseMobileMarkdown(text), [text]);
   // Android 的 selectable Text 内嵌 View(直连内联图)行为未定义,含这类 inline 的块不开选中。
   const inlinesSelectable = useCallback((inlines: readonly MobileMarkdownInline[]) => (
@@ -3386,8 +4012,16 @@ function MarkdownBody({
     ),
     [onOpenSessionLink, openMarkdownImage, sessionLinkTitles, sessionReferenceDetails, streaming, styles],
   );
+  const textRunGroupingOptions = selectable === true && Platform.OS === 'android'
+    ? ANDROID_SELECTABLE_TEXT_RUN_GROUPING_OPTIONS
+    : undefined;
   // 连续纯文本块合并为 text_run(跨段选择),代码块/表格/mermaid/含直连图块保持独立。
-  const groups = useMemo(() => groupMobileMarkdownSelectableBlocks(blocks), [blocks]);
+  // Android selectable Text 在超长原生文本视图里会偶发高度/滚动协商异常,长 run 分块
+  // 后仍保留块内跨段选择,同时避免单个 LegendList item 内出现巨型 selectable Text。
+  const groups = useMemo(
+    () => groupMobileMarkdownSelectableBlocks(blocks, textRunGroupingOptions),
+    [blocks, textRunGroupingOptions],
+  );
   // 块可选中且 iOS → 嵌套 span 必须是 UITextView 家族;其余场景缺省 RN Text。
   const spanFor = useCallback((blockSelectable: boolean) => (
     blockSelectable && allowIosUITextView && Platform.OS === 'ios'
@@ -3397,7 +4031,8 @@ function MarkdownBody({
   // 文本运行组:连续纯文本块(段落/标题/列表项)合进同一个原生文本视图,
   // 原生选择手柄即可横跨段落(单个 text view 是 iOS/Android 原生选择的天然边界)。
   // 段间距用「lineHeight = markdownBodyGap 的空行 span」还原:原生文本树内没有块级 gap 可用,
-  // 一个高度恰为 gap 的空行在视觉上与原块间距一致。列表项在树内表达为「marker 前缀 span + 正文」
+  // 一个高度恰为 gap 的空行在视觉上与原块间距一致。由单块切出的 continuation 不插间距。
+  // 列表项在树内表达为「marker 前缀 span + 正文」
   // (无悬挂缩进;任务项以 ☑/☐ 字符替代原边框小方块)。
   const renderTextRun = (group: Extract<MobileMarkdownBlockGroup, { type: 'text_run' }>): ReactNode => {
     const runSelectable = selectable === true;
@@ -3405,14 +4040,14 @@ function MarkdownBody({
     return (
       <MarkdownSelectableText
         allowIosUITextView={allowIosUITextView}
-        key={group.key}
+        key={`${group.key}:${pinSettledWidth ? contentWidth : 'hug'}`}
         selectable={runSelectable}
-        style={styles.messageText}
+        style={settledTextStyle}
         testID="message.markdownTextRun"
       >
         {group.blocks.flatMap((block, index) => {
           const spans: ReactNode[] = [];
-          if (index > 0) {
+          if (index > 0 && !block.textRunContinuation) {
             spans.push(
               <RunSpan key={`${block.key}:gap`} style={{ lineHeight: layout.markdownBodyGap }}>
                 {'\n\n'}
@@ -3422,7 +4057,7 @@ function MarkdownBody({
           const baseStyle: StyleProp<TextStyle> = block.type === 'heading'
             ? [styles.markdownHeading, headingSizeStyle(styles, block.level)]
             : styles.messageText;
-          if (block.type === 'list_item') {
+          if (block.type === 'list_item' && !block.textRunContinuation) {
             const task = typeof block.checked === 'boolean';
             spans.push(
               <RunSpan
@@ -3441,15 +4076,26 @@ function MarkdownBody({
   };
   return (
     <View
-      style={[styles.markdownBody, { gap: layout.markdownBodyGap }]}
+      collapsable={false}
+      onLayout={handleSettledWidthLayout}
+      style={[
+        styles.markdownBody,
+        { maxWidth: '100%' },
+        pinContentWidth ? { alignSelf: 'stretch' } : null,
+      ]}
       testID="message.markdownBody"
     >
-      {groups.map((group) => {
-        if (group.type === 'text_run') {
-          return renderTextRun(group);
-        }
-        const block = group.block;
-        if (block.type === 'mermaid') {
+      <View
+        collapsable={false}
+        style={pinSettledWidth ? { width: contentWidth, maxWidth: '100%' } : null}
+      >
+      {groups.flatMap((group, groupIndex) => {
+        const renderedGroup = (() => {
+          if (group.type === 'text_run') {
+            return renderTextRun(group);
+          }
+          const block = group.block;
+          if (block.type === 'mermaid') {
           // 内联图表按「图片」形态呈现:无卡片 chrome、无标签文字、无按钮,
           // 就是一块圆角图表;点击任意位置打开沉浸式全屏详情(透明 Pressable
           // 盖住整块——WebView 会吞掉触摸事件,不盖层拿不到点击)。
@@ -3480,12 +4126,12 @@ function MarkdownBody({
           );
         }
         if (block.type === 'code') {
+          // 围栏代码在气泡内换行,不用横向 ScrollView:后者在展开长用户消息时
+          // 会按未折行内容报出超高,气泡巨幅空白并把每行裁在右侧圆角外。
           return (
             <View key={block.key} style={styles.markdownCodeFrame}>
-              <ScrollView
-                horizontal
-                style={styles.markdownCodeScroll}
-                contentContainerStyle={[
+              <View
+                style={[
                   styles.markdownCodeContent,
                   {
                     paddingHorizontal: layout.codePaddingHorizontal,
@@ -3501,7 +4147,7 @@ function MarkdownBody({
                   styles={styles}
                   text={block.text}
                 />
-              </ScrollView>
+              </View>
             </View>
           );
         }
@@ -3565,6 +4211,7 @@ function MarkdownBody({
           const columnWidths = buildMobileMarkdownTableColumnWidths({
             header: block.header,
             rows: block.rows,
+            availableWidth: layout.markdownTableAvailableWidth,
             minWidth: layout.markdownTableCellMinWidth,
           });
           return (
@@ -3618,14 +4265,23 @@ function MarkdownBody({
         return (
           <MarkdownSelectableText
             allowIosUITextView={allowIosUITextView}
-            key={block.key}
+            key={`${block.key}:${pinSettledWidth ? contentWidth : 'hug'}`}
             selectable={inlinesSelectable(block.inlines)}
-            style={styles.messageText}
+            style={settledTextStyle}
           >
             {renderInlines(block.inlines, spanFor(inlinesSelectable(block.inlines)))}
           </MarkdownSelectableText>
         );
+        })();
+        if (groupIndex === 0 || isTextRunContinuationGroup(group)) {
+          return [renderedGroup];
+        }
+        return [
+          <View key={`${group.key}:body-gap`} style={{ height: layout.markdownBodyGap }} />,
+          renderedGroup,
+        ];
       })}
+      </View>
     </View>
   );
 }
@@ -3986,6 +4642,9 @@ function renderInline(
       // xdt 系非直连图:RN Image 无法直接加载内部 scheme,渲染可点 chip,
       // 点开后由 ImageLightbox 经 remote-media resolver 取图。
       if (!isMobileMarkdownImageDirectUrl(inline.url)) {
+        const imageChipText = inline.alt
+          ? mobileMarkdownImageAltChipText(inline.alt)
+          : i18n.t('message.renderer.imageFallbackTitle');
         return (
           <SpanText
             key={spanKey(`image:${index}:${inline.url}`)}
@@ -3993,7 +4652,7 @@ function renderInline(
             style={clickableInlineStyle(styles, openImageChip, ctx.baseStyle)}
             testID="message.markdownInlineImageChip"
           >
-            {inline.alt || i18n.t('message.renderer.imageFallbackTitle')}
+            {imageChipText}
           </SpanText>
         );
       }
@@ -4594,7 +5253,7 @@ function MessagePayloadModal({
   onShareImage?: ComponentProps<typeof ImageLightbox>['onShareImage'];
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const [payloadCopyState, setPayloadCopyState] = useState<PayloadHeaderCopyState>('idle');
   const payloadCopySeqRef = useRef(0);
@@ -4624,11 +5283,11 @@ function MessagePayloadModal({
   }, [imageAnnotation, onClose]);
   const payloadSummary = useMemo(
     () => payload ? summarizeMessagePayload(payload) : null,
-    [payload],
+    [i18nInstance.language, payload],
   );
   const payloadPreview = useMemo(
     () => payload ? summarizeMessagePayloadPreview(payload) : null,
-    [payload],
+    [i18nInstance.language, payload],
   );
   const payloadDetailText = payloadHeaderDetailText(payloadPreview, payloadSummary?.subtitle);
   const canCopyPayload = !!payloadSummary?.copyableText?.trim();
@@ -4976,13 +5635,16 @@ function MessagePayloadBody({
   onResolveRemoteMedia?: ResolveRemoteMediaFn;
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const { width: screenWidth } = useWindowDimensions();
   const [remoteState, setRemoteState] = useState<RemoteMediaState>({ status: 'idle' });
   const [playerStatus, setPlayerStatus] = useState<MobileMediaPlayerStatus | null>(null);
   const resolvedRemoteMediaRef = useRef<MobileResolvedRemoteMedia | null>(null);
-  const bodyPresentation = useMemo(() => summarizeMessagePayloadBody(payload), [payload]);
+  const bodyPresentation = useMemo(
+    () => summarizeMessagePayloadBody(payload),
+    [i18nInstance.language, payload],
+  );
   const payloadLayout = useMemo(() => buildPayloadBodyLayout({
     kind: payload.kind,
     screenWidth,
@@ -5156,9 +5818,12 @@ function DiffPayloadBody({
   onReadTextFilePreview?: (filePath: string) => Promise<RemoteTextFilePreviewResult>;
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
-  const view = useMemo(() => formatDiffPayloadView(diff), [diff]);
+  const view = useMemo(
+    () => formatDiffPayloadView(diff),
+    [diff, i18nInstance.language],
+  );
   const [filePreviewVisible, setFilePreviewVisible] = useState(false);
   const { canPreview, loadPreview, previewKind, previewState } = useRemoteTextFilePreview(view.filePath, onReadTextFilePreview);
   const openFilePreview = useCallback(() => {
@@ -5341,10 +6006,13 @@ function FilePayloadBody({
   onReadTextFilePreview?: (filePath: string) => Promise<RemoteTextFilePreviewResult>;
 }) {
   const { colors } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const sourcePath = payload.sourcePath ?? '';
-  const bodyPresentation = useMemo(() => summarizeMessagePayloadBody(payload), [payload]);
+  const bodyPresentation = useMemo(
+    () => summarizeMessagePayloadBody(payload),
+    [i18nInstance.language, payload],
+  );
   const { canPreview, loadPreview, previewKind, previewState } = useRemoteTextFilePreview(sourcePath, onReadTextFilePreview);
 
   return (
@@ -5389,29 +6057,37 @@ function FilePayloadBody({
   );
 }
 
+type RemoteTextFilePreviewLoadState =
+  | Exclude<TextFilePreviewState, { status: 'unavailable' }>
+  | { status: 'unavailable'; result: RemoteTextFilePreviewResult }
+  | { status: 'unavailable'; message: string; size: number; limitMb?: number };
+
 function useRemoteTextFilePreview(
   sourcePath: string,
   onReadTextFilePreview?: (filePath: string) => Promise<RemoteTextFilePreviewResult>,
 ) {
-  const [previewState, setPreviewState] = useState<TextFilePreviewState>({ status: 'idle' });
+  const { i18n: i18nInstance } = useTranslation();
+  const [previewLoadState, setPreviewLoadState] = useState<RemoteTextFilePreviewLoadState>(
+    { status: 'idle' },
+  );
   const previewSeqRef = useRef(0);
   const previewKind = useMemo(() => remoteFilePreviewKind(sourcePath), [sourcePath]);
   const canPreview = previewKind === 'text' && !!sourcePath && !!onReadTextFilePreview;
 
   useEffect(() => {
     previewSeqRef.current += 1;
-    setPreviewState({ status: 'idle' });
+    setPreviewLoadState({ status: 'idle' });
   }, [sourcePath]);
 
   const loadPreview = useCallback(() => {
-    if (!canPreview || previewState.status === 'loading') return;
+    if (!canPreview || previewLoadState.status === 'loading') return;
     const seq = ++previewSeqRef.current;
-    setPreviewState({ status: 'loading' });
+    setPreviewLoadState({ status: 'loading' });
     void onReadTextFilePreview(sourcePath)
       .then((result) => {
         if (previewSeqRef.current !== seq) return;
         if (result.success && typeof result.data === 'string') {
-          setPreviewState({
+          setPreviewLoadState({
             status: 'ready',
             data: result.data,
             size: result.size,
@@ -5419,22 +6095,32 @@ function useRemoteTextFilePreview(
           });
           return;
         }
-        setPreviewState({
+        setPreviewLoadState({
           status: 'unavailable',
-          message: describeTextPreviewFailure(result),
-          size: result.size,
-          limitMb: result.limitMb,
+          result,
         });
       })
       .catch((err) => {
         if (previewSeqRef.current !== seq) return;
-        setPreviewState({
+        setPreviewLoadState({
           status: 'unavailable',
           message: err instanceof Error ? err.message : String(err),
           size: 0,
         });
       });
-  }, [canPreview, onReadTextFilePreview, previewState.status, sourcePath]);
+  }, [canPreview, onReadTextFilePreview, previewLoadState.status, sourcePath]);
+
+  const previewState = useMemo<TextFilePreviewState>(() => {
+    if (previewLoadState.status !== 'unavailable' || !('result' in previewLoadState)) {
+      return previewLoadState;
+    }
+    return {
+      status: 'unavailable',
+      message: describeTextPreviewFailure(previewLoadState.result),
+      size: previewLoadState.result.size,
+      limitMb: previewLoadState.result.limitMb,
+    };
+  }, [i18nInstance.language, previewLoadState]);
 
   return { canPreview, loadPreview, previewKind, previewState };
 }
@@ -5650,6 +6336,7 @@ function MessageControlButton({
       style={({ pressed }) => [
         styles.messageIconAction,
         { height: buttonSize, width: buttonSize },
+        styles.messageIconActionTouchTarget,
         pressed && styles.pressed,
         disabled && styles.disabled,
       ]}
@@ -5671,11 +6358,12 @@ function MessageMoreButton({
   iconSize: number;
   onPress(): void;
 }) {
+  const { t } = useTranslation();
   const { colors } = useTheme();
   const styles = useThemedStyles(makeStyles);
   return (
     <Pressable
-      accessibilityLabel="更多消息操作"
+      accessibilityLabel={t('message.renderer.moreActions')}
       accessibilityRole="button"
       accessibilityState={{ disabled: disabled === true }}
       disabled={disabled}
@@ -5684,12 +6372,44 @@ function MessageMoreButton({
       style={({ pressed }) => [
         styles.messageIconAction,
         { height: buttonSize, width: buttonSize },
+        styles.messageIconActionTouchTarget,
         pressed && styles.pressed,
         disabled && styles.disabled,
       ]}
       testID="message.moreButton"
     >
       <Ellipsis color={colors.textSecondary} size={size} strokeWidth={iconStroke.regular} />
+    </Pressable>
+  );
+}
+
+function MessageShareButton({
+  buttonSize,
+  iconSize: size,
+  onPress,
+}: {
+  buttonSize: number;
+  iconSize: number;
+  onPress(): void;
+}) {
+  const { colors } = useTheme();
+  const styles = useThemedStyles(makeStyles);
+  const { t } = useTranslation();
+  return (
+    <Pressable
+      accessibilityLabel={t('session.shareImage.shareMessage')}
+      accessibilityRole="button"
+      hitSlop={MESSAGE_CONTROL_HIT_SLOP}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.messageIconAction,
+        { height: buttonSize, width: buttonSize },
+        styles.messageIconActionTouchTarget,
+        pressed && styles.pressed,
+      ]}
+      testID="message.shareButton"
+    >
+      <ShareIcon color={colors.textSecondary} size={size} strokeWidth={iconStroke.regular} />
     </Pressable>
   );
 }
@@ -5750,6 +6470,36 @@ function findFirstUserMessageClientId(items: readonly MobileMessageRenderItem[])
   return undefined;
 }
 
+interface WindowFrame {
+  height: number;
+  width: number;
+  x: number;
+  y: number;
+}
+
+function measureInWindow(
+  target: unknown,
+): Promise<WindowFrame | null> {
+  return new Promise((resolve) => {
+    const measurable = target as {
+      measureInWindow?: (
+        callback: (x: number, y: number, width: number, height: number) => void,
+      ) => void;
+    } | null | undefined;
+    if (!measurable?.measureInWindow) {
+      resolve(null);
+      return;
+    }
+    measurable.measureInWindow((x, y, width, height) => {
+      if (![x, y, width, height].every(Number.isFinite)) {
+        resolve(null);
+        return;
+      }
+      resolve({ height, width, x, y });
+    });
+  });
+}
+
 function findFirstUserMessageClientIdInItem(
   item: MobileMessageRenderItem | MobileWorkChildItem,
 ): string | undefined {
@@ -5761,6 +6511,30 @@ function findFirstUserMessageClientIdInItem(
     }
   }
   return undefined;
+}
+
+function findLastUserInputClientId(items: readonly MobileMessageRenderItem[]): string | null {
+  for (let index = items.length - 1; index >= 0; index--) {
+    const found = findLastUserInputClientIdInItem(items[index]);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findLastUserInputClientIdInItem(
+  item: MobileMessageRenderItem | MobileWorkChildItem,
+): string | null {
+  if (item.type === 'message' && item.message.role === 'user') {
+    const delivery = item.message.source.agentMeta?.delivery;
+    return delivery === 'steer' ? null : messageClientId(item);
+  }
+  if (item.type === 'work_group') {
+    for (let index = item.children.length - 1; index >= 0; index--) {
+      const found = findLastUserInputClientIdInItem(item.children[index]);
+      if (found) return found;
+    }
+  }
+  return null;
 }
 
 function messageClientId(item: MobileMessageItem): string {
@@ -5892,6 +6666,22 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     gap: 2,
     width: '100%',
   },
+  shareSelectionContent: {
+    flex: 1,
+    minWidth: 0,
+  },
+  stickyShareOverlay: {
+    height: SHARE_STICKY_CHECK_HEIGHT,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    zIndex: 5,
+  },
+  stickyShareControl: {
+    alignItems: 'center',
+    width: spacing.xl * 2,
+  },
   sentInlineTextChunk: {
     flexBasis: '100%',
     flexShrink: 1,
@@ -5922,6 +6712,8 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     backgroundColor: colors.surfaceElevated,
     borderColor: colors.borderStrong,
     maxWidth: '86%',
+    minWidth: 0,
+    overflow: 'hidden',
   },
   agentBubble: {
     alignSelf: 'stretch',
@@ -6036,6 +6828,102 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     fontSize: typeScale.caption,
     lineHeight: lineHeight.caption,
   },
+  autoResumeSeparator: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  autoResumeDivider: {
+    backgroundColor: colors.border,
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
+  },
+  autoResumeSeparatorPill: {
+    alignItems: 'center',
+    borderColor: colors.border,
+    borderRadius: radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: spacing.xs,
+    maxWidth: '78%',
+    minHeight: 28,
+    paddingHorizontal: spacing.sm,
+  },
+  autoResumeSeparatorText: {
+    color: colors.textTertiary,
+    flexShrink: 1,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+  },
+  autoResumeRow: {
+    alignSelf: 'stretch',
+  },
+  autoResumeHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    minHeight: 44,
+    paddingHorizontal: spacing.xs,
+  },
+  autoResumeIconSlot: {
+    alignItems: 'center',
+    height: 18,
+    justifyContent: 'center',
+    width: iconSize.md,
+  },
+  autoResumeTitle: {
+    color: colors.textSecondary,
+    flexShrink: 1,
+    flexGrow: 0,
+    fontSize: typeScale.footnote,
+    fontWeight: fontWeight.medium,
+  },
+  autoResumeSummary: {
+    color: colors.textSecondary,
+    flex: 1,
+    fontSize: typeScale.footnote,
+    minWidth: 0,
+  },
+  autoResumeHeaderSpacer: {
+    flex: 1,
+    minWidth: spacing.xs,
+  },
+  autoResumeDetailPanel: {
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderRadius: radius.control,
+    borderWidth: StyleSheet.hairlineWidth,
+    marginHorizontal: spacing.xs,
+    marginBottom: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+  },
+  autoResumeDetailLabel: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+  },
+  autoResumeDetailText: {
+    color: colors.textSecondary,
+    fontFamily: monoFont,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+    marginTop: 2,
+  },
+  autoResumeDetailMeta: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+  },
+  autoResumeDetailMetaWithReason: {
+    marginTop: spacing.sm,
+  },
+  autoResumeDetailMetaText: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+  },
   // ── agent-switch 分隔线 + 药丸(对齐桌面 AgentSwitchCard)────────────────
   agentSwitchWrap: {
     paddingVertical: spacing.sm,
@@ -6098,7 +6986,7 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     fontSize: typeScale.caption,
     lineHeight: lineHeight.caption,
   },
-  markdownBody: { gap: 10 },
+  markdownBody: {},
   // 外链 / 会话深链等一切可点行内元素:**只有下划线**,不加粗、不换色、不换字体
   // (DESIGN.md §14.5;GitHub 的 `.markdown-body a` 同样只有 text-decoration)。
   //
@@ -6219,15 +7107,14 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   markdownListText: { flex: 1 },
   markdownCodeFrame: {
+    alignSelf: 'stretch',
     backgroundColor: colors.chatCodeSurface,
     borderColor: colors.chatCodeBorder,
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: radius.container,
     maxWidth: '100%',
+    minWidth: 0,
     overflow: 'hidden',
-  },
-  markdownCodeScroll: {
-    maxWidth: '100%',
   },
   markdownCodeContent: {
     paddingHorizontal: spacing.md,
@@ -6235,9 +7122,11 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   markdownCodeText: {
     color: colors.textPrimary,
+    flexShrink: 1,
     fontFamily: monoFont,
     fontSize: typeScale.code,
     lineHeight: lineHeight.code,
+    maxWidth: '100%',
   },
   // 语法着色:只上 color,其余(字体/字号/行高)继承 markdownCodeText —— 嵌套 Text
   // 只支持有限样式,且改字号会让同一行的 token 高低不齐。
@@ -6369,6 +7258,10 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     height: 24,
     justifyContent: 'center',
     width: 24,
+  },
+  messageIconActionTouchTarget: {
+    minHeight: MESSAGE_CONTROL_TOUCH_SIZE,
+    minWidth: MESSAGE_CONTROL_TOUCH_SIZE,
   },
   messageActionMeta: {
     alignSelf: 'center',

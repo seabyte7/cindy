@@ -29,18 +29,24 @@ const initialPending: PendingIssueConfirm = {
     osVersion: '10.0',
   },
   submissionIdentity: {
-    kind: 'github-user',
-    login: 'tester',
+    kind: 'platform',
+    login: 'cindy-issue',
   },
+  githubUserIdentity: { kind: 'github-user', login: 'tester' },
+  suggestedPublicName: '当前昵称',
 };
 
 const platformPending: PendingIssueConfirm = {
   ...initialPending,
-  submissionIdentity: {
-    kind: 'platform',
-    login: 'cindy-issue',
-  },
-  suggestedPublicName: '当前昵称',
+  githubUserIdentity: undefined,
+};
+
+const legacyGithubPending: PendingIssueConfirm = {
+  ...initialPending,
+  requestId: 'issue-request-legacy-github',
+  submissionIdentity: { kind: 'github-user', login: 'legacy-user' },
+  githubUserIdentity: undefined,
+  suggestedPublicName: undefined,
 };
 
 function Harness() {
@@ -56,6 +62,10 @@ function Harness() {
       ) : null}
     </>
   );
+}
+
+function confirmPublicContent() {
+  fireEvent.click(screen.getByRole('checkbox', { name: 'issueAgent.confirm.privacyConfirm' }));
 }
 
 afterEach(() => {
@@ -173,11 +183,77 @@ describe('IssueConfirmCard draft persistence', () => {
 });
 
 describe('IssueConfirmCard submission identity', () => {
-  it('GitHub direct publishing only shows the selected account', () => {
-    render(<IssueConfirmCard sessionId="session-a" pending={initialPending} onRespond={vi.fn()} />);
-    expect(screen.getByText('issueAgent.confirm.identityGithubUser')).not.toBeNull();
+  it('defaults to the platform bot and offers a verified GitHub account as an extra option', () => {
+    const onRespond = vi.fn();
+    render(
+      <IssueConfirmCard sessionId="session-a" pending={initialPending} onRespond={onRespond} />,
+    );
+
+    expect(
+      screen
+        .getByRole('button', { name: 'issueAgent.confirm.identityPlatform' })
+        .getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(screen.getByText('issueAgent.confirm.privacyHint')).not.toBeNull();
+    expect(screen.getByText('issueAgent.confirm.identityPlatformHint')).not.toBeNull();
+    expect(screen.getByLabelText('issueAgent.confirm.publicNameLabel')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'issueAgent.confirm.identityGithubUser' }));
     expect(screen.getByText('issueAgent.confirm.identityGithubUserHint')).not.toBeNull();
     expect(screen.queryByLabelText('issueAgent.confirm.publicNameLabel')).toBeNull();
+    confirmPublicContent();
+    fireEvent.click(screen.getByRole('button', { name: /issueAgent\.confirm\.submit/ }));
+    expect(onRespond).toHaveBeenCalledWith(
+      expect.objectContaining({
+        confirmed: true,
+        submissionIdentity: { kind: 'github-user', login: 'tester' },
+      }),
+    );
+  });
+
+  it('does not show a GitHub account option when none is currently available', () => {
+    render(
+      <IssueConfirmCard sessionId="session-a" pending={platformPending} onRespond={vi.fn()} />,
+    );
+    expect(
+      screen.getByRole('button', { name: 'issueAgent.confirm.identityPlatform' }),
+    ).not.toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'issueAgent.confirm.identityGithubUser' }),
+    ).toBeNull();
+  });
+
+  it('keeps an old-Main GitHub identity fixed instead of dropping or mislabeling the card', () => {
+    const onRespond = vi.fn();
+    render(
+      <IssueConfirmCard
+        sessionId="session-a"
+        pending={legacyGithubPending}
+        onRespond={onRespond}
+      />,
+    );
+
+    expect(
+      screen
+        .getByRole('button', { name: 'issueAgent.confirm.identityGithubUser' })
+        .getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(
+      screen.queryByRole('button', { name: 'issueAgent.confirm.identityPlatform' }),
+    ).toBeNull();
+    expect(screen.getByText('issueAgent.confirm.identityGithubUserHint')).not.toBeNull();
+    expect(screen.queryByLabelText('issueAgent.confirm.publicNameLabel')).toBeNull();
+
+    confirmPublicContent();
+    fireEvent.click(screen.getByRole('button', { name: /issueAgent\.confirm\.submit/ }));
+    expect(onRespond).toHaveBeenCalledWith({
+      confirmed: true,
+      title: '原始标题',
+      body: '原始正文',
+      type: 'bug',
+      submissionIdentity: { kind: 'github-user', login: 'legacy-user' },
+      uiLanguage: 'zh-CN',
+    });
   });
 
   it('platform publishing submits the edited public name', () => {
@@ -188,10 +264,12 @@ describe('IssueConfirmCard submission identity', () => {
     const input = screen.getByLabelText('issueAgent.confirm.publicNameLabel') as HTMLInputElement;
     expect(input.value).toBe('当前昵称');
     fireEvent.change(input, { target: { value: '  公开昵称  ' } });
+    confirmPublicContent();
     fireEvent.click(screen.getByRole('button', { name: /issueAgent\.confirm\.submit/ }));
     expect(onRespond).toHaveBeenCalledWith(
       expect.objectContaining({
         confirmed: true,
+        submissionIdentity: { kind: 'platform', login: 'cindy-issue' },
         publicName: '公开昵称',
       }),
     );
@@ -210,10 +288,12 @@ describe('IssueConfirmCard submission identity', () => {
     expect(
       (screen.getByLabelText('issueAgent.confirm.publicNameLabel') as HTMLInputElement).value,
     ).toBe('issueAgent.confirm.anonymous');
+    confirmPublicContent();
     fireEvent.click(screen.getByRole('button', { name: /issueAgent\.confirm\.submit/ }));
     expect(onRespond).toHaveBeenCalledWith(
       expect.objectContaining({
         confirmed: true,
+        submissionIdentity: { kind: 'platform', login: 'cindy-issue' },
         publicName: 'issueAgent.confirm.anonymous',
       }),
     );
@@ -233,5 +313,32 @@ describe('IssueConfirmCard submission identity', () => {
     expect((submit as HTMLButtonElement).disabled).toBe(true);
     expect((input as HTMLInputElement).type).toBe('text');
     expect((input as HTMLInputElement).maxLength).toBe(100);
+  });
+
+  it('requires explicit public-content confirmation and resets it after edits', () => {
+    const onRespond = vi.fn();
+    render(
+      <IssueConfirmCard sessionId="session-a" pending={platformPending} onRespond={onRespond} />,
+    );
+
+    const submit = screen.getByRole('button', { name: /issueAgent\.confirm\.submit/ });
+    const confirmation = screen.getByRole('checkbox', {
+      name: 'issueAgent.confirm.privacyConfirm',
+    });
+    expect((submit as HTMLButtonElement).disabled).toBe(true);
+    expect((confirmation as HTMLInputElement).checked).toBe(false);
+
+    confirmPublicContent();
+    expect((submit as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.change(screen.getByLabelText('issueAgent.confirm.bodyLabel'), {
+      target: { value: '重新编辑后的正文' },
+    });
+    expect((confirmation as HTMLInputElement).checked).toBe(false);
+    expect((submit as HTMLButtonElement).disabled).toBe(true);
+
+    confirmPublicContent();
+    fireEvent.click(submit);
+    expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ body: '重新编辑后的正文' }));
   });
 });

@@ -26,6 +26,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Logger } from '../../../interfaces/logger.js';
+import type { CodexSubagentRoutingProfile } from '../../base-agent.js';
 import { AppServerClient } from './client.js';
 import type { Transport } from './transport.js';
 import {
@@ -57,11 +58,14 @@ import {
   type ThreadUnsubscribeResponse,
   type TurnPlanUpdatedNotification,
   type TurnCompletedNotification,
+  type TurnDiffUpdatedNotification,
   type TurnStartedNotification,
   type ReasoningSummaryTextDeltaNotification,
   type ReasoningSummaryPartAddedNotification,
   type ReasoningTextDeltaNotification,
+  type ReasoningEffort,
   type AccountRateLimitsUpdatedNotification,
+  type AgentMessageDeltaNotification,
   type ThreadStatusChangedNotification,
   type ThreadSettingsUpdatedNotification,
   type ItemGuardianApprovalReviewStartedNotification,
@@ -73,7 +77,7 @@ import {
  * 我们订阅的 notification 方法集 — 这之外的 (大部分 delta + plan/diff/hook/etc.)
  * 在 initialize 时通过 optOutNotificationMethods 告诉 server 别推, 省 IPC 带宽。
  *
- * agentMessage 文本流我们仍走 item/updated 全量字段算 diff (省一类 delta);
+ * agentMessage 正文订阅专用 delta；item/updated 全量字段保留为兼容兜底与校准来源。
  * reasoning summary 流必须订阅 delta — claude code 等价体验需要逐字出 thinking 文本,
  * item/completed 给的是终态全文 (用来校准), 中间过程靠 delta 才能动起来。
  */
@@ -81,10 +85,12 @@ const SUBSCRIBED_METHODS = [
   'thread/started',
   'turn/started',
   'turn/completed',
+  'turn/diff/updated',
   'thread/tokenUsage/updated', // Codex usage 走单独通知 (不在 turn/completed 上), 必订
   'item/started',
   'item/updated',
   'item/completed',
+  'item/agentMessage/delta',
   'turn/plan/updated',             // Codex update_plan snapshots
   'item/reasoning/summaryTextDelta', // 流式 reasoning 文本增量 (OpenAI summary)
   'item/reasoning/summaryPartAdded', // summary 分段标记 (插 \n\n 分隔用)
@@ -100,12 +106,9 @@ const SUBSCRIBED_METHODS = [
 ] as const;
 
 const NOTIFICATIONS_TO_OPT_OUT = [
-  'item/agentMessage/delta',
   'item/plan/delta',
   'item/commandExecution/outputDelta',
   'item/fileChange/outputDelta',
-  // 后续要做实时 patch / plan 流时再去掉:
-  'turn/diff/updated',
 ];
 
 const DEFAULT_THREAD_UNSUBSCRIBE_TIMEOUT_MS = 5_000;
@@ -136,11 +139,14 @@ export interface ThreadEventHandlers {
   descendantNotification?: (childThreadId: string, method: string, params: unknown) => void;
   turnStarted?: (params: TurnStartedNotification['params']) => void;
   turnCompleted?: (params: TurnCompletedNotification['params']) => void;
+  turnDiffUpdated?: (params: TurnDiffUpdatedNotification['params']) => void;
   /** 每次 turn 都会推一次 (turn 完成前), 与 turn/completed 在同 turnId 下成对出现。 */
   tokenUsageUpdated?: (params: ThreadTokenUsageUpdatedNotification['params']) => void;
   itemStarted?: (params: ItemStartedNotification['params']) => void;
   itemUpdated?: (params: ItemUpdatedNotification['params']) => void;
   itemCompleted?: (params: ItemCompletedNotification['params']) => void;
+  /** 正文的逐段增量；item/completed 仍会下发最终全文做权威校准。 */
+  agentMessageDelta?: (params: AgentMessageDeltaNotification['params']) => void;
   /** Codex native update_plan snapshots. */
   turnPlanUpdated?: (params: TurnPlanUpdatedNotification['params']) => void;
   /** OpenAI reasoning summary 单段内的文本增量 (按 summaryIndex 区分段)。 */
@@ -270,6 +276,16 @@ export interface AppServerHostOptions {
   buildSessionMcpConfig?: (sessionInstanceId: string) => Record<string, unknown>;
   /** Cindy-side fallback used only when a subagent's actual model is not reported. */
   subagentModelFallback?: string;
+  /** Frozen provider/model/effort identity for the configured locked subagent route. */
+  subagentRoute?: {
+    providerId: string;
+    catalogModel: string;
+    reasoningEffort: ReasoningEffort | null;
+  };
+  /** Whether the OpenAI identity provider may use Responses WebSocket on this host. */
+  codexOpenAiWebSocketsEnabled?: boolean;
+  /** Host-level Subagent route profile used to prevent incompatible local host reuse. */
+  codexSubagentRoutingProfile?: CodexSubagentRoutingProfile;
 }
 
 interface BufferedNotification {
@@ -428,6 +444,22 @@ export class AppServerHost {
   /** Display metadata only; observed thread model always wins. */
   getSubagentModelFallback(): string | undefined {
     return this.opts.subagentModelFallback;
+  }
+
+  getSubagentRoute(): {
+    providerId: string;
+    catalogModel: string;
+    reasoningEffort: ReasoningEffort | null;
+  } | undefined {
+    return this.opts.subagentRoute;
+  }
+
+  getOpenAiWebSocketsEnabled(): boolean {
+    return this.opts.codexOpenAiWebSocketsEnabled !== false;
+  }
+
+  getSubagentRoutingProfile(): CodexSubagentRoutingProfile {
+    return this.opts.codexSubagentRoutingProfile ?? 'default';
   }
 
   getConnectionId(): string {
@@ -1371,10 +1403,12 @@ export class AppServerHost {
       case 'thread/started': fn = handlers.threadStarted as (p: never) => void; break;
       case 'turn/started': fn = handlers.turnStarted as (p: never) => void; break;
       case 'turn/completed': fn = handlers.turnCompleted as (p: never) => void; break;
+      case 'turn/diff/updated': fn = handlers.turnDiffUpdated as (p: never) => void; break;
       case 'thread/tokenUsage/updated': fn = handlers.tokenUsageUpdated as (p: never) => void; break;
       case 'item/started': fn = handlers.itemStarted as (p: never) => void; break;
       case 'item/updated': fn = handlers.itemUpdated as (p: never) => void; break;
       case 'item/completed': fn = handlers.itemCompleted as (p: never) => void; break;
+      case 'item/agentMessage/delta': fn = handlers.agentMessageDelta as (p: never) => void; break;
       case 'turn/plan/updated': fn = handlers.turnPlanUpdated as (p: never) => void; break;
       case 'item/reasoning/summaryTextDelta': fn = handlers.reasoningSummaryTextDelta as (p: never) => void; break;
       case 'item/reasoning/summaryPartAdded': fn = handlers.reasoningSummaryPartAdded as (p: never) => void; break;

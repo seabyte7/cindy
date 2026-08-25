@@ -189,6 +189,9 @@ describe('hook-control runtime capability gate', () => {
       handleSessionArchive: vi.fn(),
       handleInteractionDecision: vi.fn(),
       handleTurnDelivery,
+      onMessageOpResult: vi.fn(),
+      setEmojiReactionsMode: vi.fn(),
+      settleAckReactions: vi.fn(),
       activateAccount: vi.fn(),
       deactivateAccount: vi.fn(async () => undefined),
       dispose: vi.fn(),
@@ -1581,6 +1584,9 @@ describe('Telegram provider capability, binding and prefs', () => {
       handleDispatch,
       onConnected: vi.fn(),
       onDisconnected: vi.fn(),
+      onMessageOpResult: vi.fn(),
+      setEmojiReactionsMode: vi.fn(),
+      settleAckReactions: vi.fn(),
       cancel: vi.fn(),
       handleSessionArchive: vi.fn(),
       handleInteractionDecision: vi.fn(),
@@ -2778,10 +2784,29 @@ describe('Telegram provider capability, binding and prefs', () => {
     await expect(manager.getTelegramBehavior('stale-binding')).rejects.toBeInstanceOf(
       HookNotConnectedError,
     );
-    expect(server.frames.some((frame) => frame.type === 'provider.behavior.get')).toBe(false);
+    // 绑定确认后客户端会主动拉一次表情档位(ack 表情要在首次派发前就按用户的
+    // 选择发), 所以这里不能断言「一帧 behavior.get 都没有」—— 要断言的是
+    // **stale binding 那次请求没有出帧**。
+    expect(
+      server.frames
+        .filter((frame) => frame.type === 'provider.behavior.get')
+        .every((frame) => frame.payload.bindingId !== 'stale-binding'),
+    ).toBe(true);
 
+    // 绑定确认时客户端已经主动拉过一次, waitFor 会命中那一帧 —— 这里要等的是
+    // **本次显式读取**新发出的那一帧, 所以按帧数增长取最后一个。
+    const behaviorGetsBefore = server.frames.filter(
+      (frame) => frame.type === 'provider.behavior.get',
+    ).length;
     const behaviorRead = manager.getTelegramBehavior('binding-telegram-1');
-    const behaviorGet = await server.waitFor('provider.behavior.get');
+    await vi.waitFor(() =>
+      expect(
+        server.frames.filter((frame) => frame.type === 'provider.behavior.get').length,
+      ).toBeGreaterThan(behaviorGetsBefore),
+    );
+    const behaviorGet = server.frames
+      .filter((frame) => frame.type === 'provider.behavior.get')
+      .at(-1)!;
     if (behaviorGet.type !== 'provider.behavior.get') throw new Error('unreachable');
     sock.send(
       serializeHookMessage(
@@ -3513,6 +3538,35 @@ describe('多 workspace 绑定(multi-team)', () => {
     if (bind.type !== 'bind.start') throw new Error('unreachable');
     expect(bind.payload.teamId).toBe('T1');
     expect(manager.snapshot().pendingBind).toMatchObject({ state: 'pending', teamId: 'T1' });
+  });
+
+  it('重连/重启后回放带 teamId 的终止态: intent 回退为 add, 不被误判为定向重绑', async () => {
+    // 场景: 进程重启或重连使内存 pendingBind 丢失, server 回放一个 add 流
+    // 的 denied 终止态(带用户所选 team 的 teamId)。此时无法知道原发起意图,
+    // fallback 必须保守取 add —— 否则重试会 rebindTeam(teamId) 把授权页固定
+    // 到旧 workspace, 用户无法切换完成新增。
+    const { manager, sock } = await connectMulti();
+    sock.send(serializeHookMessage(makeBindState({ bindings: [T1] })));
+    await expect.poll(() => manager.snapshot().bindings.length, { timeout: 3000 }).toBe(1);
+    expect(manager.snapshot().pendingBind).toBeNull(); // 本地无在途授权(重启后)
+
+    sock.send(
+      serializeHookMessage(
+        makeBindUpdate({
+          state: 'denied',
+          slackUserId: null,
+          slackUserName: null,
+          message: 'user cancelled',
+          teamId: 'T1',
+        }),
+      ),
+    );
+    await expect
+      .poll(() => manager.snapshot().pendingBind?.state, { timeout: 3000 })
+      .toBe('denied');
+    // 关键断言: teamId 只描述冲突/所选 team, 不携带重绑意图
+    expect(manager.snapshot().pendingBind?.intent).toBe('add');
+    expect(manager.snapshot().pendingBind?.teamId).toBe('T1');
   });
 
   it('revoked(teamId, reason=superseded): 行保留标注 displaced, 不弹开关不掉线', async () => {

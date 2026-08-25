@@ -25,12 +25,13 @@ function createTurnState(): TurnState {
   };
 }
 
-function createCtx(tracker: UsageTracker) {
+function createCtx(tracker: UsageTracker, providerId: string | null = 'xd') {
   return {
     rt: newRuntimeState(),
     turn: createTurnState(),
     log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
     getModel: () => 'codex/gpt-5.5',
+    getProviderId: () => providerId,
     getEffort: () => 'high' as const,
     getPermissionMode: () => 'auto' as const,
     onSessionId: vi.fn(),
@@ -49,6 +50,47 @@ async function drain(queue: ReturnType<typeof createAsyncQueue<AgentEvent>>): Pr
 }
 
 describe('Claude Code translator is_error result guard', () => {
+  it('carries the assistant API message id into done for Vertex lag detection', async () => {
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker);
+
+    translateSdkMessage(
+      {
+        type: 'assistant',
+        message: {
+          id: 'msg_vrtx_123',
+          content: [{ type: 'text', text: '完成' }],
+        },
+      },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      {
+        type: 'result',
+        result: '完成',
+        stop_reason: 'end_turn',
+        total_cost_usd: 0,
+        usage: { input_tokens: 20_000, output_tokens: 7 },
+        modelUsage: {
+          'claude-opus-4-8': {
+            inputTokens: 20_000,
+            outputTokens: 7,
+            costUSD: 0,
+            contextWindow: 200_000,
+          },
+        },
+      },
+      queue,
+      ctx,
+    );
+
+    const events = await drain(queue);
+    const done = events.find((event) => event.type === 'done');
+    expect(done?.data).toMatchObject({ assistant_message_id: 'msg_vrtx_123' });
+  });
+
   it('surfaces a terminal error AND keeps the Done/done tail when is_error arrives without a prior envelope', async () => {
     // 原 bug 路径②: result.is_error 但 turn 内没有任何 API-error envelope → 旧实现只发
     // status Done + done, renderer 的 state.error 不置位, 失败被通知成"已完成"。
@@ -135,12 +177,51 @@ describe('Claude Code translator is_error result guard', () => {
     expect(serialized).not.toContain('secret-token');
     expect(serialized).not.toContain('hash-abc');
     expect(serialized).toContain('[REDACTED]');
+    expect(error?.data).toMatchObject({
+      reason: 'gateway-proxy-token-invalid',
+    });
     expect(JSON.stringify(ctx.log.debug.mock.calls)).not.toContain('secret-token');
     expect(JSON.stringify(ctx.log.warn.mock.calls)).not.toContain('secret-token');
     expect(ctx.log.warn).toHaveBeenCalledWith(
       'SDK ◀ turn ended with error',
       expect.objectContaining({ output: 'Authorization: [REDACTED]' }),
     );
+  });
+
+  it('does not classify a custom LiteLLM provider error as a Cindy credential failure', async () => {
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker, 'custom-litellm');
+
+    translateSdkMessage(
+      {
+        type: 'result',
+        is_error: true,
+        result:
+          'Invalid proxy server token; Unable to find token in LiteLLM_VerificationTokenTable',
+        stop_reason: 'end_turn',
+        total_cost_usd: 0,
+        usage: { input_tokens: 1, output_tokens: 0 },
+        modelUsage: {
+          'codex/gpt-5.5': {
+            inputTokens: 1,
+            outputTokens: 0,
+            costUSD: 0,
+            contextWindow: 272_000,
+          },
+        },
+      },
+      queue,
+      ctx,
+    );
+
+    const events = await drain(queue);
+    const error = events.find((event) => event.type === 'error');
+    expect(error?.data).toMatchObject({
+      message: 'Invalid proxy server token; Unable to find token in LiteLLM_VerificationTokenTable',
+      isTerminal: true,
+    });
+    expect(error?.data).not.toHaveProperty('reason');
   });
 
   it('preserves non-secret status and quota signals from a redacted terminal result', async () => {

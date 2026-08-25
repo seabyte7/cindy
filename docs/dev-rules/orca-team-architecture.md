@@ -80,8 +80,8 @@ PR #101 之后，Orca 的 main 侧业务由独立 service 承接，`register.ts`
 
 | 服务 | 文件 | 责任 |
 |---|---|---|
-| `OrcaLifecycleService` | `apps/desktop/src/main/maker-ipc/orcaLifecycleService.ts` | `start_team`、开启协同 `enableTeam`、创建 team、设置 Lead `orcaRole`、首个 worker 创建补偿 |
-| `OrcaWorkerCreationService` | `apps/desktop/src/main/maker-ipc/orcaWorkerCreationService.ts` | 既有 team 下创建 worker，统一 role/label/model/effort/fast 校验与默认值；新 Worker 的 `permissionMode` 固定为 `auto`，不继承 Lead 当前模式；创建 worker session 并写 `orca_workers` |
+| `OrcaLifecycleService` | `apps/desktop/src/main/maker-ipc/orcaLifecycleService.ts` | `start_team`、开启协同 `enableTeam`、创建 team、读取或更新 Worker 创建权限偏好、设置 Lead `orcaRole`、首个 worker 创建补偿 |
+| `OrcaWorkerCreationService` | `apps/desktop/src/main/maker-ipc/orcaWorkerCreationService.ts` | 既有 team 下创建 worker，统一 role/label/model/effort/fast 校验与默认值；新 Worker 使用 `workerCreationPrefs` 的权限偏好，不继承 Lead 当前模式；创建 worker session 并写 `orca_workers` |
 | `OrcaTeamService` | `apps/desktop/src/main/maker-ipc/orcaTeamService.ts` | 给既有 worker 派活、resume、idle、archive、terminal turn 处理与 auto-bridge |
 | `OrcaInterAgentDispatcher` | `apps/desktop/src/main/maker-ipc/orcaInterAgentDispatcher.ts` | Lead/Worker 之间的消息直发或排队、accepted callback、rollback/settle 语义 |
 
@@ -116,11 +116,44 @@ PR #101 之后，Orca 的 main 侧业务由独立 service 承接，`register.ts`
 
 `cindy_orca` 直接注册到顶层，而不是藏在 `list_tools/call_tool` 后面；模型在“开协同 / 派 worker”时需要稳定发现 `start_team/create_worker`。实现见 `packages/lizi-mcps/src/orca/server.ts` 的 `createOrcaMcpServer`、`DirectToolSink`、`OrcaMcpDeps`。
 
+Worker 权限是 **Worker 创建偏好**，与 Agent、模型、effort、Fast 的“下次创建默认值”同类，不是 Lead 权限的继承项，也不是 Team 数据库字段：
+
+- 真源是 renderer `workerCreationPrefs` localStorage；main 只保存内存镜像，应用启动和偏好变化时由 renderer 同步。
+- 没有保存过权限偏好时，产品默认是 `bypassPermissions`（Full access）；这只是可选择的初始值，不是固定模式。UI 每次创建 Worker 都可改选 `auto` 或 `bypassPermissions`，提交后成为下一次默认值；已经保存过的选择继续优先，不随产品默认值变化而改写。
+- MCP `start_team` 可显式指定 `worker_permission_mode`；省略时沿用当前偏好。显式从 `auto` 升级到 `bypassPermissions` 时，Main 必须在写入偏好或创建 Team 前等待宿主持有的用户确认，不能只依赖 MCP 审批、tool 描述或 prompt；取消／超时不得产生副作用。确认通过后才更新 main 镜像，并通知 renderer 回写同一份 localStorage。已由用户保存为 `bypassPermissions` 时，后续沿用不重复确认。
+- `create_worker` / `create_workers` 省略权限参数，统一读取当前偏好；不继承 Lead 的 `sessions.permission_mode`，也不修改已经创建的 Worker。
+- device-link 新控制端只有在被控端 capabilities 明确声明支持 Worker 权限选择时才允许开启协同；已有旧版远程 Team 继续兼容旧创建行为，不宣称或回写该端不支持的偏好。
+
 工具注册是全局可见 + handler 拒绝：
 
 - 工具可见性不是权限边界：`providers.ts` 的 `cindy_orca` provider 没有 per-role `isEnabled` gate，普通 session / worker / lead 的差异必须由 handler 和 host service 拒绝。
 - Codex 场景的真实 session 身份来自 MCP request context；`session-context.ts` 用 `AsyncLocalStorage` 提供 `withLiziMcpSessionContext` / `resolveLiziMcpSessionContext`，不能依赖全局 fallback 猜身份。
 - renderer 开启协同走 `CCAgentSessionView.tsx` 的 `requestEnableCollab`，MCP 工具通过 `cindy_orca` callback 进入同一组 service。
+- renderer 通过 UI 开启协同且填写了首个任务时，`OrcaLifecycleService.enableTeam` 复用既有
+  `initial_task` 正文，并附带 Lead session id 与按需回查说明。已有 Lead 会话继续即时派单；
+  新建任务页先用 ready placeholder 建立可恢复的 Worker agent history，但不派发用户任务；等首条
+  普通输入／目标已被宿主接受且 user history 可查询后，
+  再通过 `maker:worker:dispatch-ui-assignment` 派发同一份 `initial_task`。Desktop slash command
+  是被独立 handler 消费、不会形成普通 user history 的控制动作，因此以 command accepted
+  作为排序边界，不等待不存在的 history 行；command rejected 或普通输入／目标交付失败时
+  不派 Worker，并明确提示用户到 Worker 面板确认状态。
+- 二段派单凭据在 Lead 首条输入 accepted 前持久化；若 renderer 在 accepted 后、实际 invoke 前退出，
+  Lead 会话重新挂载并读到 user history 后会自动消费仍为 `pending` 的凭据。invoke 前先转为
+  `uncertain`，配合进程内 tombstone，保证响应丢失、重启恢复和迟到 receipt 不会自动重复派单。
+  多个窗口可能同时恢复同一条 `pending`，因此 Main 进程还要按 Lead、Worker 与快照时间建立
+  共享 claim；同一 assignment 的并发或后续请求共用第一次派发结果，最终只调用一次 Worker
+  投递。
+- Worker 侧按需查询统一走 `orca_worker_bridge.read_lead_history`：工具从已认证的
+  `worker_id + worker session` 归属反查唯一 Lead，调用方不能指定任意 session；只返回
+  `user/assistant`、排除 rewound、限制单页数量并保持 `(createdAt,rowid)` 游标分页。它不
+  create/resume Lead，也不发送消息，所以本机与 SSH Worker 都能在不唤醒 Lead 的前提下读取
+  同一份上下文。Worker 只有在任务依赖「当前工作／继续／这个 PR」等相对范围时才查询；
+  自包含任务直接执行。没有显式 Worker 任务时不会用 Lead 输入擅自起任务；该 handoff 也不
+  改写 MCP `create_worker` / `create_workers` 已由 Lead 组织好的 `initial_task`。
+- device-link 只有在被控端 capability 与本次 `enableOrca` 成功响应都证明支持 deferred
+  handoff（含 `dispatched=false` 与宿主时间戳）时才建立二段派单凭据；旧端继续即时派单，
+  并为兼容保留待发送 Lead 文本。二段派单发生隧道超时时不自动重试，也不把模糊终态说成
+  失败，避免同一任务重复执行；UI 引导用户先查看 Worker 面板。
 
 ### Codex Lead 机制
 
@@ -131,7 +164,7 @@ Codex app-server 是单例进程，多 thread 共用同一批 MCP server。Codex
 Codex `developerInstructions` 有两条投递通道。最终选择取决于本 thread 的 Responses 传输形态以及 proxy registry 是否可用，不能只按凭据类型，也不能只看请求是否进入 loopback proxy。凭据类型会参与 provider 选择，但不是 instructions 通道的最终判据；在 proxy 就绪的本地 `oauth-bearer` host 中，`cindy_gateway` 与 `cindy_openai` 的 `base_url` 都指向同一个 proxy：
 
 - `cindy_gateway`：`supports_websockets=false`，使用可解析请求正文的 HTTP Responses。proxy 就绪时，API key／gateway、`codex/` 前缀、第三方 provider，以及其它依赖正文路由或兼容改写的请求都使用这个 provider；proxy registry 通道可用时，maker-core 把启动时拼好的 instructions 按 thread 注册，再由 proxy 注入顶层 `instructions`。通道不可用时，只有满足下述 `gateway-key` 直连降级条件的会话改走原生通道。实现见 `apps/desktop/src/main/maker-host/codex-gateway-config.ts` 的 provider 装配、`packages/maker-core/src/agents/codex/index.ts` 的 `registerCodexDeveloperInstructions`，以及 `apps/desktop/src/main/maker-host/codex-proxy-host.ts` 的 `registerComposed`。
-- `cindy_openai`：只在 `oauth-bearer` host 中定义，并由官方订阅 thread 显式选择；`supports_websockets=true`，Codex 默认使用 Responses WebSocket。loopback proxy 在这条通道上只做 socket 隧道，看不到也不能改写请求正文，因此 instructions 由 `thread/start`／`thread/resume` 的原生 `developerInstructions` 承载。即使 proxy 用 426 让该 session 降级到 HTTP，也继续以原生通道为唯一投递来源，不能临时切成 registry 注入。
+- `cindy_openai`：只在 `oauth-bearer` host 中定义，并由官方订阅 thread 显式选择；`supports_websockets=true`，Codex 默认使用 Responses WebSocket。loopback proxy 在这条通道上只做 socket 隧道，看不到也不能改写请求正文，因此 instructions 由 `thread/start`／`thread/resume` 的原生 `developerInstructions` 承载。配置独立 Subagent Provider 路由时不全局关闭 WebSocket；proxy 根据 upgrade 中的 thread／subagent／parent-thread 身份，只对命中该路由的子 thread 回 426，让该子会话降到 HTTP transform，父 thread 继续使用 WebSocket。即使 proxy 用 426 让某个 session 降级到 HTTP，也继续以原生通道为唯一投递来源，不能临时切成 registry 注入。
 - proxy 不可用时不能假装 registry 仍有效：当前仅 `gateway-key` host 允许退化为直连 gateway，maker-core 会改走原生 `developerInstructions`；OAuth 与第三方凭证注入依赖 proxy，启动失败时 fail closed。
 
 任何依赖宿主追加 instructions 的能力都必须复用 `isCodexProxyChannelReady`／`useProxyChannel` 的完整判定（host proxy active、thread 非 WebSocket、registry 注册 hook 可用），为每个 thread 选择且只选择一个投递来源；禁止按 API key／OAuth 另做一套推导，也禁止为了兜底同时走两条通道。未来若要在会话运行中刷新任意上下文，设计必须分别说明 HTTP registry 与 app-server 原生通道的更新入口，以及 start／resume／compact 后如何保持一致；原生通道没有运行期更新能力时，不得宣称 WebSocket thread 支持逐请求刷新。
@@ -211,6 +244,9 @@ Worktree 现状：Orca 与普通 session 对齐，worktree 是可选项，不强
 1. **忙碌目标不丢消息（状态：不变量）**<br>
    Lead/Worker 互发消息时，如果目标 session 正在跑 turn、存在 queue lock，或刚好在派发竞态里返回 `SESSION_RUNNING`，消息必须进入输入队列，而不是丢弃或直接失败。实现指针：`orcaInterAgentDispatcher.ts` 的 `dispatchOrEnqueueOrcaInterAgentMessage`，以及 `register.ts` 的 `AgentInputCoordinator` wiring。
 
+1a. **空闲 live 直发前必须先做换窗预检（状态：不变量）**<br>
+    目标空闲且已有 live session 时，dispatcher 仍走 `session.send()`，不经过 `sendToSessionInternal()`。这条直发必须先调用与用户发送相同的 `prepareUnhealthySession`：满窗或当前进程内 `needsRollover` 锁存时关闭旧原生窗口，再 `getLiveSession`。不能把 inter-agent 消息打进应被丢弃的旧窗口。prepare → 重新取 live → send 整段必须复用 `sendToSessionInternal` 的 per-session 锁；锁已被占用时先排队，不要把 in-flight prepare 当成健康状态继续直发。没有 live 后释放锁再走 `sendToSessionInternal`，避免自己把自己排队。实现指针：`orcaInterAgentDispatcher.ts` 的 live 分支，以及 `register.ts` 注入的 `prepareUnhealthySession` / `withSendToSessionLock`。
+
 2. **accepted 才能产生运行副作用（状态：不变量）**<br>
    只有底层 send accepted 后，才能把 worker 标成 `running`、建立 auto-bridge pending 并广播 UI；dispatch 失败必须 rollback 到 accepted 前状态，且 rollback 不得覆盖已有终态。实现指针：`orcaTeamService.ts` 的 `dispatchWorkerTask` 与 `rollbackAcceptedDispatchState`。
 
@@ -249,11 +285,16 @@ Worktree 现状：Orca 与普通 session 对齐，worktree 是可选项，不强
 7. **重启后 Lead↔Worker 互访 / resume 不随开启路径变化（状态：不变量）**
    无论协同通过 `enableTeam` 自动创建首个 worker、MCP `start_team` + `create_worker`，还是 renderer 的协同按钮开启；也无论重启发生在对话中途，还是初始化完毕但 worker 尚未接过真实任务，maker 重启后 Lead 与 Worker 都必须能继续互访。`send_to_worker`、`send_to_lead`、`switch_focus` / idle resume 不能因为内存态丢失、worker link 懒登记缺失或空 worker rollout 缺失而失败。实现指针：`CCAgentSessionView.tsx` 的 `requestEnableCollab`、`packages/lizi-mcps/src/orca/server.ts` 的 `start_team` / `create_worker` 顶层注册、`xdt-helper/start_team.ts` / `create_worker.ts`、`orcaLifecycleService.ts` 的 `startTeam` / `createWorker` / `enableTeam`、`register.ts` 的 `synthesizeOrcaVendorOptionsFromDb` / `resumeOrcaWorkerSessionIfMissing`、`orcaTeamService.ts` 的 `sendToWorker`、`orca-bridge-mcp.ts` 的 worker `send_to_lead` handler。
 
+8. **被同 turn 收尾拒绝的 done 确认必须在 terminal 边界补收口（状态：不变量）**
+   worker 的回报 settle（`send_to_lead` 被接受/入队）会先把持久化状态置 `done`，而 worker 自己的 turn 可能还在收尾；renderer「看到 done 即 ack」此时会被 active-turn / send 锁守卫以 `WORKER_STATE_CHANGED` 拒绝。被这两类守卫拒绝的确认必须登记下来，在该 turn 的 `handleWorkerTerminalTurn` done 分支重试一次（fire-once，重试失败不重登记）；新 turn 开始（`handleWorkerTurnStarted`）必须作废登记。没有登记过的 done 不得在 terminal 边界自动收口——`done` 的产品语义是「保持到用户看到为止」。实现指针：`orcaTeamService.ts` 的 `deferredDoneAcknowledgements`、`idleWorker`、`handleWorkerTurnStarted`、`handleWorkerTerminalTurn`。
+
 ### 测试与回归清单
 
 当前文档要求保留以下回归方向：
 
 - Service 边界：`orcaLifecycleService`、`orcaWorkerCreationService`、`orcaTeamService` 的单测覆盖 start/enable/create/dispatch/idle/archive/auto-bridge 关键路径。
+- 空闲 live 直发：`orcaInterAgentDispatcher` 在 `session.send()` 前必须先 `prepareUnhealthySession`，再重新 `getLiveSession`；prepare 关闭旧 handle 后不得继续向旧对象 send。并发直发必须串行化到同一把 per-session 锁。
+- Worker 创建权限偏好：覆盖无保存偏好时默认 `bypassPermissions`、已保存的 `auto` / `bypassPermissions` 继续优先、MCP 显式 `auto → bypassPermissions` 必须先经用户确认且取消／超时零副作用、复用 Team 时省略不重置／显式才更新、首个与后续 Worker 都读取共享创建偏好、已有 Worker 权限不反写、renderer localStorage 启动同步与 tool 写回，以及旧 device-link 被控端被阻止开启协同并提示升级。
 - MCP 工具：`cindy_orca` 16 工具（13 team + 3 只读诊断）的 role gate、ctx 缺失、worker/main 误调用、soft/hard limit、duplicate label、budget model API mode gate；`create_workers` 另覆盖默认 hard limit、配置 hard=3、部分成功、连续失败与 hard-limit 后不再调用 host；诊断工具的纯只读语义（无 active team 时返回空 workspace、不建 team）；排队消息控制 3 工具的归属校验（跨 lead 拒绝）、非 lead 条目拒绝（`NOT_LEAD_MESSAGE`）、steering 拒绝（`MESSAGE_CONSUMING`）、撤回结清 accepted 暂存。
 - Codex MCP context：`CodexMcpThreadContextStore` 覆盖按 threadId 查 context、unknown / missing threadId fail-closed、unregister 后清理、`vendorOptions` 引用保持；`codexHttpBridge` 覆盖从 JSON-RPC `params._meta.threadId` 注入真实 session context。
 - Host 归属校验：`send_to_worker`、`idle_worker`、`archive_worker` 经共享 `resolveWorkerRef`（同时接受 worker_id / session_id 两种 id）必须以 caller 自身 Lead 身份校验，拒绝跨 workflow worker id 与 ctx 缺失；即使模型传错 id 或换用另一种 id，也不能越权操作。
@@ -307,6 +348,14 @@ Worker defaults 中单独缓存的 `providerId` 不约束从 Lead / 硬编码默
 没有 `providerId` 时也不能借用 Lead 来源，必须按当前已连接来源解析默认路由。缓存来源已失效
 或不提供该模型时，创建边界可回退搜索当前已连接来源，但最终仍必须得到精确路由或唯一
 managed 规范候选，否则在 reservation / bootstrap 前拒绝。
+
+Worker 创建边界一旦解析出实际来源，就必须把该 `providerId` 写入 Worker session；不能因为
+来源属于官方订阅或 managed 默认路由而重新清成 `null`。显式来源优先；未显式选择时，同
+agent 且提供目标模型的 Lead 来源优先，其次使用有效 Worker defaults 来源，再按同一份当前
+provider routing snapshot 解析默认来源。Lead 已绑定的同模型来源当前不可用时必须在
+reservation / bootstrap 前明确拒绝，不能静默改走 Cindy AI 或其它凭证家族；旧的 model-only
+defaults 则按当前 snapshot 解析并保存实际来源。这样 Claude Code 的 Anthropic 来源会稳定得到
+`oauth-bearer`，显式 Cindy AI / 自定义 Provider 仍保持各自路由。
 
 #### 7. Prompt / tool / MCP 注册路径必须评估 maker-core 四指标（状态：不变量）
 

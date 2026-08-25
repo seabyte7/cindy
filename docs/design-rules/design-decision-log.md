@@ -10,6 +10,45 @@
 > 2026-07-25 起 `§15` CINDY 皮肤族的决策史(红色体系重构、caret 改稿、vibrancy
 > 定稿等)已随 §15 保号重构迁入本文件,`DESIGN.md §15` 只保留现行规范。
 
+## 2026-08
+
+- **08-16** **登录：唯一 SSO 不再经过 method-choice（拍板人 = 用户）**——
+  用户已经从登录首页选了企业 SSO（组织标识探测），或邮箱 / 组织探测结果只剩
+  一条 SSO、没有个人邮箱验证码替补时，再出「选择登录方式」是假选择（截图上只剩
+  「以企业身份登录」一行）。`soleAutoStartSsoMethod` 命中后直接进入
+  `browser-redirect`。仍经过 method-choice 的：企业 SSO + 个人邮箱；多条 SSO
+  连接。跨区企业仍先 `realm-confirmation`，确认后再套同一条唯一 SSO 规则。
+  跨区「连接企业所在区域」点继续后，确认窗必须立刻消失并进入等待登录；桌面
+  renderer 在 method-choice 唯一 SSO 时改派 `start-browser`，复用既有
+  `browser-redirect` 乐观投影，不得在 main 里套住浏览器授权把确认框卡住。
+  个人邮箱探测若只剩验证码一种方式，同样不经过「以个人身份登录」假选择，直接发码。
+  （→ `DESIGN.md §16.4` method-choice 行；`packages/auth-client` `soleAutoStartSsoMethod`）
+
+- **08-03** **排版立法:字重梯改四档、桌面字号白名单建档(拍板人 = 用户,issue #1505)**——
+  本条**推翻**原 `DESIGN.md §3` 的「字重只允许 400/500、never bold」表述(§3 Principles /
+  §7 Don'ts / §9 Iteration Guide 三处同步改写)。背景:2026-08-03 全仓走查发现桌面端在无守卫
+  状态下已实际漂移——`font-semibold`(600)生产代码 ×72(含测试 ×74)、`font-bold`(700)×11、
+  `font-extrabold`(800)×1,任意值字号 `text-[Npx]` 生产代码约 549 处(含 21 处小数、
+  7 处 <10px:6×9px + 1×8.4px;计数口径 = 生产代码 occurrence,测试与注释另计);
+  而手机端 2026-07 已收敛到
+  400/500/600/700 四档 token 并有 `typographyTokenDiscipline.test.ts` 守卫。三项决策:
+  (1) **字重四档收编**:400/500/600/700,与手机端 `fontWeight` token 对齐,两端一张梯子;
+  600 收编存量 72 处 semibold(合法化、不改代码),700 只许经豁免登记表(markdown `<strong>` /
+  hljs 主题移植 / 登录品牌画布),800 清零。工程理由:桌面未设 `font-synthesis: none`,
+  PingFang 公开档位到 600,UI 用 700 会触发中文伪粗体——中文层级不得依赖 600 vs 700。
+  (2) **字号「只归写法、不动数值」**:本轮不做档位迁移,白名单 = UI 段 {10–16} + 标题段
+  {18, 20, 24, 28};只做小数吸附、<10px 升下限、任意值归 `text-<n>` token；语义别名只收编
+  `xs/sm/base/lg`，源码侧禁止 `xl` 及以上（由守卫拦截）。`theme.extend.fontSize` 中的
+  `xl..5xl` 遗留项不在配置侧删除范围，避免删除后静默回退到 Tailwind 内置固定值、失去用户字号缩放；
+  配置遗留项的清理另行处理。
+  任意值归 token 的附带修复:
+  doc 紧凑模式(`.chat-rail-compact`)按类名枚举缩字号,任意值不在枚举内会静默漏缩。
+  (3) **`LegacyMigrationDialog` 裁决**:其 23/19/17 字号是登录画布 680→490(×0.72)的缩放
+  产物而非手滑,但仍吸附回白名单(24/18/16,±1px);字重 700 归登录品牌域豁免。
+  line-height 混轨、语义类 `text-xs/sm` 机械统一等登记为 non-goals。
+  (→ `DESIGN.md §3`「字重阶梯 / 桌面 UI 字号白名单 / 排版豁免登记表 / 排版 non-goals」
+  四个新小节;施工与守卫拆四个 PR,台账 = issue #1505)
+
 ## 2026-07
 
 - **07-29** **「跳过登录」恢复过协议门 + 协议行整行热区 + 未登录态命名(拍板人 = 用户)**——

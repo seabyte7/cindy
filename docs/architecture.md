@@ -1,7 +1,7 @@
 # Cindy 客户端架构说明
 
 > 本文是对当前 Cindy 客户端仓库的架构导览，重点说明各层的职责、运行位置、数据归属与相互调用方式。
-> 内容依据当前源码、workspace `package.json`、协议 submodule 及开发规则静态核对得出。
+> 内容依据当前源码、workspace `package.json`、本地协议 package 及开发规则静态核对得出。
 >
 > **核对边界**：本文描述的是客户端仓库现状，不包含独立服务端的内部实现；本次未启动 Desktop、Mobile
 > 或真实远程设备，因此运行期、人机验收和跨端线上兼容仍需另行验证。
@@ -9,7 +9,7 @@
 ## 1. 先给结论：Cindy 是什么架构
 
 Cindy 不是把某一种模型重新实现一遍的聊天页面，而是一个以 Desktop 为执行宿主、以 Mobile 为控制端、以
-共享 package 为能力层、以协议 submodule 为跨端契约的 AI Agent 客户端。
+共享 package 为能力层、以本地协议实现及跨仓兼容契约连接各端的 AI Agent 客户端。
 
 它的核心职责是把以下对象连接起来：
 
@@ -38,7 +38,7 @@ Cindy 不是把某一种模型重新实现一遍的聊天页面，而是一个�
 | 终端层 | `apps/desktop`、`apps/mobile` | 如何展示、输入、导航和控制 | 不能把 Renderer 当成可信系统层；Mobile 不直接执行 Agent |
 | Desktop 宿主层 | `apps/desktop/src/main`、`preload` | 如何访问文件、数据库、进程、凭证、网络和 Electron | 不能把主进程能力直接暴露给网页或插件 |
 | 能力 package 层 | `packages/*` | 如何抽象 Agent、模型、远程、调度、文件、MCP 等通用能力 | 不应反向依赖 Desktop Renderer/Main |
-| 协议契约层 | `cindy-protocol/packages/*` | 客户端、服务端、relay、插件和 Mobile 之间交换什么数据 | 不能由单端私自复制或漂移 |
+| 协议契约层 | `packages/*-protocol` 与相关 validator | 客户端、服务端、relay、插件和 Mobile 之间交换什么数据 | 不能由单端私自复制或漂移 |
 | 外部执行层 | Agent CLI/SDK、SSH daemon、远程服务端 | 真正执行模型调用、工具调用、远程连接和云端业务 | 不属于本客户端仓库的可见实现 |
 
 ### 1.1 两个最重要的架构判断
@@ -56,7 +56,7 @@ Cindy 不是把某一种模型重新实现一遍的聊天页面，而是一个�
 |---|---|
 | `apps/` | 终端产品和随桌面端分发的二进制资产。当前主要是 Desktop、Mobile 与 Agent/工具 binary 包。 |
 | `packages/` | 与平台无关或由宿主注入适配器的共享能力。Desktop 是主要集成宿主，Mobile 只使用其中一部分。 |
-| `cindy-protocol/` | git submodule，客户端与服务端共用 wire protocol 的唯一权威来源。包含 device-link、模型、插件、Skill、Slack hook、voice 等协议包。 |
+| `packages/*-protocol` | 客户端本地维护的 wire protocol package；服务端在其独立仓中维护兼容实现。当前包含 device-link、插件与 Slack hook 等契约。 |
 | `config/` | 区域和环境相关的端点清单，启动早期解析，供鉴权、模型访问、device-link、更新等链路使用。 |
 | `scripts/` | 依赖、开发启动、Agent binary、端点、文档、测试和 worktree 工具。 |
 | `tools/` | Claude、Codex、ripgrep、Pi 等 Desktop runtime 的版本 pin 与更新脚本。 |
@@ -68,7 +68,7 @@ Cindy 不是把某一种模型重新实现一遍的聊天页面，而是一个�
 apps/desktop ───────────────┐
 apps/mobile ────────────────┼──> packages/*
                             │
-apps/desktop/mobile ────────┼──> cindy-protocol/packages/*
+apps/desktop/mobile ────────┼──> packages/*-protocol
                             │
 packages/* ────────────────> maker-shared / protocol / 外部 SDK（按包而定）
 
@@ -90,7 +90,7 @@ packages/* ────────────────> maker-shared / prot
 - Node.js：`>=22.12`
 - pnpm：`>=10.7 <11`
 - 当前 package manager pin：pnpm 10.33.2
-- workspace：`apps/*`、`packages/*`、`cindy-protocol/packages/*`
+- workspace：`apps/*`、`packages/*`
 
 根脚本负责把“下载依赖 / 准备 Agent binary / 启动客户端 / 运行测试 / 打包发布”串起来；产品运行时的业务
 逻辑仍在 Desktop、Mobile 和共享 package 中。
@@ -357,7 +357,7 @@ Maker/Session 契约中。
 | 模块 | 功能 |
 |---|---|
 | `@cindy/model-providers` | provider catalog、模型可见性、路由选择、OAuth/API key/source、effort/fast mode 等纯逻辑。 |
-| `@cindy/model-access-protocol` | 客户端与服务端之间的模型 catalog/registry wire types 和严格解析。 |
+| `@cindy/model-providers` | 客户端侧模型 catalog/registry 的 wire types、严格解析与路由逻辑。 |
 | `@cindy/anthropic-compat-proxy` | 本地 loopback HTTP proxy，剥离非 Anthropic 后端无法理解的 Anthropic 专属字段，让 Claude SDK 通过网关访问其它模型。 |
 | `@cindy/anthropic-responses-bridge` | Anthropic Messages 与 OpenAI Responses 的 loopback 转换，供 Claude SDK 使用 ChatGPT subscription/xAI 等 native route。 |
 | `@cindy/responses-anthropic-bridge` | 进程内 OpenAI Responses ↔ Anthropic Messages 转换。 |
@@ -394,7 +394,7 @@ Skill 是描述“工作如何完成”的可复用方法，通常由 markdown/f
 4. 对接 Skill 市场的同步、安装、发布和协议包。
 5. 将被允许的 Skill 交给 Agent 工作流；不把 Skill 本身变成任意主机权限。
 
-协议和分发契约由 `@cindy/skill-protocol` 提供。
+Skill 的协议和分发契约由 SkillHub 与相应服务端实现共同维护。
 
 ### 6.3 插件：沙箱化的富交互能力
 
@@ -488,7 +488,7 @@ Orca 的主要实现入口：
 
 device-link 分两层：
 
-1. `cindy-protocol` 的 `@cindy/device-link-protocol` 定义 relay envelope、routing、hello/presence、ping、
+1. `@cindy/device-link-protocol` 定义 relay envelope、routing、hello/presence、ping、
    link-open/accept/close、invoke/result/push 等 wire 语义。
 2. `packages/device-link` 定义客户端重连、heartbeat、IPC allowlist、topic 和 host 注入的 WebSocket client。
 
@@ -608,8 +608,8 @@ channel 的连接生命周期和 IPC。`@cindy/wechat-ilink` 是 Electron-agnost
 ### 10.3 Voice
 
 `@cindy/voice-input-core` 提供 provider-neutral 的听写状态机、润色 guard 和字典同步；Desktop 负责麦克风、
-provider、持久化和 overlay，Mobile 负责原生录音/音频和远程 voice channel。wire payload 由
-`@cindy/voice-protocol` 统一。
+provider、持久化和 overlay，Mobile 负责原生录音/音频和远程 voice channel；跨端 payload
+以对应客户端与服务端的兼容契约为准。
 
 ### 10.4 Git、Worktree 与文件浏览
 
@@ -618,20 +618,19 @@ provider、持久化和 overlay，Mobile 负责原生录音/音频和远程 voic
 - Desktop `main/git-*`、`main/worktree` 负责 snapshot、context、review、branch/worktree 等真实项目操作。
 - Renderer 只消费文件树、diff 和状态，不直接读工作目录。
 
-## 11. 协议 submodule：跨仓契约的唯一来源
+## 11. 跨端协议：本地实现与兼容契约
 
-`cindy-protocol` 不是普通依赖目录，而是客户端/服务端共享契约的版本锚点：
+协议 package 是客户端内的本地实现；服务端在独立仓维护兼容实现。客户端不再依赖协议
+submodule：两端以稳定 wire 语义、fixture 和发布协调来维持兼容。
 
 | 协议包 | 功能 |
 |---|---|
 | `@cindy/device-link-protocol` | relay envelope、路由语义、连接层 payload 和协议版本。 |
-| `@cindy/model-access-protocol` | 模型 catalog、registry、严格解析和 canonical serialization。 |
+| `packages/model-providers` | 模型 catalog、registry、严格解析和 canonical serialization。 |
 | `@cindy/plugin-protocol` | 插件 manifest 和 Desktop 插件分发契约。 |
-| `@cindy/skill-protocol` | Skill manifest 和市场分发契约。 |
 | `@cindy/slack-hook-protocol` | Slack hook server 与 Desktop 之间的双工任务协议。 |
-| `@cindy/voice-protocol` | voice session、ticket、ASR/refinement 等客户端/服务端契约。 |
 
-修改这些协议时，必须同时考虑服务端兼容、submodule 指针可公开获取、relay 与 device-link 的边界，以及旧客户端
+修改这些协议时，必须同时考虑服务端兼容、两端实现的可追溯版本、relay 与 device-link 的边界，以及旧客户端
 的降级行为。不能只在 Desktop 或 Mobile 中手工复制一套类型就认为协议已完成。
 
 ## 12. 安全边界与信任模型
@@ -777,7 +776,7 @@ DB schedule
 
 - **执行与控制分离**：Desktop 能做重执行，Mobile 能做轻控制；同一任务可以跨设备继续。
 - **Agent 可替换**：Claude Code、Codex、Pi 通过 Maker Core 共享 Session、事件和 UI 契约。
-- **协议与平台解耦**：wire contract 放在协议 submodule，平台实现放在 host，减少跨端复制。
+- **协议与平台解耦**：wire contract 放在本地 protocol package 和兼容实现中，平台实现放在 host，减少跨端复制。
 - **能力可复用**：文件、SSH、scheduler、MCP、voice、model bridge 等 package 可被不同宿主组合。
 - **安全边界清晰**：Renderer、preload、Main、插件沙箱、远程设备各自有权限边界。
 - **布局可演进**：面板以 panelKind 和布局树持久化，不必把业务身份绑定到“左栏/右栏”。
@@ -819,7 +818,7 @@ DB schedule
 | 远程与 Mobile | [`packages/device-link`](../packages/device-link/)、[`mobile DeviceLinkContext`](../apps/mobile/src/device-link/DeviceLinkContext.tsx)、[`mobileMakerTransport`](../apps/mobile/src/device-link/mobileMakerTransport.ts) |
 | Orca | [`orca-team-architecture.md`](dev-rules/orca-team-architecture.md)、`main/maker-ipc/orca*`、`packages/orca-workflow` |
 | 插件 | [`plugin-security-and-authoring.md`](dev-rules/plugin-security-and-authoring.md)、`main/cindy-brain`、`main/plugin-market`、`shared/ghost.ts` |
-| 协议 | [`protocol-and-submodules.md`](dev-rules/protocol-and-submodules.md)、[`cindy-protocol/`](../cindy-protocol/) |
+| 协议 | [`protocol-compatibility.md`](dev-rules/protocol-compatibility.md)、`packages/*-protocol` |
 | 远程适配 | [`remote-and-mobile-adaptation.md`](dev-rules/remote-and-mobile-adaptation.md) |
 | 数据/凭证 | [`database-and-migrations.md`](dev-rules/database-and-migrations.md)、[`credentials-and-local-storage.md`](dev-rules/credentials-and-local-storage.md) |
 
@@ -827,8 +826,8 @@ DB schedule
 
 Cindy 的架构主线可以压缩成一句话：
 
-> **Renderer/Mobile 表达意图，Desktop Main 持有执行权，Maker Core 统一 Agent，packages 提供可复用能力，协议
-> submodule 保证跨端契约，远程设备通过白名单和归属路由把同一项工作延续下去。**
+> **Renderer/Mobile 表达意图，Desktop Main 持有执行权，Maker Core 统一 Agent，packages 提供可复用能力，
+> 本地协议实现和跨仓兼容契约保证跨端协作，远程设备通过白名单和归属路由把同一项工作延续下去。**
 
 理解这条主线后，新增功能首先要回答三个问题：它的真实执行者是谁、数据真相在哪一端、它是否需要经过协议或
 device-link 扩展；然后再决定代码应放在 App、Main host、共享 package、protocol 还是插件/Skill 中。
