@@ -77,7 +77,10 @@ import {
   readSendFollowCancelGeneration,
   tryRequestFollowLatest,
 } from '@/components/chat/autoFollowIntent';
-import { measureComposerStackTopOffset } from '@/components/chat/messageStreamIndicatorPosition';
+import {
+  getMessageStreamIndicatorResizeTargets,
+  measureMessageStreamIndicatorClearanceOffset,
+} from '@/components/chat/messageStreamIndicatorPosition';
 import { ShareSelectionBar } from '@/components/chat/ShareSelectionBar';
 import {
   shareSelectionStore,
@@ -130,7 +133,11 @@ import {
 import { isDeviceLinkRemotePushCurrent } from '@/lib/remoteDataOwnerPushFence';
 import { canAccessBillingSettings } from '@/components/settings/billingVisibility';
 import { useDeviceProviders } from '@/hooks/useDeviceProviders';
-import { useAgentCapabilities, resolveManualCompactChannel } from '@/hooks/useAgentCapabilities';
+import {
+  canExposeWritableDirsChange,
+  resolveManualCompactChannel,
+  useAgentCapabilities,
+} from '@/hooks/useAgentCapabilities';
 import { useLiveErrorSourceProvider } from '@/hooks/useLiveErrorSourceProvider';
 import { resolveFastSupported } from '@/lib/providerModels';
 import { useRemoteSessionSync } from '@/features/cc-agent/hooks/useRemoteSessionSync';
@@ -583,6 +590,93 @@ function summarizeRunningWorkflow(taskUpdates: ReadonlyMap<string, AgentTaskUpda
 }
 
 const EMPTY_UNREAD_FAILED_RUN_IDS: string[] = [];
+
+export async function applyDirectoryGrantUpdate(input: {
+  next: string[];
+  previous: string[];
+  activate: (dirs: string[]) => Promise<unknown>;
+  refresh: () => Promise<void>;
+}): Promise<string[]> {
+  const accepted = await input.activate(input.next);
+  if (!Array.isArray(accepted) || !accepted.every((dir) => typeof dir === 'string')) {
+    // No live runtime/capability means there is no validated subset to persist.
+    // Keep the previous DB/UI truth instead of turning an unverified request
+    // into a grant that only appears after restart.
+    await input.refresh();
+    return input.previous;
+  }
+  const applied = accepted;
+  // Main validates, applies, persists, and rolls back under one session lock.
+  // Renderer only refreshes the returned accepted subset; it never performs a second DB write.
+  await input.refresh();
+  return applied;
+}
+
+type WritableDirRemovalLane = {
+  accepted: string[];
+  observed: string[];
+  pending: number;
+  tail: Promise<void>;
+};
+
+function sameDirectories(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((dir, index) => dir === right[index]);
+}
+
+/**
+ * Keep revocations for one session ordered by the last runtime-accepted grant set.
+ * ChatInput reports the removed path (rather than another render-time array snapshot),
+ * so two quick removals from [A, B] become [B] then [] instead of [B] and stale [A].
+ */
+export function createWritableDirRemovalQueue() {
+  const lanes = new Map<string, WritableDirRemovalLane>();
+
+  const getLane = (sessionId: string, observed: string[]): WritableDirRemovalLane => {
+    let lane = lanes.get(sessionId);
+    if (!lane) {
+      lane = {
+        accepted: [...observed],
+        observed: [...observed],
+        pending: 0,
+        tail: Promise.resolve(),
+      };
+      lanes.set(sessionId, lane);
+    } else if (lane.pending === 0 && !sameDirectories(lane.observed, observed)) {
+      // A committed DB/remote projection supersedes the last renderer snapshot. Do not
+      // overwrite accepted state merely because an unrelated render repeated the old prop.
+      lane.accepted = [...observed];
+      lane.observed = [...observed];
+    }
+    return lane;
+  };
+
+  return {
+    remove(input: {
+      sessionId: string;
+      path: string;
+      observed: string[];
+      apply: (next: string[], previous: string[]) => Promise<string[]>;
+    }): Promise<string[]> {
+      const lane = getLane(input.sessionId, input.observed);
+      lane.pending += 1;
+      const operation = lane.tail.then(async () => {
+        const previous = [...lane.accepted];
+        const next = previous.filter((dir) => dir !== input.path);
+        if (sameDirectories(previous, next)) return previous;
+        const accepted = await input.apply(next, previous);
+        lane.accepted = [...accepted];
+        return accepted;
+      });
+      lane.tail = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      return operation.finally(() => {
+        lane.pending -= 1;
+      });
+    },
+  };
+}
 
 export function CCAgentSessionView({
   sessionIdProp,
@@ -1279,9 +1373,9 @@ export function CCAgentSessionView({
     setOverlayEl(node);
   }, []);
   const [overlayHeight, setOverlayHeight] = useState(200);
-  const [composerStackTopOffset, setComposerStackTopOffset] = useState<number | undefined>(
-    undefined,
-  );
+  const [bottomCenterClearanceOffset, setBottomCenterClearanceOffset] = useState<
+    number | undefined
+  >(undefined);
   const [inlinePlanVisibilityState, setInlinePlanVisibilityState] = useState<{
     sessionId: string | undefined;
     value: InlinePlanVisibility | null;
@@ -1310,18 +1404,37 @@ export function CCAgentSessionView({
   useEffect(() => {
     if (!overlayEl) return;
     const measureOverlay = () => {
-      // 状态行会动态出现 / 收起，overlay 总高度不等于 composer 栈顶边。
-      // 直接量完整 composer 栈（含计划模式提示）到 overlay 底边的距离，
-      // 让消息流悬浮按钮不受状态行或输入框内部状态高度影响。
+      // 状态行会动态出现 / 收起，overlay 总高度不等于底部中央控件的避让边界。
+      // 空中央行仍以 composer 栈为锚；步骤 / 接管胶囊在场时改取中央组顶边，
+      // 让消息流悬浮按钮与它们纵向成栈，而不是共享同一块 32px 区域。
       setOverlayHeight(overlayEl.offsetHeight);
-      setComposerStackTopOffset(measureComposerStackTopOffset(overlayEl));
+      setBottomCenterClearanceOffset(measureMessageStreamIndicatorClearanceOffset(overlayEl));
     };
-    // Seed with the current height so the first paint after remount uses the
-    // real value (not the stale state from the previous mount).
-    measureOverlay();
     const ro = new ResizeObserver(measureOverlay);
-    ro.observe(overlayEl);
-    return () => ro.disconnect();
+    let observedTargets = new Set<HTMLElement>();
+    const syncResizeTargetsAndMeasure = () => {
+      const nextTargets = new Set(getMessageStreamIndicatorResizeTargets(overlayEl));
+      for (const target of observedTargets) {
+        if (!nextTargets.has(target)) ro.unobserve(target);
+      }
+      for (const target of nextTargets) {
+        if (!observedTargets.has(target)) ro.observe(target);
+      }
+      observedTargets = nextTargets;
+      measureOverlay();
+    };
+
+    // Seed with the current geometry so the first paint after remount does not
+    // reuse stale state. The plan flyout is absolutely positioned and mounts
+    // only on hover/click, so its insertion does not resize the center group;
+    // resync observed targets whenever that subtree changes.
+    syncResizeTargetsAndMeasure();
+    const mutationObserver = new MutationObserver(syncResizeTargetsAndMeasure);
+    mutationObserver.observe(overlayEl, { childList: true, subtree: true });
+    return () => {
+      mutationObserver.disconnect();
+      ro.disconnect();
+    };
   }, [overlayEl]);
 
   // F-FP-5: 点击 workingDir → 在系统文件管理器里直接打开目录(复用 shell:open-path IPC)。
@@ -1529,12 +1642,14 @@ export function CCAgentSessionView({
     retryLastError,
     continueAfterSilentStop,
     errorReason,
+    toolLoop,
     insertSystemCard,
     updateSystemCardData,
     error,
     usageLimitRecovery,
     errorIsRecoverable,
     errorRetryText,
+    disposedErrorPersistId,
     credentialSwitchWait,
     continuationInFlightClientId,
     continuationTurnClientId,
@@ -1749,6 +1864,16 @@ export function CCAgentSessionView({
   );
   // 该会话 agent 的能力(agent 级 hasFastMode + 旧被控端拍平回退用 availableModels);按 remoteDeviceId 作用域。
   const { capabilities: sessionCaps } = useAgentCapabilities(displayAgentKind, remoteDeviceId);
+  // callback 同时承载已有授权的展示/撤销，不能因远端没有安全 picker 就整块隐藏。
+  // device-link 与 SSH 都只在实际执行端明确声明 setter 能力后开放；ChatInput 另行按
+  // 文件系统来源关闭远端“新增”，因此这里开放的远端 callback 只会用于撤销。
+  const writableDirsChangeSupported =
+    canExposeWritableDirsChange({
+      capabilities: sessionCaps,
+      deviceId: remoteDeviceId,
+      remoteHostId: session?.remoteHostId,
+    }) ||
+    (session?.remoteHostId != null && sessionCaps?.writableDirs?.supported === true);
   // 这里曾有 useErrorReadAck:ErrorBanner 在视图内聚焦驻留 1.5s 即 explicit 清红点。
   // 2026-07 统一后展示不再产生已读 —— 横幅还在就说明告警未处理,红点必须留着。
   // 红角标现在只由用户处置横幅(handleRetry / handleSilentStopContinue /
@@ -1810,8 +1935,13 @@ export function CCAgentSessionView({
   }, [markCurrentUnreadFailedScheduleRun]);
   const errorTailMsg = useMemo(() => {
     const last = messages.length > 0 ? messages[messages.length - 1] : undefined;
-    return last && last.role === 'error' && !last.errorDismissed ? last : null;
-  }, [messages]);
+    return last &&
+      last.role === 'error' &&
+      !last.errorDismissed &&
+      last.clientId !== disposedErrorPersistId
+      ? last
+      : null;
+  }, [disposedErrorPersistId, messages]);
   // 队列里已有合成续跑项 = 用户已点过继续/重试、只是尚未被接受落库(排队被挡 /
   // 凭证切换等待):视为已推进,banner 抑制(review P2)—— 本地 hidden 态在重挂/
   // 重载后丢失,只看 messages 尾部时旧 error 行仍在,banner 会重现并允许对同一
@@ -2715,37 +2845,71 @@ export function CCAgentSessionView({
   }, [refreshServerSession]);
 
   // ─── Extra reference dirs(中途增删) ──────────────────────────────────────
-  // 双 IPC 协调,跟 setModel 同模式:
-  //   1. sessionService.update({ extraDirs }) → 落 DB(持久化)
-  //   2. window.electronAPI.maker.setExtraDirs(sessionId, ...) → 推 closure
-  //      (Claude / Codex 都在下一 turn 使用新值；session 已 close 时 no-op)
-  //   3. refreshServerSession → 让本视图的 session.extraDirs 同步到最新值
-  // 失败任一只 toast warn,不阻塞;乐观 UI 由 chip 数字角标已经反映。
+  // Main 在 session 锁内校验、应用、持久化并回滚；renderer 只刷新它返回的实际子集。
   const handleExtraDirsChange = useCallback(
     async (next: string[]) => {
       if (!sessionId) return;
-      // device-link 远程会话:被控端 row 不在本机库,sessionService.update 必抛(且 catch return
-      // 会连带阻断后面的 setExtraDirs)。extraDirs 在 REMOTE_PERSIST_FIELDS → 被控端 set-extra-dirs
-      // 经 dispatch persistRemoteSetting 落库 + 广播回流,所以远程只走 runtime 隧道、跳过本机 DB 写
-      // (对齐 set-permission-mode 远程分支);本机会话保持 DB + runtime 双写。
-      if (!getSessionDeviceId(sessionId)) {
-        try {
-          await sessionService.update(sessionId, { extraDirs: next });
-        } catch (err) {
-          log.warn('extraDirs DB update failed', err);
-          toast.error(t('ccAgent.layout.extraDirsSaveFailed'));
-          return;
-        }
-      }
       try {
-        await makerApiFor(sessionId).setExtraDirs(sessionId, next);
+        await applyDirectoryGrantUpdate({
+          next,
+          previous: session?.extraDirs ?? [],
+          activate: (dirs) => makerApiFor(sessionId).setExtraDirs(sessionId, dirs),
+          refresh: refreshServerSession,
+        });
       } catch (err) {
-        // 运行时推送失败不致命 — 下次 session 重启会从 DB 读新值。
-        log.warn('extraDirs closure push failed (non-fatal)', err);
+        log.warn('extraDirs update failed', err);
+        toast.error(t('ccAgent.layout.extraDirsSaveFailed'));
       }
-      await refreshServerSession();
     },
-    [sessionId, refreshServerSession, t],
+    [sessionId, session?.extraDirs, refreshServerSession, t],
+  );
+
+  const handleWritableDirsChange = useCallback(
+    async (next: string[]) => {
+      if (!sessionId) return;
+      try {
+        await applyDirectoryGrantUpdate({
+          next,
+          previous: session?.writableDirs ?? [],
+          activate: (dirs) => makerApiFor(sessionId).setWritableDirs(sessionId, dirs),
+          refresh: refreshServerSession,
+        });
+      } catch (err) {
+        log.warn('writableDirs update failed', err);
+        toast.error(t('ccAgent.layout.extraDirsSaveFailed'));
+        return;
+      }
+    },
+    [sessionId, session?.writableDirs, refreshServerSession, t],
+  );
+
+  const writableDirRemovalQueueRef = useRef<ReturnType<typeof createWritableDirRemovalQueue> | null>(
+    null,
+  );
+  const writableDirRemovalQueue =
+    (writableDirRemovalQueueRef.current ??= createWritableDirRemovalQueue());
+  const handleWritableDirRemove = useCallback(
+    async (path: string) => {
+      if (!sessionId) return;
+      try {
+        await writableDirRemovalQueue.remove({
+          sessionId,
+          path,
+          observed: session?.writableDirs ?? [],
+          apply: (next, previous) =>
+            applyDirectoryGrantUpdate({
+              next,
+              previous,
+              activate: (dirs) => makerApiFor(sessionId).setWritableDirs(sessionId, dirs),
+              refresh: refreshServerSession,
+            }),
+        });
+      } catch (err) {
+        log.warn('writableDirs removal failed', err);
+        toast.error(t('ccAgent.layout.extraDirsSaveFailed'));
+      }
+    },
+    [sessionId, session?.writableDirs, refreshServerSession, t, writableDirRemovalQueue],
   );
 
   // /issue 命令的 composer 附件不随命令 payload 走 main IPC 往返 —— AttachedFile 是
@@ -2934,6 +3098,10 @@ export function CCAgentSessionView({
               pending.onDeferredAccepted?.();
               const resumedSessionId = sessionId;
               if (resumedSessionId) {
+                requestFollowLatest(
+                  resumedSessionId,
+                  readSendFollowCancelGeneration(resumedSessionId),
+                );
                 void dispatchDeferredUiAssignment(resumedSessionId, undefined, {
                   waitForLeadHistory: false,
                 }).catch((err) => {
@@ -2969,6 +3137,7 @@ export function CCAgentSessionView({
               : undefined;
           const dispatch = pending.deliveryMode === 'steer' ? steerMessage : sendMessage;
           const followStartGeneration = readSendFollowCancelGeneration(sessionId);
+          requestFollowLatest(sessionId, followStartGeneration);
           const accepted = await dispatch(
             slashDispatch.message,
             pending.model,
@@ -3007,7 +3176,6 @@ export function CCAgentSessionView({
           );
           if (accepted) {
             pending.onDeferredAccepted?.();
-            requestFollowLatest(sessionId, followStartGeneration);
             const resumedSessionId = sessionId;
             if (resumedSessionId) {
               void dispatchDeferredUiAssignment(resumedSessionId, undefined).catch((err) => {
@@ -3067,6 +3235,7 @@ export function CCAgentSessionView({
             // path on this machine, see maker-core buildMemoryScopeKey).
             ...(remoteDeviceId ? {} : { makerMemoryEnabled: getMakerMemoryEnabled() }),
             extraDirs: session.extraDirs ?? [],
+            writableDirs: session.writableDirs ?? [],
             displayReasoning: 'summarized' as const,
             ...(session.remoteHostId ? { remoteHostId: session.remoteHostId } : {}),
             ...(session.sdkSessionId ? { resumeSessionId: session.sdkSessionId } : {}),
@@ -3152,13 +3321,20 @@ export function CCAgentSessionView({
               piRuntimeRetryDelaysMs: PI_RUNTIME_SKILL_RETRY_DELAYS_MS,
             });
       if (slashDispatch.handled) {
-        if (slashDispatch.accepted && sessionId) {
-          void dispatchDeferredUiAssignment(sessionId, undefined, {
-            waitForLeadHistory: false,
-          }).catch((err) => {
-            log.error('recover deferred Worker assignment after slash command failed', err);
-            toast.error(t('newChat.collaboration.assignmentFailed'));
-          });
+        if (slashDispatch.accepted) {
+          // Desktop commands can wait in Main long enough for draft hydration to
+          // restore the click-time command. Re-consume only that snapshot after
+          // acceptance; the callback preserves anything typed in the meantime.
+          opts?.onDeferredAccepted?.();
+          if (sessionId) {
+            requestFollowLatest(sessionId, readSendFollowCancelGeneration(sessionId));
+            void dispatchDeferredUiAssignment(sessionId, undefined, {
+              waitForLeadHistory: false,
+            }).catch((err) => {
+              log.error('recover deferred Worker assignment after slash command failed', err);
+              toast.error(t('newChat.collaboration.assignmentFailed'));
+            });
+          }
         }
         return slashDispatch.accepted;
       }
@@ -3286,6 +3462,7 @@ export function CCAgentSessionView({
       };
       if (deliveryMode === 'steer') {
         const followStartGeneration = readSendFollowCancelGeneration(sessionId);
+        if (sessionId) requestFollowLatest(sessionId, followStartGeneration);
         const accepted = await steerMessage(
           message,
           model,
@@ -3297,7 +3474,6 @@ export function CCAgentSessionView({
           sendOptions,
         );
         if (accepted && sessionId) {
-          requestFollowLatest(sessionId, followStartGeneration);
           void dispatchDeferredUiAssignment(sessionId, undefined).catch((err) => {
             log.error('recover deferred Worker assignment after user message failed', err);
             toast.error(t('newChat.collaboration.assignmentFailed'));
@@ -3306,6 +3482,7 @@ export function CCAgentSessionView({
         return accepted;
       }
       const followStartGeneration = readSendFollowCancelGeneration(sessionId);
+      if (sessionId) requestFollowLatest(sessionId, followStartGeneration);
       const accepted = await sendMessage(
         message,
         model,
@@ -3317,7 +3494,6 @@ export function CCAgentSessionView({
         sendOptions,
       );
       if (accepted && sessionId) {
-        requestFollowLatest(sessionId, followStartGeneration);
         void dispatchDeferredUiAssignment(sessionId, undefined).catch((err) => {
           log.error('recover deferred Worker assignment after user message failed', err);
           toast.error(t('newChat.collaboration.assignmentFailed'));
@@ -3697,9 +3873,10 @@ export function CCAgentSessionView({
     [sessionId, t],
   );
 
-  // delayed-create:从 NewMakerDraftRoute 经 navigate 进来的首条消息,在 session
-  // 完全 hydrate(historyLoaded + workingDir 就位)后自动 sendMessage。
-  // 一次性消费 + ref guard,防 StrictMode 双 mount / 重渲染时重复发送。
+  // delayed-create:device-link / 远程草稿,以及本机斜杠命令首条(含 Pi 空白前缀),把内容登记在
+  // pending 里,等 session 完全 hydrate 后再由 maybeDispatchDesktopSlashCommand /
+  // sendMessage 消费。本机普通文本已在草稿路由发出。一次性消费 + ref guard,防
+  // StrictMode 双 mount / 重渲染时重复发送。
   const pendingConsumedRef = useRef(false);
   useEffect(() => {
     if (!sessionId || !historyLoaded || !session) return;
@@ -3810,6 +3987,7 @@ export function CCAgentSessionView({
         // 必须 await:sendMessage 在设备离线 / 访问被撤销 / 远端 enqueue 拒绝时不抛错,
         // 而是 resolve false —— 不等它就丢副本,正文会从界面和磁盘上一起消失(codex P1)。
         const followStartGeneration = readSendFollowCancelGeneration(sessionId);
+        requestFollowLatest(sessionId, followStartGeneration);
         const delivered = await deliverRecoverableHandoff(sessionId, () =>
           sendMessage(
             pendingText,
@@ -3841,7 +4019,6 @@ export function CCAgentSessionView({
           ),
         );
         if (delivered) {
-          requestFollowLatest(sessionId, followStartGeneration);
           void dispatchDeferredUiAssignment(sessionId, deferredUiAssignment).catch((err) => {
             log.error('deferred Worker assignment after first message failed', err);
             toast.error(t('newChat.collaboration.assignmentFailed'));
@@ -4092,6 +4269,7 @@ export function CCAgentSessionView({
       workingDir={session?.workingDir ?? ''}
       messages={messages}
       historyLoaded={historyLoaded}
+      historyCleared={Boolean(session?.clearedAt)}
       taskUpdates={taskUpdates}
       isSessionStreaming={isStreaming}
       continuationTurnClientId={continuationTurnClientId}
@@ -4101,7 +4279,7 @@ export function CCAgentSessionView({
       hasMoreMessages={hasMoreMessages}
       historyWindowHasIsland={historyWindowHasIsland}
       bottomPadding={overlayHeight}
-      composerStackTopOffset={composerStackTopOffset}
+      bottomCenterClearanceOffset={bottomCenterClearanceOffset}
       contentWidth={messageWidth}
       getContentWidth={getMessageWidth}
       focusMessageClientId={focusedMessageTarget?.clientId ?? null}
@@ -4488,6 +4666,7 @@ export function CCAgentSessionView({
                 <ErrorTailErrorBanner
                   errorText={errorTailText}
                   errorReason={errorTailMsg?.errorReason}
+                  toolLoop={errorTailMsg?.toolLoop}
                   onContinue={handleErrorTailContinue}
                   onDismiss={handleErrorTailDismiss}
                   onSilentStopContinue={handleSilentStopContinue}
@@ -4547,6 +4726,7 @@ export function CCAgentSessionView({
               <ErrorBanner
                 error={error}
                 errorReason={errorReason}
+                toolLoop={toolLoop}
                 isRecoverable={errorIsRecoverable}
                 retryText={errorRetryText}
                 onRetry={handleRetry}
@@ -4792,6 +4972,14 @@ export function CCAgentSessionView({
                   vendorKey={normalizeDbAgentKind(displayAgentKind)}
                   extraDirs={session?.extraDirs ?? []}
                   onExtraDirsChange={handleExtraDirsChange}
+                  writableDirs={session?.writableDirs ?? []}
+                  writableGrantScope={sessionId}
+                  onWritableDirsChange={
+                    writableDirsChangeSupported ? handleWritableDirsChange : undefined
+                  }
+                  onWritableDirRemove={
+                    writableDirsChangeSupported ? handleWritableDirRemove : undefined
+                  }
                   compactToolbar={compactToolbar}
                   // doc rail (isCompactRail) 宽度受限 + 拖宽上限,工具行需要把字号/控件压一档。
                   denseToolbar={isCompactRail}

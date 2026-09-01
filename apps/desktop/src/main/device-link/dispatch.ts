@@ -273,13 +273,14 @@ export function setRemoteSettingsPersist(fn: RemoteSettingsPersist | null): void
 }
 
 /** set-* channel → 持久化的 session 字段名(args[0]=sessionId, args[1]=value)。 */
-const SET_CHANNEL_FIELD: Record<string, 'model' | 'effort' | 'permissionMode' | 'fastMode' | 'planModeEnabled' | 'extraDirs'> = {
+const SET_CHANNEL_FIELD: Record<string, 'model' | 'effort' | 'permissionMode' | 'fastMode' | 'planModeEnabled' | 'extraDirs' | 'writableDirs'> = {
   'maker:set-model': 'model',
   'maker:set-effort': 'effort',
   'maker:set-permission-mode': 'permissionMode',
   'maker:set-fast-mode': 'fastMode',
   'maker:set-plan-mode': 'planModeEnabled',
   'maker:set-extra-dirs': 'extraDirs',
+  'maker:set-writable-dirs': 'writableDirs',
 };
 
 async function persistRemoteSetting(channel: string, args: unknown[], result: unknown): Promise<void> {
@@ -301,6 +302,11 @@ async function persistRemoteSetting(channel: string, args: unknown[], result: un
   if (channel === 'maker:set-extra-dirs') {
     if (!Array.isArray(result)) return;
     await settingsPersist(sessionId, { extraDirs: result });
+    return;
+  }
+  if (channel === 'maker:set-writable-dirs') {
+    if (!Array.isArray(result)) return;
+    await settingsPersist(sessionId, { writableDirs: result });
     return;
   }
   // set-model 特例:可携带第 3 参 providerId(per-session 来源选择,见 register.ts SET_MODEL handler)。
@@ -361,6 +367,27 @@ function projectRoutingForDisplay(
 }
 
 /**
+ * Mobile consumes the device-link provider catalog as an executable model list. Paid-only rows are
+ * a Desktop upsell projection, not a cross-device model state: omit them and strip the v5-only
+ * availability marker so both current and independently-updated legacy Mobile clients keep the
+ * published provider model shape.
+ */
+function projectModelsForController(models: unknown): unknown {
+  if (!models || typeof models !== 'object' || Array.isArray(models)) return models;
+  return Object.fromEntries(
+    Object.entries(models as Record<string, unknown>).map(([agent, value]) => {
+      if (!Array.isArray(value)) return [agent, value];
+      const projected = value.flatMap((model) => {
+        if (!model || typeof model !== 'object' || Array.isArray(model)) return [model];
+        const { availability, ...legacyModel } = model as Record<string, unknown>;
+        return availability === 'requires_payment' ? [] : [legacyModel];
+      });
+      return [agent, projected];
+    }),
+  );
+}
+
+/**
  * 隧道返回投影:`maker:provider:list` 只回「显示用」字段——先从 provider id / upstream
  * 解析非敏感 `logoKind`,再剥掉每个 provider 的 `routing` 执行字段(upstream /
  * authStrategy / 密钥策略 / 自定义供应商 endpoint 等)。执行细节(路由 / 密钥)不出被控端
@@ -390,6 +417,7 @@ function projectInvokeResultForTunnel(
     ) {
       rest.logoKind = logoKind;
     }
+    rest.models = projectModelsForController(p.models);
     rest.routing = projectRoutingForDisplay(p.routing);
     return rest;
   });
@@ -564,6 +592,8 @@ const acceptedLinkControllers = new Set<string>();
  * DEVICE_OFFLINE 事件带 generation，旧 socket 的迟到事实不能清掉新链路。
  */
 const controllerConnectionEpochByDevice = new Map<string, number>();
+/** 同一 relay connection 内最近一次成功接受的 controller link 代次。 */
+const controllerLinkGenerationByDevice = new Map<string, number>();
 /**
  * relay presence 按 server 盖章的 deviceId 提供设备数据库展示名。它比控制端在
  * link-open / subscribe 里自报的主机名更权威，用于让被控提示与设备列表一致。
@@ -621,6 +651,13 @@ function readConnectionEpoch(client: DeviceLinkClient): number | undefined {
 function markControllerLinkActive(client: DeviceLinkClient, deviceId: string): void {
   const epoch = readConnectionEpoch(client);
   if (epoch !== undefined) controllerConnectionEpochByDevice.set(deviceId, epoch);
+  const candidate = client as DeviceLinkClient & {
+    getPeerLinkGeneration?: (peerDeviceId: string) => number;
+  };
+  const linkGeneration = candidate.getPeerLinkGeneration?.(deviceId);
+  if (linkGeneration !== undefined) {
+    controllerLinkGenerationByDevice.set(deviceId, linkGeneration);
+  }
 }
 
 /**
@@ -1540,6 +1577,7 @@ export function dropAllControllers(
   topicSubscriptionControllers.clear();
   acceptedLinkControllers.clear();
   controllerConnectionEpochByDevice.clear();
+  controllerLinkGenerationByDevice.clear();
   reportedControllerNameByDevice.clear();
   offlinePushQueue.clear();
   clearAllSessionActivityStages();
@@ -1551,21 +1589,34 @@ export function dropAllControllers(
 function deactivateControllerState(
   deviceId: string,
   observedConnectionEpoch?: number,
+  observedLinkGeneration?: number,
 ): boolean {
   const activeEpoch = controllerConnectionEpochByDevice.get(deviceId);
+  const activeLinkGeneration = controllerLinkGenerationByDevice.get(deviceId);
   if (
     observedConnectionEpoch !== undefined
     && activeEpoch !== undefined
-    && observedConnectionEpoch < activeEpoch
+    && (
+      observedConnectionEpoch < activeEpoch
+      || (
+        observedConnectionEpoch === activeEpoch
+        && observedLinkGeneration !== undefined
+        && activeLinkGeneration !== undefined
+        && observedLinkGeneration < activeLinkGeneration
+      )
+    )
   ) {
     log.debug(
-      `ignoring stale controller offline event for ${shortId(deviceId)} (event=${observedConnectionEpoch}, active=${activeEpoch})`,
+      `ignoring stale controller offline event for ${shortId(deviceId)}`
+      + ` (connection=${observedConnectionEpoch}/${activeEpoch}`
+      + ` link=${observedLinkGeneration ?? 'unknown'}/${activeLinkGeneration ?? 'unknown'})`,
     );
     return false;
   }
   let changed = false;
   changed = acceptedLinkControllers.delete(deviceId) || changed;
   changed = controllerConnectionEpochByDevice.delete(deviceId) || changed;
+  changed = controllerLinkGenerationByDevice.delete(deviceId) || changed;
   changed = reportedControllerNameByDevice.has(deviceId) || changed;
   changed = subscriptions.getControllerIds().includes(deviceId) || changed;
   clearReportedControllerName(deviceId);
@@ -1586,8 +1637,13 @@ export function deactivateController(
   deviceId: string,
   reason: string,
   observedConnectionEpoch?: number,
+  observedLinkGeneration?: number,
 ): boolean {
-  const changed = deactivateControllerState(deviceId, observedConnectionEpoch);
+  const changed = deactivateControllerState(
+    deviceId,
+    observedConnectionEpoch,
+    observedLinkGeneration,
+  );
   if (changed) {
     log.info(`controller ${shortId(deviceId)} deactivated (${reason})`);
     syncForwarding();
@@ -1602,6 +1658,7 @@ export function deactivateAllControllers(reason: string): void {
     ...topicSubscriptionControllers,
     ...acceptedLinkControllers,
     ...controllerConnectionEpochByDevice.keys(),
+    ...controllerLinkGenerationByDevice.keys(),
     ...reportedControllerNameByDevice.keys(),
   ]);
   let changed = false;
@@ -1623,6 +1680,7 @@ export function handleControllerOffline(
     deviceId,
     routeChange ? 'relay-device-offline' : 'presence-offline',
     routeChange?.connectionEpoch,
+    routeChange?.linkGeneration,
   );
 }
 
@@ -3063,6 +3121,7 @@ export const __testing = {
     topicSubscriptionControllers.clear();
     acceptedLinkControllers.clear();
     controllerConnectionEpochByDevice.clear();
+    controllerLinkGenerationByDevice.clear();
     controllerDisplayNameByDevice.clear();
     reportedControllerNameByDevice.clear();
     onSessionsSubscribed = null;
