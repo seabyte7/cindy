@@ -91,6 +91,10 @@
   或变成不可逆流程；显式用户命令即授权。Cindy 只能增加可跳过的提示和更顺畅的 GUI，不能让
   Cindy Pi 比同版本原生 Pi 更难用。完整裁决见 `docs/dev-rules/pi-harness.md`「Pi 上游 GUI
   非退化红线」。
+- 接入或修改 DSH harness（DeepSeek Harness，第四个 agent harness）相关代码前，必须先读
+  `docs/dev-rules/dsh-harness.md`。该文件目前是**尚未实施的施工方案**：协议走 ACP、
+  运行时用官方自包含可执行、DB `agent_kind` 值为 `'dsh'`、首版只做 MVP 骨架，其余能力
+  按 `CapabilityStatus` 诚实降级。实施过程中把方案逐步改写成已交付规则与维护不变量。
 - 修改插件（`.cindy`）运行时、沙箱、权限、能力 slot、面板供片、网络／凭证／文件交接，
   或身份卡、管子协议、打包与编写手册前，必须先读
   `docs/dev-rules/plugin-security-and-authoring.md`。其中**存量插件兼容是红线**：任何
