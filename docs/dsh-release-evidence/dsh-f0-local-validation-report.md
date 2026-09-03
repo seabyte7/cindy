@@ -1,8 +1,8 @@
 # DSH F0 Local Validation Report
 
-Result: **BLOCKED** — the local implementation is verified to the limits below, but the required GitHub
-source-build matrix, uploaded controlled artifacts and provenance attestations cannot exist until the current
-branch is committed and pushed. This is not an F0 PASS and does not permit F1 to begin.
+Result: **BLOCKED** — the local implementation and branch commit are verified to the limits below, but the
+required GitHub source-build matrix, uploaded controlled artifacts and provenance attestations are still absent.
+This is not an F0 PASS and does not permit F1 to begin.
 
 Date: 2026-09-03
 Issue: [#3771 — DSH: prove the Cindy-owned bridge gate](https://github.com/makecindy/cindy/issues/3771)
@@ -17,7 +17,9 @@ Validation plan: [`dsh-native-integration-validation-plan.md`](../issues/dsh-nat
   closure, exact per-platform SEA base archives, and the one-file exact-target adaptation.
 - [`dsh-source-runtime.yml`](../../.github/workflows/dsh-source-runtime.yml): archive is verified/uploaded
   before runtime execution; Linux/macOS smoke only an extracted archive; a fresh attest job re-verifies the
-  downloaded artifact; Windows is `smoke-withheld` until F2 containment.
+  downloaded artifact; Windows is `smoke-withheld` until F2 containment. It auto-runs for controlled DSH
+  changes because GitHub cannot manually dispatch a workflow before the file exists on its default branch.
+  A fork run is no-secret build/smoke evidence only: only `makecindy/cindy` can issue a trusted attestation.
 - [`dsh-source-build-release.mjs`](../../scripts/dsh-source-build-release.mjs),
   [`dsh-native-host-gate.mjs`](../../scripts/dsh-native-host-gate.mjs), and
   [`dsh-source-runtime-smoke.mjs`](../../scripts/dsh-source-runtime-smoke.mjs).
@@ -50,8 +52,11 @@ Validation plan: [`dsh-native-integration-validation-plan.md`](../issues/dsh-nat
 
 No scoped implementation defect was found in the local F0 delivery. The following are blockers, not passes:
 
-1. The GitHub workflow is not on `main`; GitHub therefore returns no workflow/runs and no provenance artifact.
-2. Linux runner evidence and all Cindy provenance attestations are absent.
+1. The initial manual dispatch was rejected because GitHub requires `workflow_dispatch` files to exist on the
+   default branch. The workflow now has a narrow automatic push/PR trigger; its first branch run and evidence
+   are pending.
+2. Linux runner evidence and all Cindy provenance attestations are absent. The current fork cannot substitute
+   its own CI identity for `makecindy/cindy`; an upstream same-repository PR or post-merge push is required.
 3. Windows runtime execution is intentionally withheld: build/archive/attestation are not runtime-smoke proof
    before F2 provides launch-time, identity-bound whole-tree containment.
 
@@ -64,7 +69,6 @@ target under the documented smoke policy — remains unproven.
 
 ## Routing and close readiness
 
-Routing: **blocked** pending explicit authorization to stage the issue-owned files, create a DCO-signed commit,
-push `docs/dsh-harness-integration-plan`, and dispatch/review the GitHub workflow. After CI finishes, rerun this
-validation report against the actual artifact digests and attestations. The issue and any future PR are **not
-close-ready**.
+Routing: **blocked** pending the path-filtered branch CI run and review of its actual artifact digests and
+attestations. After it finishes, rerun this validation report against those records. The issue and any future PR
+are **not close-ready**.

@@ -258,6 +258,12 @@ terminals、client filesystem operations、elicitation。
   轻量 tag 没有上游签名时必须明确记录，而非填造已验证签名。workflow 必须在执行生成 runtime
   **前**上传刚验证的 archive；测试只能使用从该 archive 新解出的目录；随后由不执行 runtime 的
   新 runner 再验证同一服务端 artifact 并 attestation，不能让 runtime 在 verify 与 attestation 之间改写 subject。
+- source-build workflow 必须在受控 DSH 输入、构建脚本、bridge E2E 或其 workflow 本身变更时，以
+  受限 `push` / `pull_request` path filter 自动运行，并保留 `workflow_dispatch` 供重跑。只写
+  `workflow_dispatch` 不能验证首个分支版本：GitHub 只允许调度默认分支中已存在的 workflow。
+  fork PR 可以运行无 secret 的 build/smoke，但不得请求 identity token 或创建 provenance；只有
+  官方 `makecindy/cindy` 的 push 或同仓 PR 可在独立二次验证后 attestation。fork 自己的 CI
+  identity 绝不能当作 Cindy release provenance。
 - F2 才新增 `tools/dsh/latest.json` 与 `tools/dsh/update.mjs`。它们只接受已经由 Cindy CI
   attested 的 archive pin（archive URL/SHA-256/size、可执行相对路径、sidecar、完整目录
   manifest 与 provenance reference），先校验 archive hash、再校验解压 tree；正式安装包不内置

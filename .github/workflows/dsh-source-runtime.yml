@@ -2,6 +2,50 @@ name: Build DSH source runtime
 
 on:
   workflow_dispatch:
+  # A workflow_dispatch-only release workflow cannot prove its first revision:
+  # GitHub only dispatches files that already exist on the default branch. Keep
+  # the trigger set narrow, but run the controlled build whenever its trusted
+  # inputs, build pipeline or bridge E2E contract changes.
+  pull_request:
+    paths:
+      - '.github/workflows/dsh-source-runtime.yml'
+      - 'tools/dsh/**'
+      - 'scripts/dsh-source-build-release.mjs'
+      - 'scripts/dsh-source-runtime-smoke.mjs'
+      - 'scripts/dsh-native-host-gate.mjs'
+      - 'apps/desktop/src/main/maker-host/dsh-*.ts'
+      - 'apps/desktop/src/main/maker-host/__tests__/dsh*.test.ts'
+      - 'apps/desktop/package.json'
+      - 'apps/desktop/vitest.config.*'
+      - 'apps/desktop/tsconfig*.json'
+      - 'packages/maker-core/src/agents/dsh/**'
+      - 'packages/maker-core/package.json'
+      - 'packages/maker-core/vitest.config.*'
+      - 'packages/maker-core/tsconfig*.json'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.npmrc'
+  push:
+    paths:
+      - '.github/workflows/dsh-source-runtime.yml'
+      - 'tools/dsh/**'
+      - 'scripts/dsh-source-build-release.mjs'
+      - 'scripts/dsh-source-runtime-smoke.mjs'
+      - 'scripts/dsh-native-host-gate.mjs'
+      - 'apps/desktop/src/main/maker-host/dsh-*.ts'
+      - 'apps/desktop/src/main/maker-host/__tests__/dsh*.test.ts'
+      - 'apps/desktop/package.json'
+      - 'apps/desktop/vitest.config.*'
+      - 'apps/desktop/tsconfig*.json'
+      - 'packages/maker-core/src/agents/dsh/**'
+      - 'packages/maker-core/package.json'
+      - 'packages/maker-core/vitest.config.*'
+      - 'packages/maker-core/tsconfig*.json'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.npmrc'
 
 permissions: {}
 
@@ -209,6 +253,14 @@ jobs:
 
   attest:
     name: attest ${{ matrix.platform }} controlled runtime
+    # Forks may run the no-secret build/smoke job, but their CI identity is not
+    # Cindy's release identity. Only the official repository can emit an
+    # attestation, and fork PRs within it still cannot receive an identity
+    # token or write a repository provenance statement.
+    if: >-
+      github.repository == 'makecindy/cindy' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     needs: build-and-test
     runs-on: ubuntu-24.04
     timeout-minutes: 15
