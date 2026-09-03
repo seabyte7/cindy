@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "cindy-dsh-0.1.2-alpha.3-build.1",
+  "source": {
+    "repository": "https://github.com/deepseek-ai/deepseek-harness.git",
+    "tag": "dsh-v0.1.2-alpha.3",
+    "tagKind": "lightweight",
+    "tagSignature": "not-applicable",
+    "commit": "dd6322d604e00eec1ba5e0c8541159906a21094a",
+    "tree": "86be9091c78528b5ef0866ae6d58b01d4a53582e",
+    "lockfile": {
+      "path": "pnpm-lock.yaml",
+      "sha256": "17bbd38216e31a8b821957f77d2e3f57b859046cc3a18076ad16e94ca952a8da"
+    },
+    "buildScript": {
+      "path": "scripts/build-exe-for-python-sdk.ts",
+      "sha256": "bf9061085f202d3afc25ff9208c53bc0facd3e6c50baaf1f28c36a678d620881"
+    },
+    "adaptations": [
+      {
+        "patch": {
+          "path": "tools/dsh/upstream-patches/deepseek-harness-alpha3-exact-node-target.patch",
+          "sha256": "f361e93e013864417ef17912c6f333d4a505e055e79c84211732bdc757f73d19"
+        },
+        "files": [
+          {
+            "path": "scripts/build-exe-for-python-sdk.ts",
+            "beforeSha256": "bf9061085f202d3afc25ff9208c53bc0facd3e6c50baaf1f28c36a678d620881",
+            "afterSha256": "8053640bda901c12bb9003f5943100721604c0f01f39efa97b9b79272109e957"
+          }
+        ]
+      }
+    ],
+    "packageManifest": {
+      "path": "package.json",
+      "sha256": "b31cee4e9aef1a0cdc4cd5c0dc25d5a35470aa2e8ce7ee4de1d2287010bcf88a"
+    },
+    "license": "MIT"
+  },
+  "builder": {
+    "node": "24.12.0",
+    "pnpm": "11.7.0",
+    "pnpmIntegrity": "sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==",
+    "install": [
+      "pnpm",
+      "install",
+      "--frozen-lockfile"
+    ],
+    "command": [
+      "pnpm",
+      "exec",
+      "tsx",
+      "scripts/build-exe-for-python-sdk.ts"
+    ],
+    "toolchain": {
+      "directory": "tools/dsh/pkg-toolchain",
+      "manifest": {
+        "path": "tools/dsh/pkg-toolchain/package.json",
+        "sha256": "b129230fefb4bcae88cda394752fd6c0b0c66e792bb86f447c5667280e7f45f9"
+      },
+      "lockfile": {
+        "path": "tools/dsh/pkg-toolchain/pnpm-lock.yaml",
+        "sha256": "daf197a675054fa3177ec5b238494f0763c350784b8fbc35a0ba0203fb61892c"
+      },
+      "workspace": {
+        "path": "tools/dsh/pkg-toolchain/pnpm-workspace.yaml",
+        "sha256": "f81c228426e6c70ebd551802c9559dafc6c566651b27dc28ca58d23e61b894b3"
+      },
+      "packageName": "@yao-pkg/pkg",
+      "version": "6.21.0",
+      "integrity": "sha512-dZl2C7rdwwEI4tv7WW+Cvnl+2K8OqHKUXfNQRq3mZCTC4degoFx1jA4d5wOn9d8lHrUy58xuEt1eJD0pTddW5w=="
+    }
+  },
+  "runtime": {
+    "directory": "python/sdk-runtime/src/deepseek_harness_runtime/runtime",
+    "expectedVersion": "0.1.2-alpha.3",
+    "acpHandshake": {
+      "protocolVersion": 1,
+      "agentName": "deepseek-harness-acp",
+      "agentVersion": "0.0.1",
+      "requiredSessionCapabilities": [
+        "close",
+        "list",
+        "resume"
+      ]
+    }
+  },
+  "targets": {
+    "linux-x64": {
+      "buildTarget": "node24.20.0-linux-x64",
+      "seaBase": {
+        "nodeVersion": "v24.20.0",
+        "archive": "node-v24.20.0-linux-x64.tar.gz",
+        "sha256": "855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec"
+      },
+      "executable": "deepseek-harness-sdk-runtime-linux-x64",
+      "sidecars": [
+        "deepseek-harness-sdk-runtime-linux-x64-rg"
+      ]
+    },
+    "linux-arm64": {
+      "buildTarget": "node24.20.0-linux-arm64",
+      "seaBase": {
+        "nodeVersion": "v24.20.0",
+        "archive": "node-v24.20.0-linux-arm64.tar.gz",
+        "sha256": "3515603e2487879a39bc75716f1a2affd027500c64ba50e845cf72cb33219013"
+      },
+      "executable": "deepseek-harness-sdk-runtime-linux-arm64",
+      "sidecars": [
+        "deepseek-harness-sdk-runtime-linux-arm64-rg"
+      ]
+    },
+    "darwin-arm64": {
+      "buildTarget": "node24.20.0-macos-arm64",
+      "seaBase": {
+        "nodeVersion": "v24.20.0",
+        "archive": "node-v24.20.0-darwin-arm64.tar.gz",
+        "sha256": "40e5607e5ecb3db9192723776da2d75d966260fc74a7a9e731c1bd67dda96bc8"
+      },
+      "executable": "deepseek-harness-sdk-runtime-macos-arm64",
+      "sidecars": [
+        "deepseek-harness-sdk-runtime-macos-arm64-rg",
+        "deepseek-harness-sdk-runtime-macos-arm64-spawn-helper"
+      ]
+    },
+    "win32-x64": {
+      "buildTarget": "node24.20.0-win-x64",
+      "seaBase": {
+        "nodeVersion": "v24.20.0",
+        "archive": "node-v24.20.0-win-x64.zip",
+        "sha256": "6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba"
+      },
+      "executable": "deepseek-harness-sdk-runtime-win-x64.exe",
+      "sidecars": [
+        "deepseek-harness-sdk-runtime-win-x64-rg.exe"
+      ]
+    }
+  }
+}

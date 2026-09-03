@@ -1,0 +1,248 @@
+name: Build DSH source runtime
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.platform }} source runtime
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            runtimeSmoke: true
+            e2e: true
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            runtimeSmoke: true
+            e2e: true
+          - platform: darwin-arm64
+            runner: macos-14
+            runtimeSmoke: true
+            e2e: true
+          - platform: win32-x64
+            runner: windows-2022
+            # F0 can build and attest this archive, but may not execute an
+            # untrusted runtime without the F2 launch-time Job Object gate.
+            runtimeSmoke: false
+            e2e: false
+
+    steps:
+      - name: Check out Cindy at the reviewed workflow revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set the fixed build Node runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      - name: Read the pinned source-release coordinates
+        id: release
+        shell: bash
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          const release = JSON.parse(fs.readFileSync('tools/dsh/source-release.json', 'utf8'));
+          const target = release.targets['${{ matrix.platform }}'];
+          const output = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(output, `commit=${release.source.commit}\n`);
+          fs.appendFileSync(output, `pnpm=${release.builder.pnpm}\n`);
+          fs.appendFileSync(output, `executable=${target.executable}\n`);
+          fs.appendFileSync(output, `build_target=${target.buildTarget}\n`);
+          fs.appendFileSync(output, `sea_version=${target.seaBase.nodeVersion.slice(1)}\n`);
+          fs.appendFileSync(output, `sea_archive=${target.seaBase.archive}\n`);
+          EOF
+
+      - name: Check out the immutable upstream commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ steps.release.outputs.commit }}
+          path: .dsh-upstream
+          fetch-depth: 1
+
+      - name: Verify source tag, source objects and clean checkout
+        shell: bash
+        run: node scripts/dsh-source-build-release.mjs verify-input --release tools/dsh/source-release.json --source-root .dsh-upstream
+
+      - name: Apply the reviewed Cindy exact-target adaptation
+        shell: bash
+        run: node scripts/dsh-source-build-release.mjs apply-adaptations --release tools/dsh/source-release.json --repo-root . --source-root .dsh-upstream
+
+      - name: Seed the release-verified Node SEA base archive
+        shell: bash
+        run: |
+          sea_dir="$HOME/.pkg-cache/sea"
+          archive="$sea_dir/${{ steps.release.outputs.sea_archive }}"
+          mkdir -p "$sea_dir"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$archive" \
+            "https://nodejs.org/dist/v${{ steps.release.outputs.sea_version }}/${{ steps.release.outputs.sea_archive }}"
+          node scripts/dsh-source-build-release.mjs verify-sea-base \
+            --release tools/dsh/source-release.json \
+            --target ${{ matrix.platform }} \
+            --archive "$archive"
+          : > "$archive.ok"
+
+      - name: Verify Cindy's frozen pkg build-tool closure
+        shell: bash
+        run: node scripts/dsh-source-build-release.mjs verify-toolchain --release tools/dsh/source-release.json --repo-root .
+
+      - name: Bootstrap the release-integrity-verified pnpm CLI
+        id: pnpm
+        shell: bash
+        run: |
+          bootstrap_dir="$RUNNER_TEMP/cindy-dsh-pnpm"
+          mkdir -p "$bootstrap_dir"
+          npm pack --ignore-scripts --pack-destination "$bootstrap_dir" "pnpm@${{ steps.release.outputs.pnpm }}"
+          tarball="$bootstrap_dir/pnpm-${{ steps.release.outputs.pnpm }}.tgz"
+          node scripts/dsh-source-build-release.mjs verify-pnpm-tarball \
+            --release tools/dsh/source-release.json \
+            --tarball "$tarball"
+          tar -xzf "$tarball" -C "$bootstrap_dir"
+          pnpm_cli="$bootstrap_dir/package/bin/pnpm.cjs"
+          test -f "$pnpm_cli"
+          chmod 0555 "$pnpm_cli"
+          echo "pnpm_cli=$pnpm_cli" >> "$GITHUB_OUTPUT"
+
+      - name: Install frozen Cindy pkg build-tool closure
+        working-directory: tools/dsh/pkg-toolchain
+        shell: bash
+        env:
+          # Pnpm 11 otherwise consults a packageManager field and may download a
+          # different CLI. This is only its documented Corepack-presence sentinel;
+          # the actual CLI remains the tarball verified immediately above.
+          COREPACK_ROOT: cindy-dsh-controlled-bootstrap
+        run: node "${{ steps.pnpm.outputs.pnpm_cli }}" --pm-on-fail=ignore install --frozen-lockfile
+
+      - name: Install frozen upstream build dependencies
+        working-directory: .dsh-upstream
+        shell: bash
+        env:
+          COREPACK_ROOT: cindy-dsh-controlled-bootstrap
+        run: node "${{ steps.pnpm.outputs.pnpm_cli }}" --pm-on-fail=ignore install --frozen-lockfile
+
+      - name: Reverify the reviewed exact-target adaptation before build
+        shell: bash
+        run: node scripts/dsh-source-build-release.mjs verify-adaptations --release tools/dsh/source-release.json --repo-root . --source-root .dsh-upstream
+
+      - name: Build the declared target with the upstream build script
+        working-directory: .dsh-upstream
+        shell: bash
+        env:
+          CINDY_DSH_PNPM_CLI: ${{ steps.pnpm.outputs.pnpm_cli }}
+          CINDY_DSH_PNPM_WRAPPER: ${{ github.workspace }}/tools/dsh/pnpm-dsh-build-wrapper.mjs
+          COREPACK_ROOT: cindy-dsh-controlled-bootstrap
+        run: |
+          shim_dir="$RUNNER_TEMP/cindy-dsh-pnpm-shim"
+          mkdir -p "$shim_dir"
+          printf '%s\n' '#!/usr/bin/env bash' 'exec node "$CINDY_DSH_PNPM_WRAPPER" "$@"' > "$shim_dir/pnpm"
+          chmod 0555 "$shim_dir/pnpm"
+          PATH="$shim_dir:$PATH" node "${{ steps.pnpm.outputs.pnpm_cli }}" --pm-on-fail=ignore exec tsx scripts/build-exe-for-python-sdk.ts --targets=${{ steps.release.outputs.build_target }}
+
+      - name: Reverify the fixed Node SEA base archive after build
+        shell: bash
+        run: node scripts/dsh-source-build-release.mjs verify-sea-base --release tools/dsh/source-release.json --target ${{ matrix.platform }} --archive "$HOME/.pkg-cache/sea/${{ steps.release.outputs.sea_archive }}"
+
+      - name: Package the declared runtime files into a controlled archive
+        shell: bash
+        run: node scripts/dsh-source-build-release.mjs package --release tools/dsh/source-release.json --source-root .dsh-upstream --target ${{ matrix.platform }} --output-dir out/dsh/${{ matrix.platform }}
+
+      - name: Verify the generated archive before upload
+        shell: bash
+        run: |
+          node scripts/dsh-source-build-release.mjs verify-bundle \
+            --manifest out/dsh/${{ matrix.platform }}/cindy-dsh-0.1.2-alpha.3-build.1-${{ matrix.platform }}.json \
+            --archive out/dsh/${{ matrix.platform }}/cindy-dsh-0.1.2-alpha.3-build.1-${{ matrix.platform }}.tar.gz
+
+      # Upload the exact bytes immediately after verification and before any
+      # generated runtime executes. The later attestation job receives this
+      # immutable service-side artifact in a fresh runner, so a runtime test
+      # cannot rewrite the attested subject after it was verified.
+      - name: Upload verified controlled runtime and manifest before runtime execution
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cindy-dsh-${{ matrix.platform }}
+          if-no-files-found: error
+          path: out/dsh/${{ matrix.platform }}/
+
+      - name: Extract the verified archive into an isolated test directory
+        id: extracted
+        shell: bash
+        run: |
+          runtime_dir="$RUNNER_TEMP/cindy-dsh-runtime-${{ matrix.platform }}"
+          node scripts/dsh-source-build-release.mjs extract-bundle \
+            --manifest out/dsh/${{ matrix.platform }}/cindy-dsh-0.1.2-alpha.3-build.1-${{ matrix.platform }}.json \
+            --archive out/dsh/${{ matrix.platform }}/cindy-dsh-0.1.2-alpha.3-build.1-${{ matrix.platform }}.tar.gz \
+            --output-dir "$runtime_dir"
+          echo "runtime_dir=$runtime_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Run public ACP runtime smoke on the extracted controlled archive
+        if: matrix.runtimeSmoke
+        shell: bash
+        run: node scripts/dsh-source-runtime-smoke.mjs --release tools/dsh/source-release.json --target ${{ matrix.platform }} --binary ${{ steps.extracted.outputs.runtime_dir }}/${{ steps.release.outputs.executable }}
+
+      - name: Install Cindy test dependencies for bridge E2E
+        if: matrix.e2e
+        shell: bash
+        env:
+          XDT_SKIP_AGENT_BIN_INSTALL: '1'
+          COREPACK_ROOT: cindy-dsh-controlled-bootstrap
+        run: node "${{ steps.pnpm.outputs.pnpm_cli }}" --pm-on-fail=ignore install --frozen-lockfile
+
+      - name: Run Desktop Main public-ACP end-to-end bridge suite
+        if: matrix.e2e
+        shell: bash
+        env:
+          CINDY_DSH_E2E_BINARY: ${{ steps.extracted.outputs.runtime_dir }}/${{ steps.release.outputs.executable }}
+          CINDY_DSH_E2E_PROMPT: '1'
+          COREPACK_ROOT: cindy-dsh-controlled-bootstrap
+        run: node "${{ steps.pnpm.outputs.pnpm_cli }}" --pm-on-fail=ignore --filter desktop exec vitest run src/main/maker-host/__tests__/dshControlPlane.integration.test.ts
+
+  attest:
+    name: attest ${{ matrix.platform }} controlled runtime
+    needs: build-and-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux-x64, linux-arm64, darwin-arm64, win32-x64]
+    steps:
+      - name: Check out the workflow revision for independent verification
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set the fixed verification Node runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      - name: Download the pre-runtime verified archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cindy-dsh-${{ matrix.platform }}
+          path: out/dsh/${{ matrix.platform }}
+
+      - name: Independently verify the exact attestation subject
+        shell: bash
+        run: |
+          node scripts/dsh-source-build-release.mjs verify-bundle \
+            --manifest out/dsh/${{ matrix.platform }}/cindy-dsh-0.1.2-alpha.3-build.1-${{ matrix.platform }}.json \
+            --archive out/dsh/${{ matrix.platform }}/cindy-dsh-0.1.2-alpha.3-build.1-${{ matrix.platform }}.tar.gz
+
+      - name: Attest the independently verified controlled runtime archive
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: out/dsh/${{ matrix.platform }}/cindy-dsh-0.1.2-alpha.3-build.1-${{ matrix.platform }}.tar.gz
