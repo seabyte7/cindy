@@ -19,7 +19,11 @@ import { sessionToCamel } from '../localDb/mapper';
 import { commitContextRebuild, createMessage } from '../localDb/ipc/messages.js';
 import { getMaker } from '../maker-host/index.js';
 import { createBusinessSessionId } from '../sessionIds.js';
-import { dbToMakerAgentKind, normalizeDbAgentKind } from '../../shared/agentKindConversion.js';
+import {
+  dbToMakerAgentKind,
+  normalizeDbAgentKind,
+  type DbAgentKind,
+} from '../../shared/agentKindConversion.js';
 import type { AgentMeta, Session } from '../../renderer/lib/ccAgent.types';
 import { buildHandoffText, type HandoffSourceMessage } from '../maker-ipc/agentHandoff.js';
 import {
@@ -61,8 +65,6 @@ function normalizePositiveInt(value: unknown): number {
 }
 
 const messageRowid = sql<number>`rowid`;
-
-type DbAgentKind = 'cc' | 'codex' | 'pi';
 
 interface MessagePosition {
   createdAt: number;
@@ -117,6 +119,12 @@ async function seedForkHandoffAfterSameEngineRebuild(opts: {
   providerId: string | null;
   reason: 'context-overflow' | 'pi-prompt-timeout';
 }): Promise<void> {
+  if (opts.agentKind === 'dsh') {
+    throw forkError(
+      'UNSUPPORTED_HISTORY',
+      'DSH session context rebuild is unavailable until the managed DSH host is registered',
+    );
+  }
   const handoffMessages: HandoffSourceMessage[] = opts.rows
     .filter(
       (row) =>
@@ -175,7 +183,8 @@ function parseContextRebuildBoundary(content: string): ParsedContextRebuildBound
       reason: parsed.reason,
       ...(parsed.sourceAgentKind === 'cc' ||
       parsed.sourceAgentKind === 'codex' ||
-      parsed.sourceAgentKind === 'pi'
+      parsed.sourceAgentKind === 'pi' ||
+      parsed.sourceAgentKind === 'dsh'
         ? { sourceAgentKind: parsed.sourceAgentKind }
         : {}),
       ...(typeof parsed.sourceModel === 'string' ? { sourceModel: parsed.sourceModel } : {}),
@@ -203,11 +212,15 @@ function parseAgentSwitchBoundary(content: string): ParsedAgentSwitchBoundary | 
     if (
       parsed.fromAgentKind !== 'cc' &&
       parsed.fromAgentKind !== 'codex' &&
-      parsed.fromAgentKind !== 'pi'
+      parsed.fromAgentKind !== 'pi' &&
+      parsed.fromAgentKind !== 'dsh'
     )
       return null;
     const toAgentKind =
-      parsed.toAgentKind === 'cc' || parsed.toAgentKind === 'codex' || parsed.toAgentKind === 'pi'
+      parsed.toAgentKind === 'cc' ||
+      parsed.toAgentKind === 'codex' ||
+      parsed.toAgentKind === 'pi' ||
+      parsed.toAgentKind === 'dsh'
         ? parsed.toAgentKind
         : undefined;
     return {
@@ -612,6 +625,11 @@ export async function forkSessionAtMessage(
   }
 
   const forkSource = await resolveForkNativeSource(sourceSessionId, source, target);
+  if (forkSource.agentKind === 'dsh') {
+    // DSH session/history binding is intentionally introduced by F3. Do not
+    // route it through the legacy Claude/Codex/Pi transcript fork mechanism.
+    throw forkError('UNSUPPORTED_HISTORY', 'DSH 会话暂不支持 fork');
+  }
 
   // 2.5 复制边界(exclusive)：user 不含自身；assistant 带完整 turn，到下一条 user
   // 为止。若目标片段先离场，则在 agent_switch 之前截断，不能把未来切换带进子分支。

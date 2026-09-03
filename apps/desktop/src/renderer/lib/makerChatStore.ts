@@ -9126,7 +9126,7 @@ setRemoteTerminalErrorProbe(hasSessionTerminalError);
 
 interface ActiveSessionSnapshot {
   sessionId: string;
-  agentKind: 'claude-code' | 'codex' | 'pi';
+  agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh';
   isTurnRunning: boolean;
 }
 
@@ -9135,7 +9135,12 @@ function isActiveSessionSnapshot(value: unknown): value is ActiveSessionSnapshot
   const item = value as Record<string, unknown>;
   return (
     typeof item.sessionId === 'string' &&
-    (item.agentKind === 'claude-code' || item.agentKind === 'codex' || item.agentKind === 'pi') &&
+    (
+      item.agentKind === 'claude-code'
+      || item.agentKind === 'codex'
+      || item.agentKind === 'pi'
+      || item.agentKind === 'dsh'
+    ) &&
     typeof item.isTurnRunning === 'boolean'
   );
 }
@@ -15209,8 +15214,12 @@ function mirrorSessionFields(
   // 新引擎的事件会被旧引擎 reducer 错误处理(2026-07-20 审计实锤)。随引擎翻转
   // 同步清 sdkSessionId(旧引擎的原生会话 id 对新引擎无意义,与 noteAgentSwitched
   // 口径一致)。幂等:发起窗口已 noteAgentSwitched → 同值 no-op。
-  if (patch.agentKind === 'cc' || patch.agentKind === 'codex' || patch.agentKind === 'pi') {
-    const nextKind = dbToMakerAgentKind(patch.agentKind);
+  if (
+    patch.agentKind === 'cc'
+    || patch.agentKind === 'codex'
+    || patch.agentKind === 'pi'
+  ) {
+    const nextKind = patch.agentKind === 'cc' ? 'claude-code' : patch.agentKind;
     setState(sessionId, (s) => {
       const intentApplied = s.agentSwitchIntent?.target === nextKind;
       if (s.agentKind === nextKind && !intentApplied) return s;

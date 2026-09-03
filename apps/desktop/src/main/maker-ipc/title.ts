@@ -258,7 +258,7 @@ const AUTO_TITLE_TEXT_MAX = 2000;
 /** sessionId 长度上限(UUID / cuid 都远小于此)。 */
 const SESSION_ID_MAX = 128;
 
-const TITLE_AGENT_KINDS = ['claude-code', 'codex', 'pi'] as const satisfies readonly AgentKind[];
+const TITLE_AGENT_KINDS = ['claude-code', 'codex', 'pi'] as const satisfies readonly Exclude<AgentKind, 'dsh'>[];
 
 interface GenerateTitleRequest {
   message: string;
@@ -278,11 +278,11 @@ function parseSessionId(raw: unknown, optional = false): string | undefined {
   return raw;
 }
 
-function parseAgentKind(raw: unknown): AgentKind {
-  if (!TITLE_AGENT_KINDS.includes(raw as AgentKind)) {
+function parseAgentKind(raw: unknown): Exclude<AgentKind, 'dsh'> {
+  if (!TITLE_AGENT_KINDS.includes(raw as Exclude<AgentKind, 'dsh'>)) {
     throwIpcError('INVALID_PARAMS', 'invalid agentKind');
   }
-  return raw as AgentKind;
+  return raw as Exclude<AgentKind, 'dsh'>;
 }
 
 /**
@@ -373,7 +373,7 @@ function parsePredictPromptRequest(raw: unknown): PredictPromptRequest {
   if (typeof sessionId !== 'string' || !sessionId || sessionId.length > SESSION_ID_MAX) {
     throwIpcError('INVALID_PARAMS', 'invalid or missing sessionId for predict-prompt');
   }
-  if (!TITLE_AGENT_KINDS.includes(agentKind as AgentKind)) {
+  if (!TITLE_AGENT_KINDS.includes(agentKind as Exclude<AgentKind, 'dsh'>)) {
     throwIpcError('INVALID_PARAMS', `invalid agentKind for predict-prompt: ${String(agentKind)}`);
   }
   if (typeof turnGen !== 'number' || !Number.isFinite(turnGen) || turnGen < 0) {

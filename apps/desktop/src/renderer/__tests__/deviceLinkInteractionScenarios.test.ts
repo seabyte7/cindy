@@ -1219,7 +1219,7 @@ describe('远程交互接线不变式', () => {
     expect(pushCall).toBeGreaterThan(-1);
     const pushCallBody = selBody.slice(pushCall, selEnd);
     expect(pushCallBody).toContain(
-      'agent: dbToMakerAgentKind(normalizeDbAgentKind(selection.vendor))',
+      "agent: selection.vendor === 'cc' ? 'claude-code' : selection.vendor,",
     );
     expect(pushCallBody).toContain('providerId: selection.providerId');
     expect(pushCallBody).toContain('modelId: selection.modelId');

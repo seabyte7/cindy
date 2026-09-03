@@ -17,7 +17,6 @@ import { FullAccessConfirmContent } from '@/components/new-chat/FullAccessConfir
 import { ModelSelector } from '@/components/new-chat/ModelSelector';
 import { PermissionSelector } from '@/components/new-chat/PermissionSelector';
 import { VendorSegmentedSwitcher } from '@/components/new-chat/VendorSegmentedSwitcher';
-import { agentKindToVendor } from '@/components/sidebar/VendorIcon';
 import { useAgentCapabilities } from '@/hooks/useAgentCapabilities';
 import { useDeviceProviders } from '@/hooks/useDeviceProviders';
 import { useProviders } from '@/hooks/useProviders';
@@ -340,7 +339,7 @@ export function CreateWorkerPopover({
     }
   }, [currentModel, currentModelSupportsFast, fast]);
 
-  const vendorKey = agentKindToVendor(agent);
+  const vendorKey = agent === 'claude-code' ? 'cc' : agent;
   const updateAgent = useCallback(
     (nextAgent: 'claude-code' | 'codex' | 'pi') => {
       if (nextAgent === agent) return;

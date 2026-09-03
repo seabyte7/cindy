@@ -1002,6 +1002,10 @@ export function resolveRemoteModelListStatus({
   providers: RemoteProviderLoadState;
 }): RemoteModelListStatus {
   if (!deviceId) return 'idle';
+  // DSH has a product identity in F1 but neither a model-provider catalog nor a
+  // managed host binding yet. Treating it as Pi here would show the wrong remote
+  // model list and let a user select an unusable route.
+  if (agentKind === 'dsh') return 'error';
   const required = agentKind
     ? [agentKind === 'claude-code' ? cc : agentKind === 'codex' ? codex : pi]
     : [cc, codex, pi];
@@ -1516,6 +1520,9 @@ function ModelSelectorContentView({
     // 被控端 CatalogModel.cost 拼成一个展示结果。在协议补齐前远程选择器不展示价格。
     if (deviceId) return null;
     const priceAgentKind = agentOverride ?? currentAgentKind;
+    // DSH has no model-provider catalog/price route in F1. A missing quote is
+    // intentional and must not be borrowed from another agent.
+    if (priceAgentKind === 'dsh') return null;
     const effectiveProviderId =
       providerId ??
       (priceAgentKind
@@ -2973,7 +2980,7 @@ function ModelSelectorContentView({
           <VendorSegmentedSwitcher
             value={browseVendor}
             onChange={(next) => {
-              if (next !== 'orca') void handleBrowseVendorChange(next);
+              void handleBrowseVendorChange(next);
             }}
             dense
             width={304}

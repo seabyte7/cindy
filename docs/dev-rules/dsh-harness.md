@@ -2,8 +2,8 @@
 
 > **状态：Cindy 自主控制面已裁决、legacy 对照制品已取证，当前工作树中的 F0 未注册 bridge 核心与真实二进制
 > lifecycle / prompt / owned-follow / running-turn cancel（`end_turn` / `cancelled` 终止值白名单）、真实
-> `session/request_permission` 回环（F0 一律 `cancelled`，不执行升级工具）以及有界操作 timeout 证据已交付；carrier EOF/exit 仅已证明 fail-closed `needs-reconcile`，尚未有持久恢复；产品身份、受管分发、持久 binding、
-> 事件投影、UI 和跨端能力尚未实施。** 本文是把
+> `session/request_permission` 回环（F0 一律 `cancelled`，不执行升级工具）以及有界操作 timeout 证据已交付；carrier EOF/exit 仅已证明 fail-closed `needs-reconcile`，尚未有持久恢复。F1 已交付本机 Desktop 的 `dsh` 身份闭合：DB / IPC / renderer 能保留身份，未知值拒绝，且所有执行入口仍 fail closed；受管分发、持久 binding、
+> 事件投影、可执行 UI 与跨端能力尚未实施。详见 [`dsh-f1-local-identity-closure-report.md`](../dsh-release-evidence/dsh-f1-local-identity-closure-report.md)。** 本文是把
 > [`deepseek-ai/deepseek-harness`](https://github.com/deepseek-ai/deepseek-harness)
 > 接成 Cindy 第四个 Agent harness 的施工正本。这里的“完整”不是“能发文字 prompt”，而是
 > Cindy 对 DSH task 的会话、生命周期、权限、事件、恢复和跨端投影拥有可测试的控制面，且不
@@ -376,7 +376,7 @@ create/list/resume（若 advertise）/prompt/cancel/close/EOF/exit lifecycle 和
 安全测试。若实际 ACP 能力比保守基线更少，MVP 继续收缩；若更多，也必须按第 5 节逐项开放，
 不能在一个 PR 顺手打开。runtime 缺少另一套 Host API 不构成阻塞。
 
-### 阶段 0：类型收敛（独立 PR，零行为变更）
+### 阶段 0：类型收敛（F1 已交付，仍不可执行）
 
 把 inline union 收敛到 `packages/maker-core/src/types/common.ts` 的 `AgentKind` 及
 `apps/desktop/src/shared/agentKindConversion.ts` 的 `MakerAgentKindWire` / `DbAgentKind`。
@@ -387,17 +387,22 @@ create/list/resume（若 advertise）/prompt/cancel/close/EOF/exit lifecycle 和
   不以“含 pi 的文件数”代替实际调用点清单。
 - conversion module 是唯一双向映射。历史的 `null` / `cc` 兼容可保留；新的 dsh 输入、未知
   值与二元 fallback 必须逐一审计，不能把 dsh 或非法值默默归为 Claude Code。
-- 该 PR 不新增二进制、UI 选项、DB 值或运行时注册；用 exhaustive compile-time test 和现有
-  行为 fixture 证明“零行为变更”。
+- 交付记录：`AgentKind`、事件 source、Desktop DB/IPC 转换与展示都识别 `dsh`；`null`/缺失仍是
+  唯一可落入历史 `cc` 的输入，显式未知值抛错。New Maker 和 model-provider 仍只允许已注册的
+  三种运行时，DSH 不获得隐式模型或 UI 选择项。
+- 本阶段没有新增二进制、runtime 注册、SQLite migration 或可执行产品 UI；证据与定向测试见
+  [`dsh-f1-local-identity-closure-report.md`](../dsh-release-evidence/dsh-f1-local-identity-closure-report.md)。
 
-### 阶段 1：AgentKind、DB 与受管二进制
+### 阶段 1：AgentKind、DB 与受管二进制（拆分；身份部分已完成）
 
 - `AgentKind`、model-provider、scheduler、MCP / remote 相关声明按 inventory 增 `'dsh'`。
   `sessions.agent_kind` 等无 SQLite CHECK 的字段、以及 schema 中 four 处类型 enum 都逐项核对。
   Drizzle SQLite enum 是类型提示而非 DDL 约束，因此“无需 migration”只能在确认没有数据迁移、
   CHECK、companion、历史 parser 或跨端 validator 后成立；结论须运行
   `db:validate` 和 `test:migration-replay` 证明，不能修改历史 migration。
-- 实现第 3.1 节受管二进制链、可选启动准备与 platform downgrade。`getReadyBinaryPath('dsh')`
+- F1 已完成前一项的本机 Desktop identity/decoder/explicit-unavailable 分支；没有修改 migration，
+  因现有 `agent_kind` 是无 CHECK 的 SQLite text 字段。未触及 Mobile、SSH 或远端构建。
+- 后续 F2 才实现第 3.1 节受管二进制链、可选启动准备与 platform downgrade。`getReadyBinaryPath('dsh')`
   只能返回本次 prepare 成功验证的路径；不回落用户安装、旧缓存或未经本轮验收的目录。
 - 新增 binary distribution、Cindy source-build provenance / archive extraction / manifest、unsupported platform、CDN failure
   和 sidecar 缺失测试；同步 lockfile、第三方 notices 与依赖方向检查。

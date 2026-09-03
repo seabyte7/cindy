@@ -173,7 +173,7 @@ export function ProjectChip({
 export function AgentTabs({ value, onChange, disabled }: { value: AgentKind; onChange: (v: AgentKind) => void; disabled?: boolean }) {
   return (
     <AgentSelect
-      value={agentKindToVendor(value)}
+      value={value === 'claude-code' ? 'cc' : value}
       disabled={disabled}
       side="top"
       // ScheduleFormDialog 是 Radix modal。MorphPopover 的 custom portal 不在

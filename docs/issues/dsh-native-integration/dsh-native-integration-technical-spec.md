@@ -29,12 +29,12 @@ user's `origin` fork.
 
 | 事实 | 当前证据 | 对设计的影响 |
 |---|---|---|
-| Agent identity 只有三个值 | packages/maker-core/src/types/common.ts 定义 AgentKind 为 claude-code、codex、pi | F1 必须进行全仓 exhaustive inventory，不能只改 maker-core。 |
-| Agent adapter 是显式 export | packages/maker-core/src/agents/index.ts export ClaudeCodeAgent、CodexAgent、PiAgent | 新建 agents/dsh/，通过受限 Host-injected port 注册 DshAgent。 |
-| 通用事件仍写死三个 source | packages/maker-core/src/types/events.ts 的 AgentEvent 和 AgentTaskUpdateEventData | F4 必须以有限、版本化的 generic activity 契约扩展，而不是放任 raw DSH JSON。 |
+| Agent identity 已有四个保留值 | `packages/maker-core/src/types/common.ts` 定义 `AgentKind` 为 claude-code、codex、pi、dsh；`apps/desktop/src/shared/agentKindConversion.ts` 对已存在的 dsh 严格 round-trip | F1 已完成本机 Desktop 身份闭合；未知显式值失败，不得回退。受管会话与 runtime 注册仍留给 F2/F3。 |
+| Agent adapter 是显式 export | `packages/maker-core/src/agents/index.ts` 只 export ClaudeCodeAgent、CodexAgent、PiAgent，刻意不注册 DSH adapter | F1 的 dsh 不能被 Maker 当作 Claude Code 或任一已注册 agent 运行；F3 才能经受限 Host-injected port 添加 DshAgent。 |
+| 通用事件已可保留 dsh source | `packages/maker-core/src/types/events.ts` 已加入 dsh source，但没有 DSH raw event 投影 | F4 仍必须以有限、版本化的 generic activity 契约扩展，不能放任 raw DSH JSON。 |
 | Desktop 的 native binary 管理已经存在 | apps/desktop/src/main/agent-binaries/index.ts | F2 在该边界增加 optional dsh asset；Renderer 不获得 binary path 或下载权。 |
 | Pi 已验证目录型 runtime 更新模式 | tools/pi/latest.json 与 tools/pi/update.mjs 包含平台 pin、digest、整目录 manifest 和 sidecar 检查 | tools/dsh 必须使用更严格的 fixed-source-to-controlled-archive、tree manifest 与 sidecar 校验，不能把 Pi 的平台集直接照搬。 |
-| Desktop 和 Mobile 存在大量三值 IPC/类型联合 | apps/desktop/src/preload/preload.ts、apps/mobile/src/session/newSession.ts、apps/mobile/src/session/types.ts、packages/maker-shared/src/deviceLinkContract.ts | F1 必须登记并替换每个闭合点，旧端 decoder 对 dsh 采用明确的兼容路径而不是默认值。 |
+| Desktop 与跨端存在历史三值闭合点 | `apps/desktop` 已完成其 local identity、IPC 和 renderer 路径审计；`apps/mobile` 与 device-link 没有改动 | F1 当前只证明本机 Desktop；Mobile/device-link 的 append-only 契约与旧端降级仍是 F9 的受控工作，不能由 Desktop 类型变更替代。 |
 | migration 已有历史链 | apps/desktop/drizzle/meta/_journal.json、apps/desktop/drizzle/scripts/ | DSH 只能新增 append-only migration 和回放测试，不能改写历史 migration。 |
 | SSH installer 已是独立 package | packages/maker-remote-ssh/src/bootstrap/installer.ts | F8 用独立远端 installer/forward slice，禁止本机 runtime 代替远端执行。 |
 

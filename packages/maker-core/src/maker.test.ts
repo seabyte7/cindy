@@ -92,6 +92,29 @@ describe('Maker agent status', () => {
     });
   });
 
+  it('does not substitute Claude when an unregistered DSH session is requested', async () => {
+    const claudeStart = vi.fn(async () => ({
+      id: 'unexpected-claude-handle',
+      events: async function* (): AsyncGenerator<AgentEvent> {},
+      send: async () => {},
+      close: async () => {},
+    }));
+    const maker = new Maker({
+      agents: { 'claude-code': createAgent(claudeStart, 'claude-code') },
+      storage: createStorage(),
+      logger: createLogger(),
+    });
+
+    await expect(maker.createSession({
+      id: 'dsh-unregistered',
+      agentKind: 'dsh',
+      workingDir: '/repo',
+      model: 'dsh-default',
+    })).rejects.toThrow("Agent 'dsh' is not registered");
+    expect(claudeStart).not.toHaveBeenCalled();
+    expect(maker.listAvailableAgents()).toEqual(['claude-code']);
+  });
+
   it('registers an optional agent after construction idempotently', () => {
     const maker = new Maker({
       agents: {},

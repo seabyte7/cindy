@@ -17,7 +17,7 @@ import type { ProviderView } from '@cindy/model-providers';
 import { permissionModeOrAsk } from '@cindy/maker-shared/permission-mode';
 
 import { getDbClient } from '../../localDb/client/current';
-import { normalizeDbAgentKind } from '../../../shared/agentKindConversion';
+import { dbToMakerAgentKind, normalizeDbAgentKind } from '../../../shared/agentKindConversion';
 import { sessions } from '../../localDb/schema';
 import { withSessionRouteLock } from '../../localDb/sessionRouteLock';
 import { retireDeletedPiSubagentState } from '../../localDb/ipc/piSubagentDeletion';
@@ -34,7 +34,10 @@ import type { ImOrchestratorConfig, ImSessionNamespace } from './types';
 const log = createLogger('im:repo');
 
 export function toCoreAgentKind(kind: string): AgentKind {
-  return kind === 'codex' || kind === 'pi' ? kind : 'claude-code';
+  // A persisted `dsh` identity is meaningful even before the DSH IM execution
+  // path exists. Preserve it so the caller can report that path as unavailable;
+  // never start the same task on Claude because a new kind was not recognised.
+  return dbToMakerAgentKind(kind);
 }
 
 /** core AgentKind → sessions.agentKind 列的 legacy 存储值。 */

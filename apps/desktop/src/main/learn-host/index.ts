@@ -117,6 +117,12 @@ export function startLearnHost(deps: StartLearnHostDeps): LearnController {
       // model/provider 可能已被用户停用 —— 宽松降级(丢弃被停用的来源/模型,
       // 退回默认路由),不让 /learn 因停用整体失败。
       const agentKind = originMeta?.agentKind ?? 'claude-code';
+      // Learning creates a model-routed child session. DSH has no managed host
+      // or model route in F1, so it must fail explicitly instead of borrowing
+      // the historical scheduler defaults.
+      if (agentKind === 'dsh') {
+        throw new Error('DSH learning is unavailable until the managed DSH host is registered');
+      }
       const desiredModel = originMeta?.model ?? defaultModelFor(agentKind);
       const route = await resolveLenientSessionRoute(
         agentKind,

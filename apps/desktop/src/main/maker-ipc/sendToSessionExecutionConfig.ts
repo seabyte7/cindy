@@ -3,6 +3,7 @@ import type { AgentKind, Effort } from '@cindy/maker-core';
 import {
   budgetModelRequiresApiKey,
   budgetModelRequiresApiKeyMessage,
+  type OrcaWorkerAgentKind,
   type OrcaWorkerProviderRoutingContext,
   type OrcaWorkerProviderSnapshot,
 } from './orcaWorkerCreationService.js';
@@ -36,7 +37,8 @@ export type SendToSessionExecutionConfigResult =
       errorCode:
         | 'INVALID_ARGS'
         | 'BUDGET_MODEL_REQUIRES_API_MODE'
-        | 'PROVIDER_ROUTE_UNAVAILABLE';
+        | 'PROVIDER_ROUTE_UNAVAILABLE'
+        | 'UNSUPPORTED_CAPABILITY';
       message: string;
     };
 
@@ -78,7 +80,7 @@ function normalizeEffort(params: {
   };
 }
 
-function providerRouteUnavailableMessage(agent: AgentKind, model: string): string {
+function providerRouteUnavailableMessage(agent: OrcaWorkerAgentKind, model: string): string {
   return (
     `${agent} 当前没有已连接的供应商提供模型 "${model}"，`
     + '请调整模型或在「设置 → 模型供应商」连接对应供应商后重试。'
@@ -86,7 +88,7 @@ function providerRouteUnavailableMessage(agent: AgentKind, model: string): strin
 }
 
 function routeProviderFor(params: {
-  agentKind: AgentKind;
+  agentKind: OrcaWorkerAgentKind;
   model: string;
   sourceProviderId?: string | null;
   routeChanged: boolean;
@@ -155,6 +157,13 @@ export function resolveSendToSessionExecutionConfig(params: {
 }): SendToSessionExecutionConfigResult {
   const { source, overrides } = params;
   const agentKind = overrides.agentKind ?? source.agentKind;
+  if (agentKind === 'dsh') {
+    return {
+      ok: false,
+      errorCode: 'UNSUPPORTED_CAPABILITY',
+      message: 'DSH session execution is unavailable until its managed host and model binding are registered',
+    };
+  }
   const model = overrides.model ?? source.model;
   const modelCapabilities = params.availableModels.find((candidate) => candidate.id === model);
   if (!modelCapabilities) {

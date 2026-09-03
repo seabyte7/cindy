@@ -15,7 +15,8 @@
  * 与「会话内切来源」同一口径,不在本函数重复一套。
  */
 
-import type { AgentCapabilities, AgentKind } from '@/hooks/useAgentCapabilities';
+import type { AgentCapabilities } from '@/hooks/useAgentCapabilities';
+import type { ModelProviderAgentKind } from '@cindy/model-providers';
 import type { Effort, PermissionMode } from '@/lib/userPreferences.types';
 
 /** 被控端当前草稿的原始值(maker:get-new-maker-defaults 隧道返回;字段全可选)。 */
@@ -96,7 +97,7 @@ export function resolveDeviceLinkDraftDefaults(
   capabilities: AgentCapabilities,
   remoteDraft: RemoteDraftDefaults | null,
   targetModel?: string,
-  agentKind?: AgentKind,
+  agentKind?: ModelProviderAgentKind,
 ): DeviceLinkDraftSelection {
   const models = capabilities.availableModels;
   const providerId = remoteDraft?.providerId ?? null;

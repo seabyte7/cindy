@@ -1,6 +1,6 @@
 import {
   resolveModelReferencePrice,
-  type AgentKind,
+  type ModelProviderAgentKind,
   type ModelRegistry,
 } from '@cindy/model-providers';
 
@@ -252,7 +252,8 @@ export function providerReferencePriceQuote(
   modelId: string,
   registry: ModelRegistry | null | undefined,
   options: {
-    agent?: AgentKind;
+    /** DSH has no catalog price route before its managed binding is implemented. */
+    agent?: ModelProviderAgentKind;
     inputTokens?: number;
     at?: string | Date;
     variant?: 'standard' | 'priority' | 'batch' | 'fast';
@@ -324,7 +325,7 @@ export function registryPricingCatalog(
   return catalog;
 }
 
-export function modelPricingKey(modelId: string, agent?: AgentKind): string {
+export function modelPricingKey(modelId: string, agent?: ModelProviderAgentKind): string {
   return agent ? `${modelId}\u0000${agent}` : modelId;
 }
 
@@ -332,7 +333,7 @@ export function getModelPriceQuote(
   pricing: ModelPricingCatalog | null | undefined,
   providerId: string | null | undefined,
   modelId: string,
-  agent?: AgentKind,
+  agent?: ModelProviderAgentKind,
 ): ModelPriceQuote | undefined {
   const normalizedProvider = providerId?.trim();
   const normalizedModel = modelId.trim();
@@ -388,7 +389,7 @@ export function gatewayLedgerCurrency(
 export function subscriptionDirectPriceQuote(
   modelId: string,
   registry: ModelRegistry | null | undefined,
-  agent?: AgentKind,
+  agent?: ModelProviderAgentKind,
   at?: string | Date,
 ): ModelPriceQuote | undefined {
   const routedId = exclusiveXaiCatalogModelId(modelId) ?? modelId;

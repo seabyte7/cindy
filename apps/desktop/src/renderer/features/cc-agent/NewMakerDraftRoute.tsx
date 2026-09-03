@@ -68,11 +68,6 @@ import { PromotionalGrantNotice } from '@/components/onboarding/PromotionalGrant
 import { resolveDeviceLinkSubmission } from './deviceLinkCreateArgs';
 import { commitRemoteSessionHandoff } from './remoteSessionHandoff';
 import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
-import {
-  dbToMakerAgentKind,
-  normalizeDbAgentKind,
-  type MakerAgentKindWire,
-} from '../../../shared/agentKindConversion';
 import { getBranchName } from '../../../shared/managedWorktreeBranches';
 import { AgentSelect } from '@/components/new-chat/AgentSelect';
 import { TopRightChipStack, TopRightChipStackProvider } from '@/components/chat/TopRightChipStack';
@@ -173,7 +168,7 @@ import {
   type DeferredUiAssignment,
 } from './deferredUiAssignment';
 import { CrossAgentConvertDialog } from '@/components/ui/cross-agent-convert-dialog';
-import type { MakerVendor } from '@/lib/ccAgent.types';
+import type { SelectableVendor } from '@/lib/agentVendors';
 import {
   ChevronDown,
   Code2,
@@ -266,6 +261,7 @@ import {
   isModelSelectableForNewRoute,
   providerOffersModel,
   sessionModelSupportsFastMode,
+  type ModelProviderAgentKind,
   connectedProvidersForAgent,
   type ProviderView,
 } from '@cindy/model-providers';
@@ -773,10 +769,11 @@ export function NewMakerDraftRoute() {
    * 一格。改动前把 vendor 塞进快照再在失效效应里比,切走引擎会把**上一个引擎**的锚点判失效
    * 并清掉 —— 持久化之后那等于一切引擎只能记住最后一次选择。
    */
-  const draftFavoriteAnchor = useDraftFavoriteAnchor(normalizeDbAgentKind(draft.vendor));
-  const persistedAgentKind: 'cc' | 'codex' | 'pi' = normalizeDbAgentKind(draft.vendor);
-  const authVendor: 'cc' | 'codex' | 'pi' = persistedAgentKind;
-  const capabilityAgentKind = dbToMakerAgentKind(persistedAgentKind);
+  const draftFavoriteAnchor = useDraftFavoriteAnchor(draft.vendor);
+  const persistedAgentKind = draft.vendor;
+  const authVendor = persistedAgentKind;
+  const capabilityAgentKind =
+    persistedAgentKind === 'cc' ? 'claude-code' : persistedAgentKind;
 
   // 品牌区跟随当前主题；icon / logo 的固定布局统一由 ThemeBrandLockup 负责。
   const [activeColorTheme, setActiveColorTheme] = useState<ColorTheme | null>(() =>
@@ -925,7 +922,7 @@ export function NewMakerDraftRoute() {
   const { availableVendors, loaded: availableAgentsLoaded } = useAvailableAgents(
     effectiveDeviceLinkDeviceId,
   );
-  const hiddenSwitcherVendors = useMemo<MakerVendor[]>(() => {
+  const hiddenSwitcherVendors = useMemo<SelectableVendor[]>(() => {
     if (!availableAgentsLoaded) return [];
     return (['cc', 'codex', 'pi'] as const).filter((vendor) => !availableVendors.has(vendor));
   }, [availableAgentsLoaded, availableVendors]);
@@ -1941,7 +1938,7 @@ export function NewMakerDraftRoute() {
        * 既有调用点(handleEffortDidChange / handleFastModeChange)行为不变。
        */
       target?: {
-        agent: MakerAgentKindWire;
+        agent: ModelProviderAgentKind;
         providerId: string | null;
         modelId: string;
         effort?: Effort;
@@ -2370,7 +2367,7 @@ export function NewMakerDraftRoute() {
   const handleRemoteProjectAdded = useCallback(
     async (target: RemoteProjectTarget) => {
       // vendor 由外层 VendorSegmentedSwitcher (draft.vendor) 单一决策 —— dialog 不再让用户选。
-      const draftVendor: 'cc' | 'codex' | 'pi' = normalizeDbAgentKind(draft.vendor);
+      const draftVendor = draft.vendor;
 
       if (target.kind === 'device-link') {
         // device-link:**不**像 SSH 立即建会话(会在被控端留空会话)。改为把当前草稿指向该被控
@@ -2512,7 +2509,7 @@ export function NewMakerDraftRoute() {
         carryDraftFavoriteAnchorToSession(newSession.id, draftVendor, sshModel, sshProviderId);
         if (effectivePlanMode) patchVendorPrefs(draftVendor, { planMode: false });
         makerChatStore.setSessionRuntime(newSession.id, {
-          agentKind: dbToMakerAgentKind(draftVendor),
+          agentKind: draftVendor === 'cc' ? 'claude-code' : draftVendor,
           fastMode: sshFastMode,
           planModeEnabled: effectivePlanMode,
           remoteHostId: target.hostId,
@@ -2602,7 +2599,7 @@ export function NewMakerDraftRoute() {
   // 当前 vendor 的 prefs 已由 patchActivePrefs 同步进草稿；这里只切到新 vendor。
   // ChatInput 的 initial* 由父级传入,vendor 切换后 ChatInput 重新 mount(key 变化)
   // 自动 pickup 新 vendor 的 lastByVendor 值。
-  const handleVendorChange = useCallback((next: MakerVendor) => {
+  const handleVendorChange = useCallback((next: SelectableVendor) => {
     markDefaultTupleCustomized();
     switchVendor(next);
   }, []);
@@ -2784,7 +2781,7 @@ export function NewMakerDraftRoute() {
   // 草稿** —— 写错这一格的后果不是显示难看,是首条请求路由到一个不存在的 model id。
   const handleUnifiedDraftSelect = useCallback(
     (selection: {
-      vendor: MakerVendor;
+      vendor: SelectableVendor;
       providerId: string;
       /** 选中引擎的 **wire model id**(不是行的归一化 id)。 */
       modelId: string;
@@ -2799,7 +2796,7 @@ export function NewMakerDraftRoute() {
       // uid 在当前 owner 的收藏里查不到就自动回落模型行(UnifiedModelPanel.activeFavoriteUid)。
       // 选普通模型行(favoriteUid 为 null)= 清掉该引擎的槽。
       setDraftFavoriteAnchor(
-        normalizeDbAgentKind(selection.vendor),
+        selection.vendor,
         selection.favoriteUid
           ? {
               uid: selection.favoriteUid,
@@ -2828,9 +2825,9 @@ export function NewMakerDraftRoute() {
         // 重复渲染 / 重复播种窗口一并覆盖:key 一旦被显式选择占住,后续每一帧都判成同一目标。
         // 同引擎分支 key 不变,本就不会进入重播种(同样由 controllerTouched 挡住能力刷新重校)。
         if (effectiveDeviceLinkDeviceId) {
-          dlSeedKeyRef.current = `${effectiveDeviceLinkDeviceId}:${dbToMakerAgentKind(
-            normalizeDbAgentKind(selection.vendor),
-          )}`;
+          dlSeedKeyRef.current = `${effectiveDeviceLinkDeviceId}:${
+            selection.vendor === 'cc' ? 'claude-code' : selection.vendor
+          }`;
         }
         setDlSel((prev) => {
           const previous = prev ?? deviceLinkInitial;
@@ -2877,7 +2874,7 @@ export function NewMakerDraftRoute() {
             fast: selection.fast,
           },
           {
-            agent: dbToMakerAgentKind(normalizeDbAgentKind(selection.vendor)),
+            agent: selection.vendor === 'cc' ? 'claude-code' : selection.vendor,
             providerId: selection.providerId,
             modelId: selection.modelId,
             ...(selection.effort ? { effort: selection.effort } : {}),
@@ -5337,7 +5334,7 @@ export function NewMakerDraftRoute() {
                     onEffortDidChange={handleEffortDidChange}
                     onPermissionModeDidChange={handlePermissionModeDidChange}
                     onProviderDidChange={handleProviderDidChange}
-                    vendorKey={normalizeDbAgentKind(draft.vendor)}
+                    vendorKey={draft.vendor}
                     folderPickerOpen={folderPickerOpen}
                     onFolderPickerOpenChange={handleFolderPickerOpenChange}
                     showFolderPicker={false}

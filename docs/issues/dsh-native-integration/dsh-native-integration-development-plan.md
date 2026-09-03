@@ -115,6 +115,8 @@ Rollback:
 
 ## Phase 1: Agent Identity Closure
 
+Status: **completed for the active local Desktop boundary**. Evidence: [`dsh-f1-local-identity-closure-report.md`](../../dsh-release-evidence/dsh-f1-local-identity-closure-report.md).
+
 Goal: 把 dsh 作为第四个 AgentKind 建成全仓封闭、可审计的身份，而不启用 runtime 或 UI 能力。
 
 Scope:
@@ -127,8 +129,7 @@ Scope:
 - 只注册 identity；listAvailableAgents 仍必须由 F2 handshake 控制，不能因类型存在而可创建。
 
 Changes:
-- 更新 maker-core/maker-shared/shared identity 类型与 exhaustive switch。
-- 更新 Desktop Main、preload、renderer 和 Mobile 的有界联合、显示与存量 decoder。
+- 更新 maker-core/shared identity 类型与 Desktop Main、preload、renderer 的有界联合、显示与存量 decoder。
 - 为 session reference、历史、搜索、scheduler、remote route、agent switch 与 provider lookup
   写出 dsh 的显式行为；无对应产品合同的入口返回 not-implemented。
 
@@ -138,16 +139,18 @@ Required rules:
   task-and-conversation-naming.md；涉及文案时还要 DESIGN.md 与 i18n/GLOSSARY.md。
 
 Tests:
-- 全仓 inventory assertion；各 closed union 的 dsh acceptance/unknown rejection test。
-- legacy cc/codex/pi persistence、session switch、search、scheduler、device-link decode 回归。
+- AgentKind conversion/unknown rejection、Maker unregistered failure、DB decoder、session creation/Orca
+  worker rejection、catalog route rejection和 renderer roster/glyph/state regression 已在本机通过。
+- 未修改 Mobile、SSH 或 device-link protocol，故不把它们列为 F1 验收；这些仍是后续明确授权的
+  设计项。
 - source scan 只作辅助，真正断言以 typed exhaustive fixtures 和 runtime validators 为准。
 
 Acceptance:
-- dsh 从 DB/IPC/URL/mobile payload 到 UI 始终保留身份；不支持位置说明原因。
+- 已触及的本机 Desktop DB/IPC/renderer 路径保留 dsh 身份；不支持位置返回原因或不形成 route。
 - 任意 unknown agent kind、旧 payload 或错误映射均被拒绝或标为 compatibility state，不变成 cc。
 
 Rollback:
-- 该 PR 只增加类型/保护分支且 dsh 不可用；回滚不影响既有三种 kind 的已存数据。
+- 此阶段只增加类型/保护分支且 dsh 不可用；回滚不影响既有三种 kind 的已存数据。
 
 ## Phase 2: Managed Runtime and Host Supervisor
 

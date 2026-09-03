@@ -88,6 +88,14 @@ export function registerMakerSessionCreateHandler<TSession extends MakerSessionC
       deps.warnStderr,
     );
 
+    // F1 recognises DSH at every wire boundary, but no generic Maker session
+    // may be created until F3 installs the managed host and durable binding.
+    // Reject here, before any workspace allocation, DB write, or other agent
+    // bootstrap can accidentally substitute for DSH.
+    if (o.agentKind === 'dsh') {
+      throwIpcError('UNSUPPORTED_CAPABILITY', 'DSH sessions are not available until the managed host is enabled');
+    }
+
     const run = async () => {
       let bootstrapped: Awaited<ReturnType<typeof deps.bootstrapSession>>;
       try {

@@ -1164,6 +1164,21 @@ describe('maker status IPC handlers', () => {
     });
     expect(getAgentStatus).toHaveBeenCalledWith('codex');
   });
+
+  it('recognises DSH without accepting an unknown agent name', async () => {
+    const harness = new IpcHarness();
+    const getAgentStatus = vi.fn().mockResolvedValue({ binaryReady: false, authReady: false });
+    registerMakerStatusHandlers(harness, createMakerStub({ getAgentStatus }));
+
+    await expect(harness.invoke(MAKER_INVOKE.AGENT_STATUS, 'dsh')).resolves.toEqual({
+      binaryReady: false,
+      authReady: false,
+    });
+    await expect(harness.invoke(MAKER_INVOKE.AGENT_STATUS, 'future-agent'))
+      .rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    expect(getAgentStatus).toHaveBeenCalledTimes(1);
+    expect(getAgentStatus).toHaveBeenCalledWith('dsh');
+  });
 });
 
 describe('maker usage IPC handlers', () => {

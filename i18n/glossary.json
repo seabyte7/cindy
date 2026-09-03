@@ -50,6 +50,18 @@
       "note": "用户确认并公开提交 Issue 时显示承载当前 Agent 的运行框架。五语暂统一保留英文 Harness；具体值固定使用 Claude Code、Codex、Pi 的公开全名，不使用 cc/cx/pi 等内部缩写。"
     },
     {
+      "id": "deepseek-harness",
+      "status": "proposed",
+      "en": "DeepSeek Harness",
+      "translations": {
+        "zh-CN": "DeepSeek Harness",
+        "zh-TW": "DeepSeek Harness",
+        "ja": "DeepSeek Harness",
+        "ko": "DeepSeek Harness"
+      },
+      "note": "Cindy 中 DSH agent 的用户可见专有名称。F1 仅用于身份投影和不可用状态，不表示已开放创建、模型选择或执行能力。"
+    },
+    {
       "id": "model-id",
       "status": "proposed",
       "en": "Model ID",

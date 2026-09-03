@@ -196,6 +196,18 @@ async function writeClaudeJsonlInConfigDir(
 // ── tests ──────────────────────────────────────────────────────────────────
 
 describe('forkSessionAtMessage', () => {
+  it('retains a historical DSH source long enough to reject fork explicitly', async () => {
+    selectQueue.push([makeSourceRow({ agentKind: 'dsh', sdkSessionId: 'dsh-runtime-session' })]);
+    selectQueue.push([makeMessageRow({ id: 'target-user', clientId: 'target-user' })]);
+
+    await expect(forkSessionAtMessage('src-session', 'target-user')).rejects.toMatchObject({
+      code: 'UNSUPPORTED_HISTORY',
+      message: 'DSH 会话暂不支持 fork',
+    });
+    expect(forkSdkSessionMock).not.toHaveBeenCalled();
+    expect(txCalls).toHaveLength(0);
+  });
+
   it('happy path: fork copies prior messages, calls maker.forkSdkSession with assistant uuid, seeds context snapshot', async () => {
     const target = makeMessageRow({ id: 'target-user', role: 'user', createdAt: 3000 });
     const priorAssistant = makeMessageRow({

@@ -1703,10 +1703,8 @@ describe('Shared create project picker', () => {
       newMakerDraftRouteSource.indexOf('// ─── 用户改 workingDir'),
     );
     // 选择侧:同一构造,agent 一维换成**目标引擎**(selection.vendor),且必须在 setDlSel 之前。
-    expect(unified).toContain(
-      'dlSeedKeyRef.current = `${effectiveDeviceLinkDeviceId}:${dbToMakerAgentKind(',
-    );
-    expect(unified).toContain('normalizeDbAgentKind(selection.vendor),');
+    expect(unified).toContain('dlSeedKeyRef.current = `${effectiveDeviceLinkDeviceId}:${');
+    expect(unified).toContain("selection.vendor === 'cc' ? 'claude-code' : selection.vendor");
     expect(unified.indexOf('dlSeedKeyRef.current =')).toBeLessThan(
       unified.indexOf('setDlSel((prev) => {'),
     );

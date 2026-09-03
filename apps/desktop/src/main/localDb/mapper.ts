@@ -42,6 +42,7 @@ import type {
   PreRunHookRunResult,
 } from '@cindy/maker-scheduler';
 import { normalizeSessionSource } from '../../shared/sessionSource.js';
+import { normalizeDbAgentKind } from '../../shared/agentKindConversion.js';
 import { normalizeWorkingDirForStorage } from '../../shared/workingDir.js';
 import { isSyntheticTriggerText } from '../../shared/interruptedTurn.js';
 import {
@@ -234,7 +235,7 @@ export function sessionToCamel(row: SessionRowWithCount): Session {
     clearedAt: msToIso(row.clearedAt),
     pinnedAt: msToIso(row.pinnedAt),
     userSendAt: msToIso(row.userSendAt),
-    agentKind: row.agentKind as AgentKind,
+    agentKind: normalizeDbAgentKind(row.agentKind) as AgentKind,
     source: normalizeSessionSource(row.source),
     orcaRole: row.orcaRole as OrcaRole | null,
     parentSessionId: row.parentSessionId,
@@ -294,7 +295,7 @@ export function messageToCamel(row: MessageRow): Message {
     content,
     toolUseId: row.toolUseId,
     agentMeta,
-    agentKind: (row.agentKind as 'cc' | 'codex' | 'pi' | null) ?? null,
+    agentKind: row.agentKind === null ? null : normalizeDbAgentKind(row.agentKind),
     createdAt: new Date(row.createdAt).toISOString(),
   };
 }
@@ -366,7 +367,7 @@ export function sessionCreateToRow(
     clearedAt: null,
     pinnedAt: null,
     userSendAt: null,
-    agentKind: body?.agentKind ?? 'cc',
+    agentKind: normalizeDbAgentKind(body?.agentKind),
     orcaRole: body?.orcaRole ?? null,
     parentSessionId: body?.parentSessionId ?? null,
     forkedAtMessageId: body?.forkedAtMessageId ?? null,
@@ -454,7 +455,7 @@ export function messageCreateToRow(
     content: unknown;
     toolUseId?: string;
     agentMeta?: AgentMeta | null;
-    agentKind?: 'cc' | 'codex' | 'pi' | null;
+    agentKind?: 'cc' | 'codex' | 'pi' | 'dsh' | null;
     createdAt?: number;
   },
   now: number,
@@ -470,7 +471,9 @@ export function messageCreateToRow(
       body.agentMeta === undefined || body.agentMeta === null
         ? null
         : safeStringify(body.agentMeta),
-    agentKind: body.agentKind ?? null,
+    agentKind: body.agentKind === undefined || body.agentKind === null
+      ? null
+      : normalizeDbAgentKind(body.agentKind),
     createdAt: body.createdAt ?? now,
   };
 }

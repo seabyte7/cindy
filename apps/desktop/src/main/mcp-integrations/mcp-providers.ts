@@ -411,7 +411,7 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
             || model !== undefined
             || effort !== undefined
             || fast !== undefined;
-          return await svc.sendToSession({
+          const result = await svc.sendToSession({
             targetSessionId,
             message,
             dispatcherSessionId,
@@ -429,6 +429,35 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
                 }
               : {}),
           });
+          // The helper tool has no DSH worker contract in F1. A persisted DSH
+          // target must remain DSH and fail closed, never be projected as one
+          // of the three legacy worker engines.
+          if (result.ok && result.agentKind === 'dsh') {
+            return {
+              ok: false,
+              errorCode: 'UNSUPPORTED_CAPABILITY' as const,
+              message: 'DSH send_to_session is unavailable until the managed DSH host is registered',
+            };
+          }
+          if (!result.ok) return result;
+          if (
+            result.agentKind !== 'claude-code' &&
+            result.agentKind !== 'codex' &&
+            result.agentKind !== 'pi'
+          ) {
+            return {
+              ok: false,
+              errorCode: 'UNSUPPORTED_CAPABILITY' as const,
+              message: 'The target agent cannot be used as an Orca worker',
+            };
+          }
+          // Re-project the success payload after the DSH guard so the MCP
+          // contract cannot widen its worker-agent union by accident.
+          const workerAgentKind: import('@cindy/mcps').ControlWorkerAgent = result.agentKind;
+          return {
+            ...result,
+            agentKind: workerAgentKind,
+          };
         } catch (err) {
           return { ok: false, errorCode: 'INTERNAL', message: err instanceof Error ? err.message : String(err) };
         }

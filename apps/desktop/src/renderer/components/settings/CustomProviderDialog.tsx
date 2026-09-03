@@ -91,7 +91,7 @@ import {
   sortPresetsForRegion,
 } from '@cindy/model-providers';
 import type {
-  AgentKind,
+  ModelProviderAgentKind,
   CustomProviderConfig,
   PiModelApi,
   ProviderPreset,
@@ -109,7 +109,7 @@ import {
  * 本面板配置 claude / codex / pi 三个 runtime。pi 是多协议 harness:BYOM 自定义/本地模型
  * 走 pi 原生 provider 直连(不过 anthropic-compat 代理),故 pi tab 额外提供显式 api 选择器。
  */
-type DialogAgentKind = Extract<AgentKind, 'claude-code' | 'codex' | 'pi'>;
+type DialogAgentKind = ModelProviderAgentKind;
 
 const AGENTS: DialogAgentKind[] = ['claude-code', 'codex', 'pi'];
 
@@ -1484,7 +1484,7 @@ export function CustomProviderDialog({
     for (const [draftKey, draftText] of Object.entries(windowDrafts)) {
       if (isCommittableWindowText(draftText)) continue;
       const sep = draftKey.lastIndexOf(':');
-      const draftAgent = draftKey.slice(0, sep) as AgentKind;
+      const draftAgent = draftKey.slice(0, sep) as ModelProviderAgentKind;
       if (!VISIBLE_AGENTS.includes(draftAgent)) continue;
       // 该 runtime 未配置 baseUrl、或该行 id/name 为空:两者都会在下面序列化时
       // 被丢弃,不会写进最终配置,草稿再非法也不该挡住一个原本有效的保存

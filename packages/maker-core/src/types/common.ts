@@ -5,7 +5,11 @@
  * 故意保持兼容以便 desktop adapter 层零代码翻译。
  */
 
-export type AgentKind = 'claude-code' | 'codex' | 'pi';
+/**
+ * Product agent identity. A value may be known but unavailable when its host
+ * adapter has not been registered; callers must not substitute another agent.
+ */
+export type AgentKind = 'claude-code' | 'codex' | 'pi' | 'dsh';
 export type WorkspaceKind = 'project' | 'dialogue';
 
 /**

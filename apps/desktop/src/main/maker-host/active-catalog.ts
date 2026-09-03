@@ -31,6 +31,7 @@ import {
   buildUserProvider,
   findModelRegistryRoute,
   type AgentKind,
+  type ModelProviderAgentKind,
   type Catalog,
   type CatalogCapabilityEvidence,
   type CatalogXdMediaKind,
@@ -163,7 +164,8 @@ export interface XdGatewayModelInfo {
   cacheReadInputTokenCost?: number;
   cacheCreationInputTokenCost?: number;
   /** 进哪些 runtime tab；v3 由服务端完整下发。 */
-  agents?: AgentKind[];
+  /** Gateway models are only materialized for catalog-routable agents. */
+  agents?: ModelProviderAgentKind[];
   name?: string;
   group?: string;
   description?: string;
@@ -356,7 +358,7 @@ function resolveXdPiGatewayModelApi(model: XdGatewayModelInfo): PiModelApi | nul
   return resolveXdPiGatewayHintModelApi(model);
 }
 
-function xdGatewayTargetAgents(model: XdGatewayModelInfo): AgentKind[] {
+function xdGatewayTargetAgents(model: XdGatewayModelInfo): ModelProviderAgentKind[] {
   // Pi's exact binary catalog is probed only when a session starts, after capabilities are built.
   // Keep declared Pi membership provisional here unless Cindy Server has an exact Registry
   // tombstone; the final resolver removes or rejects any other unsafe Gateway route, while same-id
@@ -609,6 +611,9 @@ function modelRegistryMetaFields(
   agent: AgentKind,
   modelId: string,
 ): RegistryMetaFields | undefined {
+  // DSH is a known session identity, but it has no model-provider catalog in
+  // F1/F2. Never resolve it through an existing registry route.
+  if (agent === 'dsh') return undefined;
   // 模型 registry 的路由与 perAgent 覆盖只按 claude-code / codex 建键;Pi 是动态 BYOM,
   // 无 registry per-agent 覆盖,按 agent 无关处理(取条目基线元数据)。
   const registryAgent = agent === 'pi' ? undefined : agent;

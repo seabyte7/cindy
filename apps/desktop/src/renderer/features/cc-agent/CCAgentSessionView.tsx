@@ -1557,6 +1557,9 @@ export function CCAgentSessionView({
     // 先同步清空:切换会话(尤其 local→remote)时 loadAllCommands 是异步的,清空可避免
     // 刷新完成前 getHelpCommandsSnapshot / desktop 命令识别复用上一个项目的本地 skills。
     setAllCommands([]);
+    if (agentKind === 'dsh') return () => {
+      cancelled = true;
+    };
     // device-link 远程会话:传 remoteDeviceId,让 agent-builtin / agent-skill 从**被控端**该会话读
     // (与 ChatInput palette 同源)。否则此 cache 取的是控制端命令,maybeDispatchDesktopSlashCommand
     // 会把被控端 skill/builtin 影子掉的 /clear、/help 等误判成 desktop 命令、在控制端执行。
@@ -2297,6 +2300,7 @@ export function CCAgentSessionView({
     const cached = allCommandsRef.current;
     if (cached.length > 0) return cached;
     const agentKind = dbToMakerAgentKind(session?.agentKind);
+    if (agentKind === 'dsh') return [];
     try {
       // device-link 远程会话同源:传 remoteDeviceId,fallback 快照也从被控端读(见上方 cache effect 说明)。
       return await loadAllCommands(
@@ -2930,6 +2934,7 @@ export function CCAgentSessionView({
     ): Promise<{ handled: boolean; accepted: boolean; message: string }> => {
       const slashMatch = message.match(/^\/(\S+)(?:\s+(.*))?$/s);
       const agentKind = dbToMakerAgentKind(session?.agentKind);
+      if (agentKind === 'dsh') return { handled: false, accepted: false, message };
       const leading =
         !slashMatch && agentKind === 'pi' ? leadingSlashInvocation(message) : undefined;
       if (!slashMatch && !leading) return { handled: false, accepted: false, message };
@@ -4969,7 +4974,13 @@ export function CCAgentSessionView({
                   attachmentState={attachmentState}
                   externalDragOver={isDragOver}
                   onComposerDropHandled={resetFullAreaDragState}
-                  vendorKey={normalizeDbAgentKind(displayAgentKind)}
+                  vendorKey={
+                    displayAgentKind === 'claude-code'
+                      ? 'cc'
+                      : displayAgentKind === 'codex' || displayAgentKind === 'pi'
+                        ? displayAgentKind
+                        : undefined
+                  }
                   extraDirs={session?.extraDirs ?? []}
                   onExtraDirsChange={handleExtraDirsChange}
                   writableDirs={session?.writableDirs ?? []}
@@ -5143,21 +5154,29 @@ export function CCAgentSessionView({
                       />
                     </Tip>
                   )}
-                  <TodaySpendChip
-                    vendorKey={normalizeDbAgentKind(displayAgentKind)}
-                    modelId={agentSwitchIntent?.model ?? session?.model ?? null}
-                    providerId={
-                      agentSwitchIntent
-                        ? agentSwitchIntent.providerId
-                        : (session?.providerId ?? null)
-                    }
-                    sessionId={sessionId}
-                    sessionInitialMoney={session?.totalMoney ?? null}
-                    sessionInitialCostUsd={session?.totalCostUsd ?? null}
-                    sessionInitialTokens={session?.totalTokenUsage ?? null}
-                    remoteHostId={session?.remoteHostId ?? null}
-                    deviceLinkDeviceId={remoteDeviceId ?? null}
-                  />
+                  {displayAgentKind !== 'dsh' && (
+                    <TodaySpendChip
+                      vendorKey={
+                        displayAgentKind === 'claude-code'
+                          ? 'cc'
+                          : displayAgentKind === 'codex' || displayAgentKind === 'pi'
+                            ? displayAgentKind
+                            : undefined
+                      }
+                      modelId={agentSwitchIntent?.model ?? session?.model ?? null}
+                      providerId={
+                        agentSwitchIntent
+                          ? agentSwitchIntent.providerId
+                          : (session?.providerId ?? null)
+                      }
+                      sessionId={sessionId}
+                      sessionInitialMoney={session?.totalMoney ?? null}
+                      sessionInitialCostUsd={session?.totalCostUsd ?? null}
+                      sessionInitialTokens={session?.totalTokenUsage ?? null}
+                      remoteHostId={session?.remoteHostId ?? null}
+                      deviceLinkDeviceId={remoteDeviceId ?? null}
+                    />
+                  )}
                   <ContextCapacityRing
                     contextTokens={agentStatus.contextTokens}
                     model={agentSwitchIntent?.model ?? session?.model ?? ''}
@@ -5663,9 +5682,10 @@ function formatTokenCount(n: number): string {
  */
 function getModelContextWindow(
   model: string,
-  vendorKey: 'cc' | 'codex' | 'pi',
+  vendorKey: 'cc' | 'codex' | 'pi' | 'dsh',
   deviceId?: string,
 ): number | undefined {
+  if (vendorKey === 'dsh') return undefined;
   const found = getModelsForVendor(vendorKey, deviceId).find((m) => m.id === model);
   return found?.contextWindow;
 }
@@ -5680,7 +5700,7 @@ function ContextCapacityRing({
 }: {
   contextTokens: number;
   model: string;
-  vendorKey: 'cc' | 'codex' | 'pi';
+  vendorKey: 'cc' | 'codex' | 'pi' | 'dsh';
   /** SDK-reported context window; 0 = not yet known → use hardcoded fallback. */
   sdkContextWindow: number;
   /** device-link 远程会话所属被控端 id;按被控端能力查 contextWindow(本机会话 undefined,行为不变)。 */

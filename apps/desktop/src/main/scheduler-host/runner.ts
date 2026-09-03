@@ -45,6 +45,7 @@ import { clampEffortToSupported } from '@cindy/model-providers';
 import { shouldApplyExclusiveProviderRerouteLive } from '../maker-host/model-route-guard-live.js';
 import { SCHEDULER_RUN_ID_VENDOR_OPTION } from '@cindy/maker-scheduler';
 import type {
+  AgentKind as SchedulerAgentKind,
   Schedule,
   ScheduleRun,
   ScheduleRunner,
@@ -620,7 +621,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     let heartbeatWorkingDir: string | undefined;
     let heartbeatModel: string | undefined;
     let heartbeatEffort: string | undefined;
-    let heartbeatAgentKind: AgentKind | undefined;
+    let heartbeatAgentKind: SchedulerAgentKind | undefined;
     // 持续会话沿用 session 自己存的 fast 态（与 model 同源取 meta）。
     let heartbeatFastMode: boolean | undefined;
     // 持续会话当前选定的来源(供应商)id —— schedule.providerId 留空时沿用它
@@ -715,6 +716,11 @@ export class MakerScheduleRunner implements ScheduleRunner {
         heartbeatWorkingDir = meta?.workDir;
         heartbeatModel = meta?.model;
         heartbeatEffort = meta?.effort;
+        if (meta?.agentKind === 'dsh') {
+          const errMsg = 'DSH schedules are unavailable until the managed DSH host is registered';
+          await this.notifyFailureSilent(schedule, ctx, errMsg);
+          throw new Error(errMsg);
+        }
         heartbeatAgentKind = meta?.agentKind;
         heartbeatFastMode = meta?.fastMode;
         heartbeatProviderId = row?.providerId ?? null;

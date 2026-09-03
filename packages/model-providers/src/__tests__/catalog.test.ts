@@ -102,6 +102,13 @@ describe('bundled catalog validity (dynamic-first contract)', () => {
     expect(() => parseCatalog(BUNDLED_CATALOG)).not.toThrow();
   });
 
+  it('rejects a DSH model-provider route before the managed DSH host is registered', () => {
+    const bad = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    const candidate = bad.providers[0] as unknown as Record<string, unknown>;
+    candidate.agents = [...(candidate.agents as unknown[]), 'dsh'];
+    expect(() => parseCatalog(bad)).toThrow(/agent/i);
+  });
+
   it('keeps selectable registry efforts self-consistent with defaultEffort', () => {
     const registry = BUNDLED_CATALOG.modelRegistry;
     expect(registry).toBeDefined();

@@ -15,8 +15,8 @@ import {
   connectedProvidersForAgent,
   effectiveSourceIdForModel,
   isModelSelectableForNewRoute,
+  type ModelProviderAgentKind,
   nativeDefaultSourceId,
-  type AgentKind,
   type CatalogModel,
   type ProviderView,
 } from '@cindy/model-providers';
@@ -32,7 +32,7 @@ import {
  */
 function providersByPreference(
   providers: readonly ProviderView[],
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
 ): ProviderView[] {
   const connected = connectedProvidersForAgent([...providers], agent);
   const subscription = connected.filter((p) => p.access?.kind === 'subscription');
@@ -53,7 +53,10 @@ function providersByPreference(
  * 供应商显式配置的模型(未知 group)是合法聊天模型,id 撞上能力启发式(如 flux-image-x)
  * 不该被误杀(2026-07 review 第 25 轮)。
  */
-function firstModelByOrder(provider: ProviderView, agent: AgentKind): CatalogModel | undefined {
+function firstModelByOrder(
+  provider: ProviderView,
+  agent: ModelProviderAgentKind,
+): CatalogModel | undefined {
   const userProvider = provider.source === 'user';
   const chatModels = (provider.models[agent] ?? []).filter((m) =>
     isModelSelectableForNewRoute(m, { userProvider }),
@@ -86,7 +89,7 @@ export interface PickedConnectedModel {
 /** 按正常来源优先级找出区域 / 目录明确标记的新对话默认模型。 */
 function markedDefaultModelIdForAgent(
   providers: readonly ProviderView[],
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
 ): string | null {
   for (const provider of providersByPreference(providers, agent)) {
     const userProvider = provider.source === 'user';
@@ -133,7 +136,7 @@ function markedDefaultModelIdForAgent(
  */
 export function pickConnectedModelForAgent(
   providers: readonly ProviderView[],
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
   preferredModelId: string,
 ): PickedConnectedModel | null {
   const ranked = providersByPreference(providers, agent);
@@ -179,7 +182,7 @@ export interface DraftModelCalibrationInput {
    * 从而选中一个用户已经排除掉该模型的来源。
    */
   providers: readonly ProviderView[];
-  agent: AgentKind;
+  agent: ModelProviderAgentKind;
   /** 草稿当前的模型（种子默认或用户选择）。 */
   model: string;
   /** 用户是否在选择器里显式选过该 vendor 的模型。 */
@@ -242,7 +245,7 @@ export function calibrateDraftModel({
 export interface DraftSessionProviderResolutionInput {
   /** main 进程用于默认路由的完整本机来源目录。 */
   providers: readonly ProviderView[];
-  agent: AgentKind;
+  agent: ModelProviderAgentKind;
   model: string;
   /** 用户在草稿里显式选择的来源。 */
   explicitProviderId: string | null | undefined;

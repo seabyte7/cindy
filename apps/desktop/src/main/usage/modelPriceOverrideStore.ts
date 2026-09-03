@@ -6,7 +6,7 @@
  * reference later changes, the local patch wins and the UI exposes a conflict/reset state.
  */
 
-import type { AgentKind, ModelRegistry } from '@cindy/model-providers';
+import type { ModelProviderAgentKind, ModelRegistry } from '@cindy/model-providers';
 
 import { modelPricingKey, providerReferencePriceQuote } from '../../shared/modelPriceQuote.js';
 import type {
@@ -51,7 +51,7 @@ interface ModelPriceOverridePrefs {
 
 const DEFAULTS: ModelPriceOverridePrefs = { version: STORE_VERSION, entries: {} };
 
-function isAgent(value: unknown): value is AgentKind {
+function isAgent(value: unknown): value is ModelProviderAgentKind {
   return value === 'claude-code' || value === 'codex' || value === 'pi';
 }
 

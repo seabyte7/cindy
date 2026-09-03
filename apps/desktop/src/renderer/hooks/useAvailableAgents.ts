@@ -4,7 +4,7 @@
  * 为什么需要:Pi 的二进制经 postinstall best-effort 下载,可能失败/开发环境未装/当前
  * 平台无资产 → `buildPiAgent()` 返回 null → maker 的 agent map 里没有 `pi`。但 provider
  * 模型目录仍会照常投影 Pi 模型,创建入口若只看目录就会让用户一路创建,最终在
- * `Maker.requireAgent()` 撞上 `Agent 'pi' is not registered`(codex review P2)。
+ * `Maker.requireAgent()` 撞上 `Agent 'pi'/'dsh' is not registered`(codex review P2)。
  * 权威来源是 `maker:list-available-agents`(runtime 注册结果),不是模型目录。
  *
  * device-link:远程草稿的可用性以**被控端**为准 —— 传 deviceId 时走隧道 invoke
@@ -47,7 +47,7 @@ function refreshRemoteCapabilitiesOnce(deviceId: string): void {
   remoteCapabilitiesRefreshInFlight.set(deviceId, pending);
 }
 
-type RuntimeAgentKind = 'claude-code' | 'codex' | 'pi';
+type RuntimeAgentKind = 'claude-code' | 'codex' | 'pi' | 'dsh';
 
 /** runtime agent id → NewMaker vendor(其余保持同名)。 */
 function toVendor(agent: RuntimeAgentKind): MakerVendor {
@@ -80,7 +80,7 @@ async function fetchAvailableAgents(deviceId?: string | null): Promise<RuntimeAg
     if (!dl) throw new Error('device-link IPC not available');
     const raw = await dl.invoke(deviceId, 'maker:list-available-agents', []);
     return Array.isArray(raw) ? (raw.filter((v): v is RuntimeAgentKind =>
-      v === 'claude-code' || v === 'codex' || v === 'pi') as RuntimeAgentKind[]) : [];
+      v === 'claude-code' || v === 'codex' || v === 'pi' || v === 'dsh') as RuntimeAgentKind[]) : [];
   }
   const api = getMakerApi();
   if (!api) throw new Error('maker IPC not available');

@@ -16,7 +16,7 @@ export type DeviceLinkConnectionStatus = 'connected' | 'disconnected';
  * 暂时只有 'cc'（Claude Code）。未来扩展 'codex' 等时新增枚举值即可，
  * schema 不动；老 session DEFAULT 'cc' 兜底。
  */
-export type AgentKind = 'cc' | 'codex' | 'pi';
+export type AgentKind = 'cc' | 'codex' | 'pi' | 'dsh';
 export type MakerVendor = AgentKind | 'orca';
 export type OrcaRole = 'lead' | 'worker';
 
@@ -316,7 +316,7 @@ export interface Session {
 }
 
 export interface SessionRuntimeProfileProjection {
-  agentKind: 'claude-code' | 'codex' | 'pi';
+  agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh';
   model: string;
   providerId: string | null;
   effort: Effort | null;
@@ -373,7 +373,7 @@ export interface Message {
    * session-agent-switch 后 session.agentKind 只代表当前活跃引擎,历史行按本字段解析;
    * null = 切换功能上线前的老消息(回落 session.agentKind)。
    */
-  agentKind?: 'cc' | 'codex' | 'pi' | null;
+  agentKind?: 'cc' | 'codex' | 'pi' | 'dsh' | null;
   /** Structured guard details for a persisted tool-loop terminal error. */
   toolLoop?: ToolLoopErrorDetails;
   createdAt: string; // ISO 8601

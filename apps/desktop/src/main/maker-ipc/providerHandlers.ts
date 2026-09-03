@@ -16,9 +16,11 @@
 
 import {
   isLoopbackProviderUrl,
+  isModelProviderAgentKind,
   isProviderRequestPath,
   runtimeCustomProviderId,
   type AgentKind,
+  type ModelProviderAgentKind,
   type CustomProviderConfig,
   type ProviderModelDiscoveryFailure,
   type ProviderPreset,
@@ -1133,7 +1135,7 @@ export function registerProviderHandlers(
       typeof target.providerId !== 'string' ||
       target.providerId.length === 0 ||
       target.providerId.length > MAX_DISABLE_ID_LENGTH ||
-      !VALID_AGENTS.includes(String(target.agent)) ||
+      !isModelProviderAgentKind(target.agent) ||
       typeof target.modelId !== 'string' ||
       target.modelId.length === 0 ||
       target.modelId.length > MAX_DISABLE_ID_LENGTH
@@ -1142,7 +1144,7 @@ export function registerProviderHandlers(
     }
     return {
       providerId: target.providerId,
-      agent: target.agent as AgentKind,
+      agent: target.agent as ModelProviderAgentKind,
       modelId: target.modelId,
     };
   };

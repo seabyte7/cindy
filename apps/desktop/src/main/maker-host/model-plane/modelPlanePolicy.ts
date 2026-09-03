@@ -107,6 +107,9 @@ export function isRegistryTombstoneForConsumer(
   modelId: string,
   agent: AgentKind,
 ): boolean {
+  // DSH does not participate in the model plane until its own host and catalog
+  // binding exist; no existing runtime policy is an acceptable substitute.
+  if (agent === 'dsh') return false;
   const policy = MODEL_PLANE_POLICIES.get(providerId);
   if (!registry || !policy) return false;
 

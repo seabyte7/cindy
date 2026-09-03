@@ -4788,9 +4788,9 @@ interface ElectronAPI {
    * apps/desktop/src/main/maker-ipc/ 的 handlers + apps/desktop/src/main/maker-host/。
    */
   maker: {
-    listAvailableAgents: () => Promise<Array<'claude-code' | 'codex' | 'pi'>>;
+    listAvailableAgents: () => Promise<Array<'claude-code' | 'codex' | 'pi' | 'dsh'>>;
     onAgentsChanged: (cb: () => void) => () => void;
-    getCapabilities: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<unknown>;
+    getCapabilities: (agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh') => Promise<unknown>;
     /** workflow 逐 agent 进度树(只读);读不到 / 解析失败返回 null → 回退 workflow 级卡片。 */
     getWorkflowProgress: (
       sessionId: string,

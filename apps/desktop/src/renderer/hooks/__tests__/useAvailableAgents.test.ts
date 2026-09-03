@@ -14,7 +14,7 @@ vi.mock('../useAgentCapabilities', () => ({
   refreshLocalCapabilities: vi.fn(async () => {}),
 }));
 
-type RuntimeAgentKind = 'claude-code' | 'codex' | 'pi';
+type RuntimeAgentKind = 'claude-code' | 'codex' | 'pi' | 'dsh';
 type PresenceListener = (snapshot: { deviceId: string; online: boolean }) => void;
 type StatusListener = (payload: { status: 'stopped' | 'connecting' | 'online' }) => void;
 
@@ -184,5 +184,18 @@ describe('useAvailableAgents roster cache', () => {
       await second.promise;
     });
     await waitFor(() => expect(remounted.result.current.availableVendors.has('pi')).toBe(true));
+  });
+
+  it('preserves a remote DSH roster entry as DSH instead of projecting it to Claude Code', async () => {
+    const { api } = installDeviceLinkApi();
+    api.invoke.mockResolvedValue(['claude-code', 'dsh']);
+
+    const { useAvailableAgents } = await import('../useAvailableAgents');
+    const { result } = renderHook(() => useAvailableAgents('device-dsh'));
+
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    expect(result.current.availableVendors.has('dsh')).toBe(true);
+    expect(result.current.availableVendors.has('cc')).toBe(true);
+    expect(api.invoke).toHaveBeenCalledWith('device-dsh', 'maker:list-available-agents', []);
   });
 });

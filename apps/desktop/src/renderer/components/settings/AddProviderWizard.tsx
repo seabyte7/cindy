@@ -46,12 +46,13 @@ import { SettingsTextInput } from './SettingsTextInput';
 
 import {
   isLoopbackProviderUrl,
+  isModelProviderAgentKind,
   isProviderRequestPath,
   presetDisplayName,
   sortPresetsForRegion,
 } from '@cindy/model-providers';
 import type {
-  AgentKind,
+  ModelProviderAgentKind,
   CustomProviderConfig,
   ProviderModelDiscoverySource,
   ProviderModelRouteConfig,
@@ -84,9 +85,9 @@ type Selection =
   | { kind: 'builtinApiKey'; provider: ProviderView }
   | { kind: 'ollama-onboarding' };
 
-type PresetBaseUrls = Partial<Record<AgentKind, string>>;
+type PresetBaseUrls = Partial<Record<ModelProviderAgentKind, string>>;
 
-const AGENT_LABEL: Record<AgentKind, string> = {
+const AGENT_LABEL: Record<ModelProviderAgentKind, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
   pi: 'Pi',
@@ -94,7 +95,7 @@ const AGENT_LABEL: Record<AgentKind, string> = {
 
 function presetRuntimeBaseUrl(
   preset: ProviderPreset,
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
   edited: PresetBaseUrls,
 ): string {
   const runtime = preset.runtimes[agent];
@@ -118,7 +119,7 @@ function parseSafePresetHttpUrl(value: string): URL | null {
 }
 
 function isAllowedDiscoveryWireProtocol(
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
   value: unknown,
 ): value is ProviderModelRouteConfig['wireProtocol'] {
   const supported =
@@ -127,7 +128,7 @@ function isAllowedDiscoveryWireProtocol(
 }
 
 function isDiscoverySourceValidForRuntime(
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
   runtimeBaseUrl: string,
   source: ProviderModelDiscoverySource,
 ): boolean {
@@ -371,7 +372,7 @@ export function AddProviderWizard({
     | { status: 'fetching' }
     | { status: 'done'; failed: boolean; empty: boolean }
   >({ status: 'idle' });
-  const [manualModelIds, setManualModelIds] = useState<Partial<Record<AgentKind, string>>>({});
+  const [manualModelIds, setManualModelIds] = useState<Partial<Record<ModelProviderAgentKind, string>>>({});
   /**
    * 勾选清单:id → { name, checked, recommended, agents }。Map 保序(推荐在前,拉取新增在后)。
    * agents = 该模型归属的 runtime:预设推荐模型归属「预设里列出它的那些 runtime」;拉取新增
@@ -399,12 +400,12 @@ export function AddProviderWizard({
         name: string;
         checked: boolean;
         recommended: boolean;
-        agents: AgentKind[];
+        agents: ModelProviderAgentKind[];
         /** 列模型端点上报的上下文窗口,**按 agent 分槽**(同一 id 双端可不同,如
          *  cc=1M / codex=272K);完成创建时按所属 runtime 取值,预设值优先、本值兜底。 */
-        contextWindows?: Partial<Record<AgentKind, number>>;
+        contextWindows?: Partial<Record<ModelProviderAgentKind, number>>;
         /** 附加目录发现出的模型级路由；主 runtime 目录发现的模型保持缺省路由。 */
-        routes?: Partial<Record<AgentKind, ProviderModelRouteConfig>>;
+        routes?: Partial<Record<ModelProviderAgentKind, ProviderModelRouteConfig>>;
       }
     >
   >(new Map());
@@ -804,9 +805,9 @@ export function AddProviderWizard({
         name: string;
         checked: boolean;
         recommended: boolean;
-        agents: AgentKind[];
-        contextWindows?: Partial<Record<AgentKind, number>>;
-        routes?: Partial<Record<AgentKind, ProviderModelRouteConfig>>;
+        agents: ModelProviderAgentKind[];
+        contextWindows?: Partial<Record<ModelProviderAgentKind, number>>;
+        routes?: Partial<Record<ModelProviderAgentKind, ProviderModelRouteConfig>>;
       }
     >();
     for (const agent of agents) {
@@ -837,7 +838,7 @@ export function AddProviderWizard({
     // 同一个 modelsUrl 被多个 runtime 共用、但预设模型集合不同，说明该端点返回的是
     // 跨协议总目录（OpenCode Go 即如此），响应本身无法判定模型属于 Messages 还是 Chat。
     // 这类端点只能用于确认预设已有模型，不能扩大其 agent 归属或加入无法分类的新模型。
-    const discoveryAgentsByUrl = new Map<string, AgentKind[]>();
+    const discoveryAgentsByUrl = new Map<string, ModelProviderAgentKind[]>();
     for (const agent of agents) {
       const modelsUrl = preset.runtimes[agent]?.modelsUrl;
       if (!modelsUrl) continue;
@@ -994,7 +995,7 @@ export function AddProviderWizard({
    * 双 runtime；同一 ID 分别加入两端时才合并归属。
    */
   const addManualModel = useCallback(
-    (agent: AgentKind) => {
+    (agent: ModelProviderAgentKind) => {
       if (!sel || sel.kind !== 'preset' || !sel.preset.runtimes[agent]) return;
       const id = manualModelIds[agent]?.trim() ?? '';
       if (!id) return;
@@ -1177,10 +1178,13 @@ export function AddProviderWizard({
     sel?.kind === 'preset' && presetAgents.length === 1
       ? t('settings.providers.wizard.onlyAgentNote', { agent: AGENT_LABEL[presetAgents[0]] })
       : null;
+  const oauthAgents = sel?.kind === 'oauth'
+    ? sel.provider.agents.filter(isModelProviderAgentKind)
+    : [];
   const oauthSingleAgentNote =
-    sel?.kind === 'oauth' && sel.provider.agents.length === 1
+    sel?.kind === 'oauth' && oauthAgents.length === 1
       ? t('settings.providers.wizard.onlyAgentNote', {
-          agent: AGENT_LABEL[sel.provider.agents[0]],
+          agent: AGENT_LABEL[oauthAgents[0]],
         })
       : null;
   const openAiDeviceLoginPending =

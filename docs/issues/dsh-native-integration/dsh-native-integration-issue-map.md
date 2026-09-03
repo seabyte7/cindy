@@ -17,6 +17,16 @@ This map records already-published upstream issue numbers for traceability only.
 comment on, create, close or link any upstream issue/PR; do not trigger a remote build, GitHub Actions, artifact
 upload, attestation, distribution or non-macOS build. F8–F11 are deferred design, not executable current work.
 
+## Active Local Execution Status
+
+F0 and F1 are complete only for their documented local Desktop boundaries. F1 retains `dsh` through maker-core,
+model-provider type boundaries and Desktop persistence/IPC/renderer paths, rejects present unknown identity values,
+and leaves DSH unregistered and unavailable for execution. It made no Mobile, device-link, SSH, remote-build or
+release change. Evidence: [`dsh-f1-local-identity-closure-report.md`](../../dsh-release-evidence/dsh-f1-local-identity-closure-report.md).
+
+The historical issue bodies below are planning snapshots. Their upstream numbers are references, not commands to
+write to `makecindy/cindy`; this local document is the only execution-status record being updated.
+
 ## Parent Issue Draft
 
 Title: feat(dsh): deliver Cindy-owned DSH control plane
@@ -112,6 +122,9 @@ Dependency: blocked by none; blocks F1.
 Remote number: 3771
 
 ### F1 — DSH: close the fourth-Agent identity across all boundaries
+
+Local status: **completed for local Desktop identity preservation only**. The historical deliverables below remain
+the full future issue scope; Mobile, device-link, SSH and release work are deferred and were not implied complete.
 
 Purpose: add dsh as a fourth identity while retaining unavailable-by-default behavior.
 

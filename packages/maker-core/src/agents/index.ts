@@ -18,9 +18,11 @@ export {
 // finalizeCodexCitationText = 剥截断残尾 + 归一化(与流式 completed 完全同口径)。
 export { finalizeCodexCitationText, normalizeCodexFileCitations } from './codex/translator.js';
 export { PiAgent } from './pi/index.js';
-// DSH is not registered as an AgentKind until F1 closes every identity boundary. These are the
-// narrow F0 contracts Desktop Main needs to build the Cindy-owned bridge without granting it
-// process, credential, or Renderer privileges through maker-core.
+// DSH is a product AgentKind as of F1, but its runtime adapter is intentionally not registered
+// until the managed host and durable binding phases are complete. These narrow F0 contracts let
+// Desktop Main build the Cindy-owned bridge without granting process, credential, or Renderer
+// privileges through maker-core. An attempted DSH session therefore fails explicitly rather than
+// falling back to another agent.
 export {
   DSH_BRIDGE_CONTRACT_VERSION,
   DSH_BRIDGE_OPERATIONS,

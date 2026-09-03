@@ -20,7 +20,24 @@
 import type { ModelRegistry } from './modelAccessBean.js';
 
 /** 承载模型的 agent runtime —— 与 maker-core AgentKind 对齐。 */
-export type AgentKind = 'claude-code' | 'codex' | 'pi';
+export type AgentKind = 'claude-code' | 'codex' | 'pi' | 'dsh';
+
+/**
+ * 当前可经 Cindy model-provider catalog 路由的 runtime。
+ *
+ * DSH 是产品 AgentKind，但在 F1/F2 尚未有受管 host、模型目录或 provider routing。
+ * 保留它在总 AgentKind 中能阻止身份被改写；所有模型目录入口必须用这个 guard
+ * 明确识别「无 model-provider route」，而不是把 DSH 降到 Claude/Codex/Pi。
+ */
+export const MODEL_PROVIDER_AGENT_KINDS = ['claude-code', 'codex', 'pi'] as const;
+export type ModelProviderAgentKind = (typeof MODEL_PROVIDER_AGENT_KINDS)[number];
+
+export function isModelProviderAgentKind(value: unknown): value is ModelProviderAgentKind {
+  return (
+    typeof value === 'string' &&
+    (MODEL_PROVIDER_AGENT_KINDS as readonly string[]).includes(value)
+  );
+}
 
 /** 推理强度档位 —— 与 maker-core Effort 对齐。 */
 export type Effort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
@@ -411,7 +428,8 @@ export interface CatalogModel {
    * v3 可显式标记 'claude-code'、'codex' 或 'pi'；客户端不跨 Agent 投影。缺省 = 不作为默认。
    * 故意**不纳入** `modelSignature` 跨供应商一致性校验：同一 id 在不同供应商下可各自表态。
    */
-  newSessionDefault?: AgentKind[];
+  /** Model-provider defaults cannot name DSH before it has a catalog route. */
+  newSessionDefault?: ModelProviderAgentKind[];
   /**
    * 该来源下的模型是否已由用户确认支持图片输入。目前只供 Pi 自定义 provider 使用；
    * 缺省按 false 处理，避免把纯文本端点误报成视觉模型。它是 per-provider 能力，不参与

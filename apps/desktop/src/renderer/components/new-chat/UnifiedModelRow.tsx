@@ -6,9 +6,12 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from 'react';
 
-import type { ProviderView, UnifiedModelEntry } from '@cindy/model-providers';
+import type {
+  ModelProviderAgentKind,
+  ProviderView,
+  UnifiedModelEntry,
+} from '@cindy/model-providers';
 
-import type { AgentKind } from '@/hooks/useAgentCapabilities';
 import { cn } from '@/lib/utils';
 import type { Effort } from '@/lib/userPreferences.types';
 
@@ -200,7 +203,7 @@ export function UnifiedModelRow({
   isFavoriteRow: boolean;
   justFavorited: boolean;
   interactionDisabled: boolean;
-  effortLabelOf: (agent: AgentKind, effort: Effort) => string;
+  effortLabelOf: (agent: ModelProviderAgentKind, effort: Effort) => string;
   providers: readonly ProviderView[];
   onReveal: (anchor: UnifiedAnchor, element: HTMLElement) => void;
   /** pointerleave —— 带事件:调用方按「往哪边走」决定 grace 长短(去浮层的路上要更宽容)。 */

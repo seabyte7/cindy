@@ -1,6 +1,6 @@
 import {
   isModelSelectableForNewRoute,
-  type AgentKind,
+  type ModelProviderAgentKind,
   type Effort,
   type ProviderView,
 } from '@cindy/model-providers';
@@ -17,7 +17,7 @@ export interface NewMakerDefaultTuple {
 interface ProviderDefaultPolicy {
   providerId: 'openai' | 'anthropic' | 'xai' | 'xd';
   accessKind: 'subscription' | 'managed';
-  agents: readonly AgentKind[];
+  agents: readonly ModelProviderAgentKind[];
   modelIds: readonly string[];
   requireNewSessionDefault?: boolean;
   requireImageInput?: boolean;
@@ -59,7 +59,7 @@ const DEFAULT_POLICIES: readonly ProviderDefaultPolicy[] = [
   },
 ];
 
-function vendorForAgent(agent: AgentKind): NewMakerDefaultTuple['vendor'] {
+function vendorForAgent(agent: ModelProviderAgentKind): NewMakerDefaultTuple['vendor'] {
   return agent === 'claude-code' ? 'cc' : agent;
 }
 
@@ -80,7 +80,9 @@ export function isKnownProductDefaultTupleIdentity(args: {
   );
 }
 
-function supportsImageInput(model: NonNullable<ProviderView['models'][AgentKind]>[number]): boolean {
+function supportsImageInput(
+  model: NonNullable<ProviderView['models'][ModelProviderAgentKind]>[number],
+): boolean {
   return (
     model.supportsImageInput === true || model.modalities?.input.includes('image') === true
   );
@@ -88,7 +90,7 @@ function supportsImageInput(model: NonNullable<ProviderView['models'][AgentKind]
 
 function matchingModel(
   provider: ProviderView,
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
   modelIds: readonly string[],
   requireNewSessionDefault = false,
   requireImageInput = false,

@@ -8,7 +8,8 @@
 
 import type { ControlResult } from '../types.js';
 
-export type HistoryAgentKind = 'cc' | 'codex' | 'pi';
+/** Search/history transports preserve the known-but-unavailable DSH identity. */
+export type HistoryAgentKind = 'cc' | 'codex' | 'pi' | 'dsh';
 export type HistoryOrder = 'asc' | 'desc';
 
 /** Stable business errors exposed by cross-device history readers. */

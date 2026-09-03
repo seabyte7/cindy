@@ -45,6 +45,12 @@ function rowToState(row: GoalRow): GoalState {
 }
 
 function stateToInsert(state: GoalState): GoalInsert {
+  // F1 only records the DSH identity on sessions. Goals require a managed
+  // controller, which DSH deliberately does not have until its later phase;
+  // never serialize it into the legacy scheduler/goal route as another agent.
+  if (state.agentKind === 'dsh') {
+    throw new Error('DSH goals are unavailable until the managed DSH controller is registered');
+  }
   return {
     sessionId: state.sessionId,
     objective: state.objective,

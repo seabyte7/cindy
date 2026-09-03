@@ -4,6 +4,7 @@ import * as usageStore from '../usageStore';
 import {
   deleteSkillUsageRecordsBefore,
   getSkillUsageSummaryFromDb,
+  listSkillUsageSourcesWithRecentExposures,
   markSkillUsageSourceFailed,
   persistSkillUsageAnalysis,
 } from '../usageStore';
@@ -90,7 +91,7 @@ function persistExposure(db: Database.Database, row: {
   skillDocumentHash: string | null;
   exposureContentHash?: string;
   documentHashSource?: string;
-  agentKind?: 'claude-code' | 'codex';
+  agentKind?: 'claude-code' | 'codex' | 'pi' | 'dsh';
   skillName?: string;
   skillPath?: string | null;
   source?: string;
@@ -165,6 +166,46 @@ const fixtureNowMs = 10_000;
 const dayMs = 24 * 60 * 60 * 1000;
 
 describe('skill usage store', () => {
+  it('preserves a known DSH usage source and drops an unknown persisted kind', () => {
+    const db = createDb();
+    try {
+      persistExposure(db, {
+        id: 'dsh-source',
+        rawFilePath: 'dsh.jsonl',
+        rawLineNo: 1,
+        sessionId: 'dsh-session',
+        sdkSessionId: 'dsh-runtime-session',
+        skillDocumentHash: null,
+        agentKind: 'dsh',
+        seenAt: 2_000,
+      });
+      persistExposure(db, {
+        id: 'unknown-source',
+        rawFilePath: 'unknown.jsonl',
+        rawLineNo: 1,
+        sessionId: 'unknown-session',
+        sdkSessionId: 'unknown-runtime-session',
+        skillDocumentHash: null,
+        seenAt: 1_000,
+      });
+      db.prepare('UPDATE skill_usage_exposures SET agent_kind = ? WHERE id = ?').run(
+        'future-harness',
+        'unknown-source',
+      );
+
+      expect(listSkillUsageSourcesWithRecentExposures(db, '5', 0)).toEqual([
+        {
+          rawFilePath: 'dsh.jsonl',
+          agentKind: 'dsh',
+          sessionId: 'dsh-session',
+          sdkSessionId: 'dsh-runtime-session',
+        },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
   it('persists document and exposure hashes without token metrics', () => {
     const db = createDb();
     try {

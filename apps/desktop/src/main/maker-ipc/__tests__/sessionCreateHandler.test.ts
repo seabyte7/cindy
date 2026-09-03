@@ -130,6 +130,21 @@ describe('maker session CREATE_SESSION IPC handler', () => {
     expect(deps.bootstrapSession).not.toHaveBeenCalled();
   });
 
+  it('recognises DSH but rejects it before any generic session bootstrap', async () => {
+    const harness = new IpcHarness();
+    const deps = createDeps();
+    registerMakerSessionCreateHandler(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.CREATE_SESSION, {
+        agentKind: 'dsh',
+        workingDir: '/repo',
+        model: 'dsh-default',
+      }),
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' });
+    expect(deps.bootstrapSession).not.toHaveBeenCalled();
+  });
+
   it('maps credential mode busy from bootstrap to CREDENTIAL_SWITCH_BUSY', async () => {
     const harness = new IpcHarness();
     const deps = createDeps({

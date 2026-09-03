@@ -2136,7 +2136,9 @@ export function stopOrcaIdleWatcher(): void {
 }
 
 function requireAgentKind(value: unknown): AgentKind {
-  if (value === 'claude-code' || value === 'codex' || value === 'pi') return value;
+  if (value === 'claude-code' || value === 'codex' || value === 'pi' || value === 'dsh') {
+    return value;
+  }
   throwIpcError('INVALID_PARAMS', 'agentKind required');
 }
 
@@ -6068,6 +6070,12 @@ export async function beginTurnChangeSetAtDispatch(
   session: SendToSessionDispatchSession,
   anchorClientId: string,
 ): Promise<void> {
+  if (session.agentKind === 'dsh') {
+    throwIpcError(
+      'UNSUPPORTED_CAPABILITY',
+      'DSH turn-change capture is unavailable until the managed DSH host is registered',
+    );
+  }
   await waitForTurnChangeSetSeal(session.id);
   await finalizeTurnChangeSet(session.id, null, 'partial');
   await waitForTurnChangeSetSeal(session.id);
@@ -6629,7 +6637,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // (model/effort/fast/permission/source/是否显式选过模型)。控制端经隧道调用 → seed 远程项目草稿。
   // 缓存未就绪 / 该 vendor 无草稿 model → 返回 {},控制端按 capabilities 默认兜底。
   ipcMain.handle(MAKER_INVOKE.GET_NEW_MAKER_DEFAULTS, (_e, agentKind: unknown) => {
-    return getRemoteNewMakerDefaults(requireAgentKind(agentKind));
+    const kind = requireAgentKind(agentKind);
+    if (kind === 'dsh') {
+      throwIpcError(
+        'UNSUPPORTED_CAPABILITY',
+        'DSH has no model-provider draft defaults until its managed host is registered',
+      );
+    }
+    return getRemoteNewMakerDefaults(kind);
   });
 
   // device-link 草稿「模型 effort/fast」写穿:控制端经隧道调用 → 跑在**被控端**。被控端不直接改
@@ -7117,11 +7132,27 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             ? params.sessionId.trim()
             : undefined;
         const sessionMeta = sessionId ? await maker.getSessionMeta(sessionId) : null;
+        if (kind === 'dsh') {
+          throwIpcError(
+            'UNSUPPORTED_CAPABILITY',
+            'DSH commands are unavailable until its managed host is registered',
+          );
+        }
         const builtins = maker.listAgentCommands(kind);
+        const piCommandSession =
+          sessionMeta?.agentKind === 'claude-code' ||
+          sessionMeta?.agentKind === 'codex' ||
+          sessionMeta?.agentKind === 'pi'
+            ? {
+                agentKind: sessionMeta.agentKind,
+                ...(sessionMeta.reviewMode === true ? { reviewMode: true as const } : {}),
+                ...(sessionMeta.remoteHostId ? { remoteHostId: sessionMeta.remoteHostId } : {}),
+              }
+            : null;
         const mayListPackageCommands = shouldListPiPackageCommands(
           kind,
           sessionId !== undefined,
-          sessionMeta,
+          piCommandSession,
           params.allowManagedPiPackagePreview !== false,
         );
         let packageCommands: Array<{ name: string; description: string }> = [];
@@ -9004,8 +9035,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     closeSession: (sessionId) => maker.closeSession(sessionId, 'agent-switch'),
     listMessagesForHandoff: (sessionId, after) =>
       listMessagesForAgentHandoff(sessionId, 400, after),
-    findParkedEngineSession: (sessionId, targetDbKind) =>
-      findParkedEngineSession(sessionId, targetDbKind),
+    findParkedEngineSession: async (sessionId, targetDbKind) => {
+      if (targetDbKind === 'dsh') return null;
+      return findParkedEngineSession(sessionId, targetDbKind);
+    },
     applyAgentSwitchToDb: async (sessionId, patch) => {
       const verifiedWindow = lookupVerifiedContextWindow(
         (agentKind, modelId, pid) =>
@@ -10219,6 +10252,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     sessionId: string,
     meta: NonNullable<Awaited<ReturnType<typeof maker.getSessionMeta>>>,
   ): Promise<AgentInputCreateOpts> {
+    const queuedAgentKind = meta.agentKind;
+    if (queuedAgentKind === 'dsh') {
+      throwIpcError(
+        'UNSUPPORTED_CAPABILITY',
+        'DSH sessions cannot enter the execution queue until their managed host is registered',
+      );
+    }
     const db = getDbClient().drizzle;
     const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1);
     if (!row) {
@@ -10226,7 +10266,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     const createOpts = buildCreateOptsWithStderr({
       id: sessionId,
-      agentKind: meta.agentKind,
+      agentKind: queuedAgentKind,
       workingDir: meta.workDir,
       model: meta.model,
       providerId: row.providerId,
@@ -10256,7 +10296,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (writableDirs.length > 0) createOpts.writableDirs = writableDirs;
     }
     return {
-      agentKind: createOpts.agentKind,
+      agentKind: queuedAgentKind,
       workingDir: createOpts.workingDir,
       model: createOpts.model,
       effort: createOpts.effort,
@@ -10415,8 +10455,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         workerPermissionMode?: unknown;
         deferDelegateTask?: unknown;
       };
-      const workerAgent: AgentKind =
-        body.workerAgent === 'codex' ? 'codex' : body.workerAgent === 'pi' ? 'pi' : 'claude-code';
+      const workerAgent =
+        body.workerAgent === undefined ? 'claude-code' : requireAgentKind(body.workerAgent);
+      if (workerAgent === 'dsh') {
+        throwIpcError(
+          'UNSUPPORTED_CAPABILITY',
+          'DSH is not available for Orca workers until the managed host is enabled',
+        );
+      }
       const delegateTask = typeof body.delegateTask === 'string' ? body.delegateTask : undefined;
       if (
         body.workerPermissionMode !== undefined &&
@@ -11949,6 +11995,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           }>
         > = {};
         for (const a of agents) {
+          if (a === 'dsh') {
+            throwIpcError(
+              'UNSUPPORTED_CAPABILITY',
+              'DSH model discovery requires the managed host and binding runtime',
+            );
+          }
           const caps = maker.getCapabilities(a);
           // key 必须区分 pi,否则 pi 模型会被塞进 claude_code 键与 CC 模型混淆。
           const key = a === 'codex' ? 'codex' : a === 'pi' ? 'pi' : 'claude_code';
@@ -12319,12 +12371,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         .from(sessions)
         .where(eq(sessions.id, sessionId))
         .limit(1);
-      const cardAgentKind =
-        sessionKindRow?.agentKind === 'codex'
-          ? 'codex'
-          : sessionKindRow?.agentKind === 'pi'
-            ? 'pi'
-            : 'cc';
+      const cardAgentKind = sessionKindRow?.agentKind
+        ? makerToDbAgentKind(dbToMakerAgentKind(sessionKindRow.agentKind))
+        : 'cc';
       broadcastSessionPatched(sessionId, {
         sdkSessionId: null,
         updatedAt: new Date(updatedAt).toISOString(),
@@ -13346,7 +13395,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return reconcileSessionTurnIdle(sessionId, 'authoritative-idle');
     },
     hasPendingInteraction: hasPendingAgentInteractionForSession,
-    getAgentKind: (sessionId) => getStableSessionForTurnBoundary(sessionId)?.agentKind ?? null,
+    getAgentKind: (sessionId) => {
+      const session = getStableSessionForTurnBoundary(sessionId);
+      return session?.agentKind === 'dsh' ? null : session?.agentKind ?? null;
+    },
     getSdkSessionId: async (sessionId) => {
       const meta = await maker.getSessionMeta(sessionId).catch(() => null);
       return meta?.sdkSessionId;
@@ -17305,7 +17357,9 @@ async function checkWorkDirExists(
   // 或者 agent 真跑起来时由远端 codex 自己报 ENOENT)。这里直接放行。
   if (remoteHostId) return true;
   if (!workingDir?.trim()) return true;
-  const source: AgentKind = agentKind === 'codex' || agentKind === 'pi' ? agentKind : 'claude-code';
+  // 缺失字段仅用于兼容历史 session；所有已知 agent(包括尚未绑定的 DSH)都要保留
+  // 原身份，不能为了错误横幅把 DSH 伪装成 Claude Code。
+  const source: AgentKind = agentKind ?? 'claude-code';
   // suppressMissingBroadcast: 调用方(SEND 事务)手里还有 DB 权威值可兜底时,
   // 首检失败只记日志不广播错误横幅——兜底成功的话用户不该看到假错误。
   const suppress = opts?.suppressMissingBroadcast === true;

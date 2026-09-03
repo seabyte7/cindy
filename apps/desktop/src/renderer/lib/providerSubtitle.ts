@@ -1,6 +1,7 @@
-import type { AgentKind, ProviderView } from '@cindy/model-providers';
+import { isModelProviderAgentKind } from '@cindy/model-providers';
+import type { ModelProviderAgentKind, ProviderView } from '@cindy/model-providers';
 
-const AGENT_DISPLAY_LABELS: Record<AgentKind, string> = {
+const AGENT_DISPLAY_LABELS: Record<ModelProviderAgentKind, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
   pi: 'Pi',
@@ -8,7 +9,10 @@ const AGENT_DISPLAY_LABELS: Record<AgentKind, string> = {
 
 export function providerAgentSupportLabel(provider?: Pick<ProviderView, 'agents'> | null): string {
   if (!provider?.agents.length) return '';
-  return provider.agents.map((agent) => AGENT_DISPLAY_LABELS[agent] ?? agent).join(' / ');
+  return provider.agents
+    .filter(isModelProviderAgentKind)
+    .map((agent) => AGENT_DISPLAY_LABELS[agent])
+    .join(' / ');
 }
 
 export function providerSubtitleForDisplay(

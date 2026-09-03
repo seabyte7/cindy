@@ -30,7 +30,7 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { MorphPopover } from '@/components/ui/morph-popover';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import type { MakerVendor } from '@/lib/ccAgent.types';
+import type { SelectableVendor } from '@/lib/agentVendors';
 
 import { AGENT_OPTIONS, agentOptionOf } from './agentOptions';
 
@@ -43,8 +43,8 @@ import { AGENT_OPTIONS, agentOptionOf } from './agentOptions';
 const FIELD_PANEL_MIN_H = 28 + AGENT_OPTIONS.length * 36 + 16;
 
 interface AgentSelectProps {
-  value: MakerVendor;
-  onChange: (next: MakerVendor) => void;
+  value: SelectableVendor;
+  onChange: (next: SelectableVendor) => void;
   /** disabled 状态(worktree 创建中等);整体降透明且不响应点击。 */
   disabled?: boolean;
   className?: string;
@@ -66,7 +66,7 @@ interface AgentSelectProps {
    * `Agent 'pi' is not registered` 的会话。当前 `value` 始终保留可见,
    * 否则触发器会显示一个列表里不存在的引擎。
    */
-  hiddenVendors?: readonly MakerVendor[];
+  hiddenVendors?: readonly SelectableVendor[];
   /**
    * 面板弹出方向。工具条在底部所以默认 'top'; 设置面板里的字段在
    * 页面中部, 往下弹才不遮住自己(与 ModelSelector 的 popoverSide 同口径)。
@@ -177,7 +177,7 @@ export function AgentSelect({
     return below >= rect.top ? 'bottom' : 'top';
   };
 
-  const select = (next: MakerVendor) => {
+  const select = (next: SelectableVendor) => {
     setOpen(false);
     if (next !== value || reselectEmitsChange) onChange(next);
   };

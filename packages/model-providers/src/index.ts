@@ -9,6 +9,7 @@
 
 export type {
   AgentKind,
+  ModelProviderAgentKind,
   ProviderWireProtocol,
   CodexCompatibilityWireProtocol,
   Effort,
@@ -37,7 +38,12 @@ export type {
   OAuthProviderDescriptor,
 } from './types.js';
 
-export { PI_MODEL_APIS, PI_REASONING_EFFORTS } from './types.js';
+export {
+  MODEL_PROVIDER_AGENT_KINDS,
+  PI_MODEL_APIS,
+  PI_REASONING_EFFORTS,
+  isModelProviderAgentKind,
+} from './types.js';
 
 export {
   effectivePiWireProtocol,

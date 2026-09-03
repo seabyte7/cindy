@@ -288,6 +288,8 @@ export function WorkdirBrowseRoute() {
   // workingDir 命中,会通过 sortedWorkdirSessions memo 自然出现在 tab 列表里。
   const handleCreateNewSession = useCallback(async (agentKind: AgentKind) => {
     if (!browsableWorkdir) return;
+    // F1 only retains DSH as a persisted identity; it has no creatable runtime.
+    if (agentKind === 'dsh') return;
     // device-link 远程视图:控制端无法替被控端创建会话,本地新建只会得到一个
     // 指向远端路径的坏会话(+ 按钮已隐藏,这里是防御性短路)。
     if (deviceId) return;

@@ -195,7 +195,7 @@ describe('ChatInput model source switching wiring', () => {
     // 快照取事务后的目标值(targetAgent / modelId / providerId 都是这次切过去的那一份)。
     expect(block).toContain('uid: favoriteUid,');
     expect(block).toContain('wireModelId: modelId,');
-    expect(block).toContain('engine: agentKindToVendor(targetAgent),');
+    expect(block).toContain("engine: targetAgent === 'claude-code' ? 'cc' : targetAgent,");
     expect(block).toContain('providerId,');
     // 勾选只认 uid(Chris 2026-08-20):不拿正在跑的来源去对副本。
     expect(chatInputSource).toContain('sessionFavoriteAnchor?.uid ?? null');

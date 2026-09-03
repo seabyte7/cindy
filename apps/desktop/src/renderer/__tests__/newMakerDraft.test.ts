@@ -687,8 +687,8 @@ describe('newMakerDraft store', () => {
     }
   });
 
-  it("sanitize:表外的引擎值(历史 'orca' / 未知 / 非字符串)回退默认", async () => {
-    for (const vendor of ['orca', 'unknown-engine', '', 42, null]) {
+  it("sanitize:表外的引擎值(含尚未注册 host 的 DSH)回退默认", async () => {
+    for (const vendor of ['orca', 'dsh', 'unknown-engine', '', 42, null]) {
       memStorage.setItem('xdt:newMakerDraft:v1', JSON.stringify({ vendor }));
       vi.resetModules();
       const { getDraft } = await loadModule();

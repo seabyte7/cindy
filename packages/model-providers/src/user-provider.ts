@@ -12,7 +12,6 @@
  */
 
 import type {
-  AgentKind,
   CatalogModel,
   CustomProviderConfig,
   Effort,
@@ -21,6 +20,7 @@ import type {
   ProviderWireProtocol,
   RoutingDescriptor,
 } from "./types.js";
+import type { ModelProviderAgentKind } from "./types.js";
 import type { ModelRegistry } from "./modelAccessBean.js";
 import { isLoopbackProviderUrl } from "./provider-url.js";
 
@@ -56,7 +56,7 @@ export function storedCustomProviderId(providerId: string): string {
  * 接受与否只有端点方/用户知道，选到不支持的档位会被上游拒绝，用户改选即可；
  * 默认档保持 high，存量行为不变（见 #2964）。
  */
-const CUSTOM_EFFORTS: Partial<Record<AgentKind, Effort[]>> = {
+const CUSTOM_EFFORTS: Partial<Record<ModelProviderAgentKind, Effort[]>> = {
   "claude-code": ["low", "medium", "high", "xhigh", "max"],
   codex: ["low", "medium", "high", "xhigh", "max"],
 };
@@ -70,7 +70,7 @@ interface RegistryEffortMetadata {
 
 function toRegistryEffortMetadata(
   entry: { efforts?: readonly Effort[]; defaultEffort?: Effort | null; perAgent?: Partial<Record<string, { efforts?: readonly Effort[]; defaultEffort?: Effort | null }>> },
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
 ): RegistryEffortMetadata | undefined {
   const perAgent = entry.perAgent?.[agent];
   const efforts = perAgent?.efforts ?? entry.efforts;
@@ -87,7 +87,7 @@ function toRegistryEffortMetadata(
 
 function consensusRegistryEffortMetadata(
   entries: readonly ModelRegistry["models"][number][],
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
 ): RegistryEffortMetadata | undefined {
   const uniqueEntries = [
     ...new Map(entries.map((entry) => [entry.id, entry])).values(),
@@ -119,7 +119,7 @@ function consensusRegistryEffortMetadata(
 function registryEffortMetadata(
   registry: ModelRegistry | null | undefined,
   modelId: string,
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
 ): RegistryEffortMetadata | undefined {
   if (agent === "pi" || !registry) return undefined;
 
@@ -155,13 +155,13 @@ function registryEffortMetadata(
 }
 
 /** 固定 agent 顺序：保证派生出的 provider.agents / routing / models 顺序稳定。 */
-const AGENT_ORDER: readonly AgentKind[] = ["claude-code", "codex", "pi"];
+const AGENT_ORDER: readonly ModelProviderAgentKind[] = ["claude-code", "codex", "pi"];
 
 /** 单个用户填写的模型 → CatalogModel（补默认元数据；effort 按所属 agent 参考内置默认）。 */
 function toCatalogModel(
   m: ProviderRuntimeModelConfig,
   providerId: string,
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
   modelRegistry: ModelRegistry | null | undefined,
 ): CatalogModel {
   // 显式 runtime 能力优先：reasoning:true 才导出 efforts；false = 明确无思考档。
@@ -212,7 +212,7 @@ function toCatalogModel(
   };
 }
 
-function defaultWireProtocol(agent: AgentKind): ProviderWireProtocol {
+function defaultWireProtocol(agent: ModelProviderAgentKind): ProviderWireProtocol {
   // pi 默认 openai-chat:BYOM 本地端点(Ollama/vLLM 的 /v1/chat/completions)最常见。
   // 注:pi 走原生 provider 直连,routing.pi 不被 native 路径消费——此默认仅影响(未用的)
   // 路由描述符里是否显式记 wireProtocol,pi 实际 api 由 pi-host resolvePiNativeProviders 定。
@@ -223,7 +223,7 @@ function defaultWireProtocol(agent: AgentKind): ProviderWireProtocol {
 
 /** baseUrl + 自定义 headers → 路由描述符（**不含密钥**）。 */
 function toRouting(
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
   baseUrl: string,
   requestPath: string | undefined,
   headers: Record<string, string> | undefined,
@@ -281,9 +281,9 @@ export function buildUserProvider(
   const isOAuth = oauth !== undefined;
   const noAuth = config.auth?.method === "none";
   const strategy = isOAuth ? "oauth-token" : noAuth ? "none" : "api-key-header";
-  const routing: Partial<Record<AgentKind, RoutingDescriptor>> = {};
-  const models: Partial<Record<AgentKind, CatalogModel[]>> = {};
-  const agents: AgentKind[] = [];
+  const routing: Partial<Record<ModelProviderAgentKind, RoutingDescriptor>> = {};
+  const models: Partial<Record<ModelProviderAgentKind, CatalogModel[]>> = {};
+  const agents: ModelProviderAgentKind[] = [];
   for (const agent of AGENT_ORDER) {
     const rt = config.runtimes[agent];
     if (!rt) continue;

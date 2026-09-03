@@ -20,13 +20,13 @@
  */
 
 import { cn } from '@/lib/utils';
-import type { MakerVendor } from '@/lib/ccAgent.types';
+import type { SelectableVendor } from '@/lib/agentVendors';
 
 import { AGENT_OPTIONS } from './agentOptions';
 
 interface VendorSegmentedSwitcherProps {
-  value: MakerVendor;
-  onChange: (next: MakerVendor) => void;
+  value: SelectableVendor;
+  onChange: (next: SelectableVendor) => void;
   /** disabled 状态(发送中等);整体降透明且不响应点击。 */
   disabled?: boolean;
   className?: string;
@@ -58,7 +58,7 @@ interface VendorSegmentedSwitcherProps {
    * 创建入口据 `maker:list-available-agents` 计算,避免用户创建出最终 `Agent 'pi' is not
    * registered` 的会话(codex review P2)。调用方需保证 `value` 不在此列表(或自行 coerce)。
    */
-  hiddenVendors?: readonly MakerVendor[];
+  hiddenVendors?: readonly SelectableVendor[];
 }
 
 // 引擎条目(vendor / label / mark)的单一来源在 ./agentOptions —— 与 AgentSelect

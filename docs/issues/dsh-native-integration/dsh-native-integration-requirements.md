@@ -32,9 +32,11 @@ Codex、Pi 的行为退化。
 
 - 设计正本是 docs/dev-rules/dsh-harness.md；Cindy 自主控制面已裁决，alpha.3 基础制品已取证，
   F0 已有未注册的 ACP client、Desktop Main stdio transport 和 DshControlPlane 核心生命周期；
-  产品身份、受管分发、持久 binding、事件、UI 与跨端能力尚未实施。
-- maker-core 的 AgentKind 目前只含 claude-code、codex、pi；Agent exports、事件 source、
-  Desktop preload、Mobile 新建任务与 device-link 契约均有显式的三者联合类型或白名单。
+  F1 已在本机 Desktop 完成 dsh 身份闭合（严格 DB/IPC/renderer 保留与未知值拒绝）；受管分发、
+  持久 binding、事件、可执行 UI 与跨端能力尚未实施。
+- maker-core 的 AgentKind 现在包含 claude-code、codex、pi、dsh，但 DSH adapter 故意不注册；
+  DSH creation、模型路由、scheduler、MCP worker、Orca worker 和通用 bootstrap 都显式不可用，
+  不能因类型存在而执行或回退到其它 Agent。Mobile 新建任务与 device-link 契约未改动，仍属 F9。
 - 运行时分发目前已有 tools/pi 的整目录、hash 与 manifest 参考实现；仓库尚无 tools/dsh、
   DSH managed runtime、Host supervisor、DSH agent、session binding 或 DSH 专用 UI。
 - GitHub 于 2026-09-02 查询不存在标题或正文含 DSH 的现有 issue。

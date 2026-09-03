@@ -21,6 +21,7 @@ import {
   modelSupportsFastMode,
   nativeDefaultSourceId,
   sourcesForModel,
+  isModelProviderAgentKind,
   type AgentKind,
   type ModelDisableOverrides,
   type ProviderView,
@@ -83,6 +84,7 @@ export async function resolveDefaultScheduleRoute(
   preferredProviderId?: string | null,
   modelId?: string,
 ): Promise<{ model: string; providerId: string | null; catalogKnown?: boolean } | null> {
+  if (!isModelProviderAgentKind(agent)) return null;
   // Scheduler fire is a trusted main-process operation, not an untrusted status projection.
   // Allow the provider service to claim an existing native subscription before materializing
   // the route; otherwise legacy/local owners can look disconnected until another UI read heals it.
@@ -175,6 +177,9 @@ export async function verdictForModelRoute(
   model: string,
   providerId: string | null,
 ): Promise<ModelRouteVerdict> {
+  if (!isModelProviderAgentKind(agent)) {
+    return { kind: 'reject', reason: 'capability-model' };
+  }
   const catalog = getActiveCatalog();
   const guardOptions = tombstoneGuardOptions(catalog);
   let views: ProviderView[];
@@ -194,6 +199,7 @@ export async function pinExclusiveSessionProvider(
   model: string,
   providerId: string | null,
 ): Promise<string | undefined> {
+  if (!isModelProviderAgentKind(agent)) return undefined;
   let views: ProviderView[];
   try {
     views = await listRouteGuardProviders();
@@ -227,6 +233,9 @@ export async function resolveLenientSessionRoute(
   /** 仅 desiredFastMode=true 且路由被本解析改动时给出:落地拷贝不支持 Fast ⇒ false。 */
   fastMode?: boolean;
 }> {
+  if (!isModelProviderAgentKind(agent)) {
+    return { model: undefined, providerId: null, degraded: true };
+  }
   const catalog = getActiveCatalog();
   const guardOptions = tombstoneGuardOptions(catalog);
   let views: ProviderView[];
@@ -292,6 +301,7 @@ export async function resolveRouteCopyCapabilities(
   defaultEffort: string | null;
   supportsFastMode: boolean;
 } | null> {
+  if (!isModelProviderAgentKind(agent)) return null;
   let views: ProviderView[];
   try {
     views = await listRouteGuardProviders();
@@ -314,7 +324,7 @@ export async function resolveRouteCopyCapabilities(
  * 默认模型上:只查来源级 suspended 会漏掉「恰好停用了这一个模型」的 override
  * (PR #744 review 第十五轮)。
  */
-const DEFAULT_ONESHOT_MODEL: Record<AgentKind, string> = {
+const DEFAULT_ONESHOT_MODEL: Record<Exclude<AgentKind, 'dsh'>, string> = {
   'claude-code': 'claude-haiku-4-5',
   codex: 'gpt-5.4-mini',
   // pi oneShot 未实现(BaseAgent 默认抛 NotSupported);占位与 claude 同款网关小模型。
@@ -331,6 +341,7 @@ export async function isAgentOneShotRouteDisabled(
   agent: AgentKind,
   model?: string,
 ): Promise<boolean> {
+  if (!isModelProviderAgentKind(agent)) return true;
   if (model) {
     // reroute 同样视为不可发:one-shot 无法携带显式 providerId,实际派发仍会落在
     // 被停用的隐式默认来源上 —— 只有 pass 才允许(PR #744 review 第五轮)。

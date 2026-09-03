@@ -10,6 +10,9 @@ import {
   type OrcaWorkerPermissionMode,
 } from '../../shared/orca-worker-permission-mode.js';
 
+/** Orca workers remain limited to the three managed model-provider runtimes in F1. */
+export type OrcaWorkerAgentKind = Exclude<AgentKind, 'dsh'>;
+
 /** active team 的最小快照；创建 service 不直接持有 Drizzle row。 */
 export interface OrcaTeamSnapshot {
   id: string;
@@ -100,8 +103,8 @@ export function providerRouteRequiresExplicitSelection(
 
 /** 同一次 provider registry 快照派生出的可用性与默认模型路由，避免两次读取产生竞态。 */
 export interface OrcaWorkerProviderRoutingContext {
-  availability: Record<AgentKind, OrcaWorkerProviderSnapshot[]>;
-  resolveDefaultProviderIdForModel(agent: AgentKind, model: string): string | null;
+  availability: Record<OrcaWorkerAgentKind, OrcaWorkerProviderSnapshot[]>;
+  resolveDefaultProviderIdForModel(agent: OrcaWorkerAgentKind, model: string): string | null;
 }
 
 /** worker 创建边界只依赖 model 的运行能力，不直接耦合完整 capabilities 类型。 */
@@ -542,11 +545,11 @@ function agentConsumesExplicitFast(agent: AgentKind): boolean {
  * 纯函数(无 IO),便于单测。
  */
 export function buildNoProviderMessage(
-  agent: AgentKind,
-  availability: Record<AgentKind, OrcaWorkerProviderSnapshot[]>,
+  agent: OrcaWorkerAgentKind,
+  availability: Record<OrcaWorkerAgentKind, OrcaWorkerProviderSnapshot[]>,
 ): string {
   const base = `${agentDisplayName(agent)} 当前没有可用的模型供应商(provider)。请在「设置 → 模型供应商」连接一个支持 ${agentDisplayName(agent)} 的供应商后重试`;
-  const others = (['claude-code', 'codex', 'pi'] as AgentKind[]).filter(
+  const others = (['claude-code', 'codex', 'pi'] as OrcaWorkerAgentKind[]).filter(
     (a) => a !== agent && (availability[a]?.length ?? 0) > 0,
   );
   if (others.length === 0) return `${base}。`;
@@ -606,6 +609,13 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
   }
 
   async function createWorkerInTeam(params: OrcaWorkerCreateInTeamParams): Promise<OrcaWorkerCreationResult> {
+    if (params.agent === 'dsh') {
+      return {
+        ok: false,
+        errorCode: 'INVALID_PARAMS',
+        message: 'DSH cannot create Orca workers until its managed host and worker contract are registered',
+      };
+    }
     const role = normalizeRequiredText(params.role, 'role');
     if (!role.ok) return { ok: false, errorCode: 'INVALID_PARAMS', message: role.message };
     if (role.value.length > 32) {

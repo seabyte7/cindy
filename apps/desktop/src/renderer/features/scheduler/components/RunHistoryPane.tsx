@@ -87,6 +87,9 @@ export function RunHistoryPane({
   const sessionAgentMap = useMemo(() => {
     const m = new Map<string, AgentKind>();
     for (const sess of allSessions) {
+      // DSH cannot be a scheduler execution target in F1. Keep historical
+      // schedule rows on their own recorded agent instead of rewriting them.
+      if (sess.agentKind === 'dsh') continue;
       m.set(sess.id, sess.agentKind === 'cc' ? 'claude-code' : sess.agentKind === 'pi' ? 'pi' : 'codex');
     }
     return m;
@@ -95,6 +98,7 @@ export function RunHistoryPane({
     (run: ScheduleRun): AgentKind => {
       if (!run.sessionId) return s.agentKind;
       const referenceAgent = sessionReferences.get(run.sessionId)?.agentKind;
+      if (referenceAgent === 'dsh') return s.agentKind;
       return (
         sessionAgentMap.get(run.sessionId) ||
         (referenceAgent === 'cc' ? 'claude-code' : referenceAgent) ||

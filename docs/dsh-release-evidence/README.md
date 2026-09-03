@@ -1,11 +1,16 @@
-# DSH F0 Cindy Bridge Evidence
+# DSH Local Development Evidence
 
-This directory stores public, repeatable, secret-free F0 evidence packets. It is not a DSH runtime cache,
+This directory stores public, repeatable, secret-free local DSH development evidence packets. It is not a DSH runtime cache,
 installation location, or user-data directory. Never commit a wheel, executable, `DSH_HOME`, profile, session,
 full stderr, or credential.
 
 The current wheel verifier is retained for **comparison-only** alpha.3 protocol evidence. The approved runtime
 development path is a local `darwin-arm64` source build; it is not a production or distribution admission path.
+
+F1 local Desktop identity-closure evidence is in
+[`dsh-f1-local-identity-closure-report.md`](dsh-f1-local-identity-closure-report.md). It proves identity retention
+and unavailable-by-default boundaries only; it does not expand F0 into a managed runtime, product session,
+cross-platform, remote, Mobile or release claim.
 
 The local controlled build reads [`tools/dsh/source-release.json`](../../tools/dsh/source-release.json), verifies
 the upstream tag→commit→tree tuple, then applies its SHA-256-bound, preimage/postimage-checked minimal build

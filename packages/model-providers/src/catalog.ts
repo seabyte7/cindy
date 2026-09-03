@@ -12,7 +12,11 @@
 
 import { parseModelRegistry } from './modelAccessValidator.js';
 
-import { PI_MODEL_APIS, PI_REASONING_EFFORTS } from './types.js';
+import {
+  MODEL_PROVIDER_AGENT_KINDS,
+  PI_MODEL_APIS,
+  PI_REASONING_EFFORTS,
+} from './types.js';
 import type {
   Catalog,
   Provider,
@@ -29,7 +33,9 @@ import { isProviderRequestPath } from './provider-url.js';
 
 export { BUNDLED_CATALOG, BUILTIN_PROVIDERS } from './builtin.js';
 
-const AGENT_KINDS: readonly AgentKind[] = ['claude-code', 'codex', 'pi'];
+// DSH 是已知的产品 AgentKind，但 F1/F2 不允许任何 provider 目录为它声明模型或
+// routing；必须等受管 host + binding 合同落地后再扩展这个白名单。
+const AGENT_KINDS = MODEL_PROVIDER_AGENT_KINDS;
 const EFFORTS: readonly Effort[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const WIRE_PROTOCOLS = ['anthropic-messages', 'openai-responses', 'openai-chat'] as const;
 
@@ -41,7 +47,11 @@ function isWireProtocolAllowedForAgent(
   agent: AgentKind,
   value: unknown,
 ): value is (typeof WIRE_PROTOCOLS)[number] {
-  return isWireProtocol(value) && (agent !== 'claude-code' || value === 'anthropic-messages');
+  return (
+    agent !== 'dsh' &&
+    isWireProtocol(value) &&
+    (agent !== 'claude-code' || value === 'anthropic-messages')
+  );
 }
 
 function isValidModelRoute(

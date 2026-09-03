@@ -38,7 +38,6 @@ import { installSystemNetworkErrorToastListener } from '@/lib/systemNetworkError
 import { installSilentInstallToastListener } from '@/lib/silentInstallToast';
 import { installProviderUpstreamErrorToastListener } from '@/lib/providerUpstreamErrorToast';
 import { installAutoPermissionFallbackToastListener } from '@/lib/autoPermissionFallbackToast';
-import { agentKindToVendor } from '@/components/sidebar/VendorIcon';
 import { installCcMgrUpgradeListener } from '@/state/ccMgrUpgradeStore';
 import {
   preloadLocalCatalogSnapshot,
@@ -245,7 +244,7 @@ export function App() {
   useEffect(() => {
     const offDraft = window.electronAPI.onMakerDraftPrefApply(
       ({ agent, providerId, modelId, active, effort, fast, thinking, markModelChoice }) => {
-        const vendor = agentKindToVendor(agent);
+        const vendor = agent === 'claude-code' ? 'cc' : agent;
         if (active) {
           const patch =
             markModelChoice === false ? patchVendorPrefsPreservingModelChoice : patchVendorPrefs;

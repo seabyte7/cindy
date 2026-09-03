@@ -56,10 +56,10 @@ import {
 import { LocalPackagingTag } from './LocalPackagingTag';
 import { ModelPriceOverrideDialog } from './ModelPriceOverrideDialog';
 
-import { isAgentSelectableModel } from '@cindy/model-providers';
-import type { AgentKind, CatalogModel, ProviderView } from '@cindy/model-providers';
+import { isAgentSelectableModel, isModelProviderAgentKind } from '@cindy/model-providers';
+import type { ModelProviderAgentKind, CatalogModel, ProviderView } from '@cindy/model-providers';
 
-const AGENT_LABEL: Record<AgentKind, string> = {
+const AGENT_LABEL: Record<ModelProviderAgentKind, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
   pi: 'Pi',
@@ -88,6 +88,11 @@ const CAPABILITY_CATEGORIES = new Set<ModelCategory>([
   'other',
 ]);
 const DEFAULT_COLLAPSED_CATEGORIES = CAPABILITY_CATEGORIES;
+
+/** DSH is a product identity, not a configurable model-provider runtime in F1. */
+function modelProviderAgents(provider: ProviderView): ModelProviderAgentKind[] {
+  return provider.agents.filter(isModelProviderAgentKind);
+}
 
 function readCollapsedMap(key: string): Record<string, boolean> | null {
   const raw = window.localStorage.getItem(key);
@@ -134,9 +139,9 @@ export interface UnionModelRow {
   /** 规范化 id(剥掉桥接命名空间前缀后的 canonical key;仅用于合并与搜索,写开关用 byAgent 的真实 id)。 */
   id: string;
   name: string;
-  byAgent: Partial<Record<AgentKind, CatalogModel>>;
+  byAgent: Partial<Record<ModelProviderAgentKind, CatalogModel>>;
   /** 该模型可用的 agent(按 provider.agents 顺序)。 */
-  avail: AgentKind[];
+  avail: ModelProviderAgentKind[];
 }
 
 /**
@@ -145,7 +150,7 @@ export interface UnionModelRow {
  * 到另一 agent 时 id 带前缀(chatgpt/gpt-5.5 vs gpt-5.5),必须归一后合并,
  * 否则并集出现两行、各自被误标单端。
  */
-function canonicalModelKey(provider: ProviderView, agent: AgentKind, id: string): string {
+function canonicalModelKey(provider: ProviderView, agent: ModelProviderAgentKind, id: string): string {
   for (const prefix of provider.routing[agent]?.modelPrefixes ?? []) {
     if (id.startsWith(prefix)) return id.slice(prefix.length);
   }
@@ -157,7 +162,7 @@ function canonicalModelKey(provider: ProviderView, agent: AgentKind, id: string)
 export function buildUnionRows(provider: ProviderView): UnionModelRow[] {
   const rows: UnionModelRow[] = [];
   const byKey = new Map<string, UnionModelRow>();
-  for (const agent of provider.agents) {
+  for (const agent of modelProviderAgents(provider)) {
     for (const m of provider.models[agent] ?? []) {
       const key = canonicalModelKey(provider, agent, m.id);
       const existing = byKey.get(key);
@@ -189,7 +194,7 @@ export function buildUnionRows(provider: ProviderView): UnionModelRow[] {
       if (m) realIds.add(m.id);
     }
   }
-  const anchorAgent = provider.agents[0] ?? 'claude-code';
+  const anchorAgent = modelProviderAgents(provider)[0] ?? 'claude-code';
   // 向量清单同理(PR #1707 review):派生侧一直按 isModelDisabled 过滤,但设置页
   // 没有对应的行 —— 停用轴有实现无入口,用户没法单独拦住某个向量型号的付费调用。
   // group 钉 'embedding'(classifyModel 的已知非聊天分类,已有 i18n 标签「向量」)。
@@ -229,7 +234,7 @@ export function buildUnionRows(provider: ProviderView): UnionModelRow[] {
 }
 
 /** 该行在指定 agent 下的可见性(不可用 → null)。 */
-function rowEnabled(providerId: string, row: UnionModelRow, agent: AgentKind): boolean | null {
+function rowEnabled(providerId: string, row: UnionModelRow, agent: ModelProviderAgentKind): boolean | null {
   const m = row.byAgent[agent];
   return m ? isModelEnabled(agent, providerId, m) : null;
 }
@@ -267,7 +272,7 @@ export function isRowDiverged(providerId: string, row: UnionModelRow): boolean {
 }
 
 /** 该行当前隐藏的全部 agent;普通模式的分歧 chip 必须完整展示,不能只取首个。 */
-export function getHiddenAgents(providerId: string, row: UnionModelRow): AgentKind[] {
+export function getHiddenAgents(providerId: string, row: UnionModelRow): ModelProviderAgentKind[] {
   return row.avail.filter((agent) => rowEnabled(providerId, row, agent) === false);
 }
 
@@ -281,14 +286,14 @@ export function getHiddenAgents(providerId: string, row: UnionModelRow): AgentKi
  */
 export function countModelsByAgent(
   provider: ProviderView,
-  isDisabled: (agent: AgentKind, model: CatalogModel) => boolean = (_agent, model) =>
+  isDisabled: (agent: ModelProviderAgentKind, model: CatalogModel) => boolean = (_agent, model) =>
     model.disabled === true,
 ): Array<{
-  agent: AgentKind;
+  agent: ModelProviderAgentKind;
   on: number;
   total: number;
 }> {
-  return provider.agents.map((agent) => {
+  return modelProviderAgents(provider).map((agent) => {
     const models = (provider.models[agent] ?? []).filter(
       (model) =>
         isAgentSelectableModel(model, { userProvider: provider.source === 'user' }) &&
@@ -395,7 +400,8 @@ export function UnifiedModelList({
   // 按钮方向与计数陈旧)。行内开关读取不 memo,天然新鲜;只有 counts 依赖它。
   const visibilityVersion = useModelVisibilityVersion();
 
-  const multiAgent = provider.agents.length > 1;
+  const providerAgents = modelProviderAgents(provider);
+  const multiAgent = providerAgents.length > 1;
   const unionRows = useMemo(() => buildUnionRows(provider), [provider]);
 
   const rowDisabledEffective = useCallback(
@@ -556,7 +562,7 @@ export function UnifiedModelList({
    *  行 key):刚停用、快照未回来的行同样不写(PR #744 review)。 */
   const handleBulk = useCallback(() => {
     const next = !allOn;
-    const targets = provider.agents.flatMap((agent) =>
+    const targets = providerAgents.flatMap((agent) =>
       (provider.models[agent] ?? [])
         .filter(
           (m) =>
@@ -570,7 +576,7 @@ export function UnifiedModelList({
     if (setModelVisibilities(provider.id, targets, next) === false) {
       showVisibilityWriteFailure();
     }
-  }, [allOn, provider, pendingDisabled, showVisibilityWriteFailure]);
+  }, [allOn, provider, providerAgents, pendingDisabled, showVisibilityWriteFailure]);
 
   /** 行级「⋯」菜单(hover 显现;菜单打开期间保持可见):停用动作的唯一入口。 */
   const rowMenu = (row: UnionModelRow) => (
@@ -702,7 +708,7 @@ export function UnifiedModelList({
       {splitMode && (
         <div className="flex items-center justify-end px-5 pb-1">
           <div className="flex">
-            {provider.agents.map((a) => (
+            {providerAgents.map((a) => (
               <span
                 key={a}
                 className="w-20 text-center text-11 font-medium uppercase"
@@ -796,7 +802,7 @@ export function UnifiedModelList({
                       const paymentRequired = isRowPaymentRequired(row);
                       // 能力注记:多 agent 供应商里缺少任一通道就标(单 agent 供应商头部已说明);
                       // 能力模型行不标(它们本来就不参与 agent 维度)。
-                      const missingAgents = provider.agents.filter(
+                      const missingAgents = providerAgents.filter(
                         (agent) => !row.avail.includes(agent),
                       );
                       const capNote =
@@ -911,13 +917,13 @@ export function UnifiedModelList({
                           {capability && (
                             <span
                               className="shrink-0"
-                              style={{ width: splitMode ? provider.agents.length * 80 : 36 }}
+                              style={{ width: splitMode ? providerAgents.length * 80 : 36 }}
                             />
                           )}
                           {!capability &&
                             (splitMode ? (
                               <div className="flex shrink-0 items-center">
-                                {provider.agents.map((a) => {
+                                {providerAgents.map((a) => {
                                   const m = row.byAgent[a];
                                   return (
                                     <span key={a} className="flex w-20 items-center justify-center">

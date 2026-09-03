@@ -67,11 +67,13 @@ AGENTS.md 的强制门禁为准：
 
 ### F1: Identity Closure
 
-- Compile/exhaustive tests for AgentKind dsh across maker-core, maker-shared, Desktop, device-link and Mobile.
-- Inventory test covers every enumerated closed union plus a negative unknown-kind decoder test.
-- Regression fixtures preserve cc/codex/pi session creation, persistence, search, scheduler, remote routing,
-  agent switch and Mobile projection.
-- Assert unavailable DSH cannot be selected merely because its type exists.
+- Active acceptance is local Desktop only: typecheck plus maker-core unregistered-session failure, strict
+  agent-kind conversion/unknown rejection, DB decoder, session creation, Orca worker, catalog, New Maker and
+  renderer roster/glyph regressions. Exact commands/results are recorded in
+  [`dsh-f1-local-identity-closure-report.md`](../../dsh-release-evidence/dsh-f1-local-identity-closure-report.md).
+- Assert unavailable DSH cannot be selected merely because its type exists, and cannot acquire a model route,
+  scheduler target, MCP worker target or generic session bootstrap.
+- Mobile, SSH and device-link protocol changes were not made and are not F1 validation evidence.
 
 ### F2: Runtime and Host Supervisor
 

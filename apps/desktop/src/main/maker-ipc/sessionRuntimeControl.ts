@@ -2,6 +2,7 @@ import type { AgentKind, Effort } from '@cindy/maker-core';
 import {
   connectedProvidersForAgent,
   isModelSelectableForNewRoute,
+  isModelProviderAgentKind,
   type CatalogModel,
   type ProviderView,
 } from '@cindy/model-providers';
@@ -430,14 +431,19 @@ export function pickSessionRuntimeFallback(params: {
   maxHops: number;
   currentHop: number;
 }): SessionRuntimeProfile | null {
+  // DSH has no model-provider rail in F1/F2. Returning a fallback here would
+  // silently convert a persisted DSH identity into a legacy runtime route.
+  const agentKind = params.current.agentKind;
+  if (!isModelProviderAgentKind(agentKind)) return null;
   if (params.currentHop >= params.maxHops) return null;
   const visited = new Set(params.visitedRoutes);
   visited.add(routeKey(params.current));
-  const rail = connectedProvidersForAgent([...params.providers], params.current.agentKind);
+  const rail = connectedProvidersForAgent([...params.providers], agentKind);
   const candidates: Array<{ providerId: string; model: CatalogModel }> = [];
 
   for (const provider of rail) {
-    for (const model of provider.models[params.current.agentKind] ?? []) {
+    const modelsForAgent: readonly CatalogModel[] = provider.models[agentKind] ?? [];
+    for (const model of modelsForAgent) {
       if (
         !isModelSelectableForNewRoute(model, {
           userProvider: provider.source === 'user',
@@ -451,7 +457,8 @@ export function pickSessionRuntimeFallback(params: {
     }
   }
   for (const provider of rail) {
-    for (const model of provider.models[params.current.agentKind] ?? []) {
+    const modelsForAgent: readonly CatalogModel[] = provider.models[agentKind] ?? [];
+    for (const model of modelsForAgent) {
       if (
         !isModelSelectableForNewRoute(model, {
           userProvider: provider.source === 'user',
@@ -459,7 +466,7 @@ export function pickSessionRuntimeFallback(params: {
       ) {
         continue;
       }
-      if (!model.newSessionDefault?.includes(params.current.agentKind)) continue;
+      if (!model.newSessionDefault?.includes(agentKind)) continue;
       candidates.push({ providerId: provider.id, model });
     }
   }
@@ -476,7 +483,7 @@ export function pickSessionRuntimeFallback(params: {
     });
     if (!axes.ok) continue;
     return {
-      agentKind: params.current.agentKind,
+      agentKind,
       model: candidate.model.id,
       providerId: candidate.providerId,
       effort: axes.effort,

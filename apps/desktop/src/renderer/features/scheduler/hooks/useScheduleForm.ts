@@ -360,6 +360,9 @@ export function useScheduleForm(initial: Schedule | null = null): UseScheduleFor
         // remembered 保留旧快照 —— 用户切走再切回还能还原上一个真实绑定。
         return { ...f, targetSessionId: PENDING_SESSION_ID };
       }
+      // DSH has no scheduler runtime in F1; do not project it into a legacy
+      // schedule agent when an imported/persisted DSH task is inspected.
+      if (session.agentKind === 'dsh') return f;
       const next: ScheduleFormState = {
         ...f,
         targetSessionId: session.id,

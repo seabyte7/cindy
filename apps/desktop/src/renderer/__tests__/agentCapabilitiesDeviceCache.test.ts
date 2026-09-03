@@ -84,6 +84,7 @@ describe('useAgentCapabilities deviceId-aware cache', () => {
     expect(getCapabilities).toHaveBeenCalledWith('claude-code');
     expect(getCapabilities).toHaveBeenCalledWith('codex');
     expect(getCapabilities).toHaveBeenCalledWith('pi');
+    expect(getCapabilities).toHaveBeenCalledWith('dsh');
     expect(invoke).not.toHaveBeenCalled();
     expect(mod.getCachedCapabilities('claude-code')?.availableModels[0].displayName).toBe(
       'local:claude-code',
@@ -106,12 +107,12 @@ describe('useAgentCapabilities deviceId-aware cache', () => {
     );
   });
 
-  it('本机目录快照在可选 Pi 不可用时仍返回 Claude Code 与 Codex 能力', async () => {
+  it('本机目录快照在可选 Pi 与未绑定 DSH 不可用时仍返回 Claude Code 与 Codex 能力', async () => {
     const { getCapabilities } = stubElectron();
     getCapabilities.mockImplementation(async (agent: string) => {
-      if (agent === 'pi')
+      if (agent === 'pi' || agent === 'dsh')
         throw new Error(
-          "[MAKER_NOT_FOUND] Agent 'pi' is not registered (available: claude-code, codex)",
+          `[MAKER_NOT_FOUND] Agent '${agent}' is not registered (available: claude-code, codex)`,
         );
       return caps(`local:${agent}`);
     });
@@ -122,6 +123,7 @@ describe('useAgentCapabilities deviceId-aware cache', () => {
       ['codex', caps('local:codex')],
     ]);
     expect(getCapabilities).toHaveBeenCalledWith('pi');
+    expect(getCapabilities).toHaveBeenCalledWith('dsh');
   });
 
   it('本机目录快照在核心 agent 不可用时仍拒绝提交部分能力', async () => {
@@ -227,6 +229,7 @@ describe('useAgentCapabilities deviceId-aware cache', () => {
     expect(invoke).toHaveBeenCalledWith('dev-1', 'maker:get-capabilities', ['claude-code']);
     expect(invoke).toHaveBeenCalledWith('dev-1', 'maker:get-capabilities', ['codex']);
     expect(invoke).toHaveBeenCalledWith('dev-1', 'maker:get-capabilities', ['pi']);
+    expect(invoke).toHaveBeenCalledWith('dev-1', 'maker:get-capabilities', ['dsh']);
     expect(getCapabilities).not.toHaveBeenCalled();
     expect(mod.getCachedCapabilities('claude-code', 'dev-1')?.availableModels[0].displayName).toBe(
       'dev-1:claude-code',
@@ -522,8 +525,8 @@ describe('useAgentCapabilities deviceId-aware cache', () => {
       mod.prefetchDeviceCapabilities('dev-1'),
       mod.prefetchDeviceCapabilities('dev-1'),
     ]);
-    // cc + codex + pi 各一次 = 3 次,而非 6 次
-    expect(invoke).toHaveBeenCalledTimes(3);
+    // cc + codex + pi + dsh 各一次 = 4 次,而非两轮各发一次。
+    expect(invoke).toHaveBeenCalledTimes(4);
   });
 
   it('驱逐:evict 只清该设备,本地与其它设备保留', async () => {
@@ -621,15 +624,17 @@ describe('useAgentCapabilities deviceId-aware cache', () => {
     const stale = mod.prefetchDeviceCapabilities('dev-1');
     mod.evictDeviceCapabilities('dev-1');
     const fresh = mod.prefetchDeviceCapabilities('dev-1');
-    // 每轮按 ALL_AGENT_KINDS 顺序 push 三个 resolver(cc/codex/pi):
-    // 第一轮(stale)= [0][1][2],第二轮(fresh)= [3][4][5]。
-    resolvers[3](caps('fresh:claude'));
-    resolvers[4](caps('fresh:codex'));
-    resolvers[5](caps('fresh:pi'));
+    // 每轮按 ALL_AGENT_KINDS 顺序 push 四个 resolver(cc/codex/pi/dsh):
+    // 第一轮(stale)= [0..3],第二轮(fresh)= [4..7]。
+    resolvers[4](caps('fresh:claude'));
+    resolvers[5](caps('fresh:codex'));
+    resolvers[6](caps('fresh:pi'));
+    resolvers[7](caps('fresh:dsh'));
     await fresh;
     resolvers[0](caps('stale:claude'));
     resolvers[1](caps('stale:codex'));
     resolvers[2](caps('stale:pi'));
+    resolvers[3](caps('stale:dsh'));
     await stale;
 
     expect(claudeListener).toHaveBeenNthCalledWith(1, { status: 'loading' });

@@ -101,6 +101,7 @@ import { SortableList } from '@/components/sidebar/SortableList';
 import { localCliDisplayName, type LocalCliDetection } from '../../../shared/localCliDetect';
 import { isBuiltinRefreshableProviderId } from '../../../shared/providerModelRefresh';
 import { applyProviderOrder } from '../../../shared/providerOrder';
+import { isModelProviderAgentKind } from '@cindy/model-providers';
 import type { CustomProviderConfig, ProviderView } from '@cindy/model-providers';
 
 // ---------------------------------------------------------------------------
@@ -2252,7 +2253,7 @@ export function ProvidersSection() {
         const config = providerViewToCustomProviderConfig(p);
         let added = 0;
         let anyOk = false;
-        for (const agent of p.agents) {
+        for (const agent of p.agents.filter(isModelProviderAgentKind)) {
           const rt = config.runtimes[agent];
           if (!rt?.baseUrl) continue;
           const authMethod =
