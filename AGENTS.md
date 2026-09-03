@@ -8,6 +8,13 @@
 - 本仓库只负责 desktop、mobile 及其共享 packages。
 - 服务端位于独立仓库；除非用户明确要求，不要跨仓修改服务端。
 - 开始工作前先检查工作区状态和相关源码，不覆盖、不回退用户已有改动。
+- 本检出通常是用户从上游 fork 的仓库。每次涉及 GitHub 或 Git remote 前，先核实
+  `origin` 与 `upstream` 的实际地址；`upstream`（被 fork 的原仓库）默认**只读**，只可
+  拉取或检查，绝不可推送代码、创建／修改／关闭 Issue 或 PR、发表评论／评审、发布版本、
+  改变仓库设置，或通过 `gh`、网页、API、bot、自动化等任何等价路径执行这些操作。
+- 对 `upstream` 的任何写操作，必须由用户在**当次指令**中明确授权具体目标与动作；既往
+  的泛化授权、对 `origin` 的授权、或“可以创建 Issue”等表述均不得推定为上游授权，且后续
+  更严格的仓库边界自动覆盖此前授权。拿不准时停止并请求用户确认。
 
 ## 规则组织
 
@@ -156,6 +163,8 @@
   维护者明确选择例外时才允许直推主干。
 - commit、push 和创建 PR 的执行时机由开发者或 Codex、Claude Code、Cindy 等宿主
   工作流决定；仓库规则本身不额外授权外部写操作。
+- 向用户自己的 `origin` 推送、创建 PR 或 Issue 同样需要用户明确授权；该授权只适用于
+  指定仓库、目标分支和本次变更，不能延伸到 `upstream` 或任何其他远程仓库。
 - 提交 PR 时遵循 `.github/PULL_REQUEST_TEMPLATE.md`，如实说明改动、验证和风险。
 - 非 fork 的非 draft PR 会触发自动 code review（`.github/workflows/pr-code-review.yml`），
   审阅口径见根目录 `REVIEW.md`。它是**建议性**检查，不替代人工 review，也不替代
