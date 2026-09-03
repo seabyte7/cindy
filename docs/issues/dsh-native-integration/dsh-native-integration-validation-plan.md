@@ -77,14 +77,24 @@ AGENTS.md 的强制门禁为准：
 
 ### F2: Runtime and Host Supervisor
 
-- Unit tests for reviewed pin resolution, archive hash, tree manifest, sidecar requirement, optional asset,
-  unsupported platform and no fallback to PATH/npm/pnpm/pip/curl/system Node.
-- Provisioner/launch negative tests reject a caller-supplied binary, command, argument or environment; reject a
+- Local F2 evidence is recorded in
+  [`dsh-f2-local-runtime-foundation-report.md`](../../dsh-release-evidence/dsh-f2-local-runtime-foundation-report.md).
+  It is partial by design: the checked-in pin and importer accept only a caller-provided, F0-verified local
+  `darwin-arm64` archive; no CDN/agent-binaries registration or other platform is exercised.
+- Unit tests cover reviewed local pin resolution, archive hash, tree manifest, sidecar requirement, unsupported
+  platform and no fallback to URL/fetch/PATH/npm/pnpm/pip/curl/system Node.
+- Provisioner/launch negative tests reject a caller-supplied binary, command, argument or ambient environment; reject a
   symlink or post-promotion path whose `realpath` leaves the verified install root; and reject a non-regular,
   non-executable or digest/mode-mismatched executable or sidecar before spawn.
-- Scope tests: non-project cwd, explicit Home, unique scope key, allowlisted environment, no secret in argv/log/
-  profile/DB, stale endpoint, timeout, crash, account switch, quit and orphan cleanup.
-- Real binary smoke uses F0 release for version/handshake/close; mock-only tests are insufficient.
+- Scope tests cover non-project cwd, cindy-managed Home, unique scope key, allowlisted environment, no secret in
+  argv/log/profile/DB, failed-start cleanup and account switch. Existing Home execution is explicitly unavailable
+  before F7.
+- The real-binary integration installs the F0 release into a fresh temporary Main-owned root, then proves
+  version and Desktop Main ACP initialize/create/close from the installed path. Mock-only tests are insufficient.
+- Remaining blocking proof: a direct DSH runtime handshake and teardown under an identity-bound macOS native
+  containment adapter. A no-network Seatbelt experiment is explicitly a negative result: shell-launched
+  `--version` succeeded, while the installed runtime launched by Node/Desktop Main exited `SIGABRT` before ACP;
+  neither variant is product-launch evidence.
 
 ### F3: Bridge and Binding
 

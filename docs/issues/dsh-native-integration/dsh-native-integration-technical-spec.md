@@ -32,7 +32,7 @@ user's `origin` fork.
 | Agent identity 已有四个保留值 | `packages/maker-core/src/types/common.ts` 定义 `AgentKind` 为 claude-code、codex、pi、dsh；`apps/desktop/src/shared/agentKindConversion.ts` 对已存在的 dsh 严格 round-trip | F1 已完成本机 Desktop 身份闭合；未知显式值失败，不得回退。受管会话与 runtime 注册仍留给 F2/F3。 |
 | Agent adapter 是显式 export | `packages/maker-core/src/agents/index.ts` 只 export ClaudeCodeAgent、CodexAgent、PiAgent，刻意不注册 DSH adapter | F1 的 dsh 不能被 Maker 当作 Claude Code 或任一已注册 agent 运行；F3 才能经受限 Host-injected port 添加 DshAgent。 |
 | 通用事件已可保留 dsh source | `packages/maker-core/src/types/events.ts` 已加入 dsh source，但没有 DSH raw event 投影 | F4 仍必须以有限、版本化的 generic activity 契约扩展，不能放任 raw DSH JSON。 |
-| Desktop 的 native binary 管理已经存在 | apps/desktop/src/main/agent-binaries/index.ts | F2 在该边界增加 optional dsh asset；Renderer 不获得 binary path 或下载权。 |
+| Desktop 的 native binary 管理已经存在 | apps/desktop/src/main/agent-binaries/index.ts | 现阶段不接入 dsh asset：本机 offline pin/installer 独立存在，直到 macOS containment 通过；Renderer 永不获得 binary path 或下载权。 |
 | Pi 已验证目录型 runtime 更新模式 | tools/pi/latest.json 与 tools/pi/update.mjs 包含平台 pin、digest、整目录 manifest 和 sidecar 检查 | tools/dsh 必须使用更严格的 fixed-source-to-controlled-archive、tree manifest 与 sidecar 校验，不能把 Pi 的平台集直接照搬。 |
 | Desktop 与跨端存在历史三值闭合点 | `apps/desktop` 已完成其 local identity、IPC 和 renderer 路径审计；`apps/mobile` 与 device-link 没有改动 | F1 当前只证明本机 Desktop；Mobile/device-link 的 append-only 契约与旧端降级仍是 F9 的受控工作，不能由 Desktop 类型变更替代。 |
 | migration 已有历史链 | apps/desktop/drizzle/meta/_journal.json、apps/desktop/drizzle/scripts/ | DSH 只能新增 append-only migration 和回放测试，不能改写历史 migration。 |
@@ -109,13 +109,15 @@ CapabilitySnapshot; Renderer and Mobile receive a display-safe projection, never
 
 ### 3. Managed runtime, Home and Host scope
 
-F2 may later create tools/dsh/latest.json and tools/dsh/update.mjs plus Desktop Main dsh-host modules, but those
-distribution/update paths are deferred in the current local-only scope. If reauthorized, the asset descriptor is
-optional and directory-based, with installSubdir dsh. The updater must:
+F2 now provides `tools/dsh/latest.json`, an offline-only `tools/dsh/update.mjs`, and Desktop Main `dsh-host`
+admission/scope modules. They are a local development input path, not a distribution/update system: the importer
+requires explicit local archive and F0 bundle-manifest paths, has no fetch/CDN/URL/default output path, and cannot
+register DSH. A future optional directory asset remains deferred until macOS containment is proven. The local
+importer must:
 
 1. receive only a user-authorized, integrity-verified archive built from a reviewed source tag→commit→tree pin
    rather than discover a mutable “latest” release; release provenance has its own future gate;
-2. download into a staging directory, validate archive hash before extraction, reject traversal, symlink,
+2. stage only that supplied local archive, validate archive hash before extraction, reject traversal, symlink,
    special-file, unexpected top-level file and missing-sidecar cases;
 3. validate executable mode and the full extracted-tree manifest before producing the Cindy archive;
 4. validate the archive hash and the extracted-tree manifest again at install time;
@@ -130,9 +132,11 @@ staging-to-live promotion, before every product spawn.
 
 DshHostManager owns a scope key of account scope, runtime release, execution location and Home mode. It creates
 a non-project launcher cwd and one explicit DSH_HOME. cindy-managed roots live below Electron userData; staging
-and run material use task-specific temp directories. existing-dsh-home is an explicit non-secret override only.
-A scope starts lazily, performs a version/ACP-capability handshake before it is visible, has health probing and
-uses quiesce -> flush -> close -> TERM -> bounded KILL. A failure disables only that DSH scope.
+and run material use task-specific temp directories. existing-dsh-home is an explicit non-secret override only and
+is execution-blocked until F7. A scope starts lazily and performs a version/ACP-capability handshake before it is
+visible. It currently requires an injected launch-time containment-proven client; it must not fall back to the F0
+process-group transport. After that adapter is evidenced it uses quiesce -> flush -> close -> TERM -> bounded KILL.
+A failure disables only that DSH scope.
 
 Main obtains credentials from the existing secure store, passes only named secrets through a whitelist child
 environment, redacts bounded stderr, and removes temporary materials after failure, cancellation, account switch

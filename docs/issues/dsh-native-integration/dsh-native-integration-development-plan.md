@@ -154,16 +154,41 @@ Rollback:
 
 ## Phase 2: Managed Runtime and Host Supervisor
 
+Status: **in progress — local admission and Main-only scope foundation delivered; no product registration.**
+
 Goal: 在 Desktop Main 建立可验证、可隔离、失败不影响其他 Agent 的 DSH runtime 与 Host scope。
 
 Scope:
-- 新增 tools/dsh/latest.json、update.mjs、CDN archive schema 和 testable extraction validator。
-- 在 agent-binaries 增 optional dsh directory asset；平台矩阵严格按 F0，未发布平台不注册。
+- 新增 `tools/dsh/latest.json`、offline-only `update.mjs` 和 testable extraction validator。当前只接受
+  已通过 F0 bundle verifier 的调用方显式本地 archive；不做 CDN schema、下载、发布或其它平台输入。
+- 在 containment-proven launcher 可用前，不接入现有 CDN `agent-binaries`；未来 optional dsh directory
+  asset 只能指向该 local pin，未发布平台永不注册。
 - 新增 Main dsh-host boundary：scope key、Home resolver、launcher cwd、credential env builder、
   child process supervisor、health probe、bounded stderr、quit/account-switch teardown 和 process monitor。
 - 实现 cindy-managed Home；existing-dsh-home 的显式选择只保存 non-secret override，暂不开放
   F7 的 extensions UI。
 - host 启动只完成 handshake/capability snapshot；失败结果经 capabilities/status 暴露，不阻塞 app。
+
+Delivered local foundation:
+
+- `dsh-host/local-runtime.ts` fixes the sole local archive, rejects symlink/special/traversal/unexpected entries,
+  verifies hash/tree before extraction and after same-volume promotion, and rechecks the actual executable/sidecars
+  by realpath/mode/digest before a future spawn.
+- `dsh-host/scope.ts` and `host-manager.ts` own hashed account/release/home-mode scope identity, managed Home,
+  isolated launcher cwd, allowlisted memory-only secret injection, single-flight handshake and bounded cleanup
+  ownership. `DshHostManager` has no default child launcher: an unproven process group cannot satisfy containment.
+- The opt-in real-binary integration test installs the fresh F0 archive and runs Desktop Main ACP
+  initialize/create/close from that installed path. It remains a local evidence test, not product registration.
+
+Remaining F2 exit blockers:
+
+- Implement and run an identity-bound macOS native containment launcher against the installed DSH runtime. The
+  no-network Seatbelt experiment is a negative result, not a fallback: shell → `sandbox-exec` → DSH `--version`
+  succeeded, but the same installed runtime launched through Node/Desktop Main `spawn()` exited `SIGABRT` before
+  ACP initialize, with both detached and attached variants. The experiment was removed; no Seatbelt adapter ships.
+  A future launcher must prove ACP initialize/create/close and real process-tree teardown from the Desktop process.
+- Wire an optional local asset/status into Desktop bootstrap only after that containment evidence exists. Do not
+  add a remote distribution path as a substitute.
 
 Changes:
 - 对 archive 与解包做双重 hash + tree manifest 验证，并拒绝 traversal、symlink、special file、

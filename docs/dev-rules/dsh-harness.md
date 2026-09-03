@@ -252,13 +252,16 @@ ACP 扩展能力。
   lockfile/Cindy pkg-toolchain/build-script digest、固定 Node/pnpm、唯一 target/sidecar。轻量 tag
   没有上游签名时必须明确记录。每次本地构建先验证输入和 SEA archive，再从刚验证 archive 的新解压目录
   运行 smoke/E2E。禁止 GitHub workflow、上传 archive、attestation 或任何其它平台构建。
-- F2 的 `tools/dsh/latest.json` 与 `tools/dsh/update.mjs` 设计在当前范围内**不实施**。若用户日后
-  明确授权本机受管安装，才可接受由本地验证过的 archive pin（archive URL/SHA-256/size、可执行
-  相对路径、sidecar 与完整目录 manifest），先校验 archive hash、再校验解压 tree；发行、下载源或
-  provenance 另需独立授权，正式安装包也不得从 source checkout 或上游 wheel 现场构建。
-- `VendorKey` / `AgentBinaryKind` 增 `'dsh'`，配置使用 `tar-gz-dir`、`installSubdir: 'dsh'`
-  和 `optionalAsset: true`。manifest 缺资产、完整性失败、版本探针失败或准备超时都只使 dsh
-  本次不可用，不得阻塞 Cindy 启动，也不得执行系统下载器、npm、pnpm、pip 或 curl 兜底。
+- F2 已交付**本机离线 admission 基座**：`tools/dsh/latest.json` 固定唯一 `darwin-arm64`
+  archive 的 filename/SHA-256/size、可执行、sidecar 与全 tree manifest；`tools/dsh/update.mjs`
+  只导入调用方明确给出的、已经 F0 `verifyReleaseBundle` 验证的本地 archive。它没有 URL、fetch、
+  CDN、默认输出目录或 `PATH`/npm/pnpm/pip/curl fallback，且不提交 runtime。Desktop Main 的
+  `dsh-host/local-runtime.ts` 在解包前、staging、原子同卷提升后和**每次 spawn 前**都复验 regular-file、
+  mode、SHA-256、realpath containment、sidecar 和 marker；任何不一致均为 unavailable。
+- 当前不会把 dsh 放进现有 CDN `agent-binaries` 流程：该流程的 manifest/download 模型与本机离线
+  pin 不同。待存在经验证、受 containment 约束的本机 product launcher 后，才可新增
+  `VendorKey` / `AgentBinaryKind: 'dsh'` 的 optional directory asset；届时仍只能消费上述固定
+  local pin，缺失/失败必须只让 dsh unavailable，不能阻塞 Cindy 或回退到系统下载器。
 - 自包含可执行是生产唯一启动形态。Cindy 正式包 `RunAsNode=false`，禁止以
   `ELECTRON_RUN_AS_NODE=1`、`process.execPath`、npm `bin.js` 或用户 Node 运行 dsh。
 
@@ -433,7 +436,16 @@ child 回归测试验证。F0 的 POSIX transport 已用独立进程组覆盖普
 之前**拒绝启动**；F2 也不得把当前 POSIX process-group 证据当作 Linux/macOS product launch 放行。
 Linux runner 仍须以真实 runtime 得到 close smoke，macOS 证据不能替代它；Windows 则在 F2
 identity-bound containment 到位后才可首次执行同一类 smoke，之前的 archive-only 证明不得计作 runtime
-准入证据。
+准入证据。F2 的 `DshHostManager` 已实现 Main-only scope key、managed Home、non-project launcher cwd、
+allowlist child env、lazy single-flight handshake、startup/account-switch/quit cleanup 与 capability snapshot；
+它**没有默认 spawn**，必须由 macOS launch-time containment adapter 注入 `DshAcpSessionClient`。现有
+process-group transport 仍只可作 F0 evidence。用户 existing DSH Home 也只可保存 non-secret override，
+在 F7 native-extension gate 前一律拒绝执行，绝不读取/合并其 profile 或 plugin。
+
+macOS 的 `sandbox-exec` 不能被当作该 adapter：本机无网络实验中，shell 直接启动同一受限 DSH
+`--version` 可退出成功，但 Node/Desktop Main `spawn()` 启动同一 profile 与已校验 runtime 会在 ACP 前
+`SIGABRT`（attached 与 detached 均然）。该实验实现不得接入产品；F2 只能以可从 Desktop 进程完成
+identity-bound containment、ACP handshake 和真实整树回收证明的原生 launcher 退出。
 
 ### 阶段 3：Desktop host（本机实验入口）
 

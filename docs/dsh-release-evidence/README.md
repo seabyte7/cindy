@@ -12,6 +12,11 @@ F1 local Desktop identity-closure evidence is in
 and unavailable-by-default boundaries only; it does not expand F0 into a managed runtime, product session,
 cross-platform, remote, Mobile or release claim.
 
+F2's local runtime-admission and Main-only Host-scope foundation is documented in
+[`dsh-f2-local-runtime-foundation-report.md`](dsh-f2-local-runtime-foundation-report.md). It proves only the
+offline local archive import/install/reverification and the installed-path Desktop Main ACP lifecycle. It does
+not register a product DSH agent: the macOS launch-time containment adapter remains an explicit F2 exit gate.
+
 The local controlled build reads [`tools/dsh/source-release.json`](../../tools/dsh/source-release.json), verifies
 the upstream tag→commit→tree tuple, then applies its SHA-256-bound, preimage/postimage-checked minimal build
 adaptation that permits the exact Node SEA target the alpha.3 parser otherwise rejects. It downloads the

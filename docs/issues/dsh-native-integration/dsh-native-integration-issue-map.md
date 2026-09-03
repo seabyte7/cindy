@@ -151,12 +151,18 @@ Remote number: 3772
 
 ### F2 — DSH: supply-chain-verified runtime and scoped bridge supervisor
 
+Local status: **in progress — offline macOS archive admission, installed-path ACP E2E and Main-only scope foundation
+are delivered; product launch/registration remains blocked on a verified macOS containment adapter.**
+
 Purpose: safely provision the DSH directory runtime and operate local Cindy DSH scopes in Desktop Main.
 
 Deliverables:
 - tools/dsh reviewed-pin updater with dual hash/tree-manifest/sidecar validation;
-- optional agent-binaries dsh asset and platform registration from F0 only;
-- Main-only DshHostManager, managed Home, non-project launcher cwd, env allowlist, health and teardown.
+- current delivery accepts only an explicit local F0 archive/bundle manifest; it has no CDN, download, remote build
+  or other-platform artifact;
+- Main-only DshHostManager, managed Home, non-project launcher cwd, env allowlist and containment-adapter injection
+  boundary. F0 process-group cleanup remains insufficient for product launch;
+- optional agent-binaries dsh asset and platform registration are deferred until that macOS containment adapter passes.
 
 Acceptance:
 - unsupported/missing/corrupt runtime is scoped unavailable; no PATH/npm/pnpm/pip/curl/system Node fallback;
@@ -168,7 +174,8 @@ Tests and audit:
 - security audit for Electron boundary, files, credentials and logs.
 
 Scope and authorization:
-- do not create DSH session binding or user extension UI.
+- do not create DSH session binding, user extension UI, remote distribution or product registration while the
+  containment adapter is unproved.
 - read DSH/Electron/credentials/storage/config/log/architecture rules.
 
 Dependency: blocked by F1; blocks F3.
