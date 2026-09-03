@@ -21,14 +21,12 @@
 > Cindy 可实现同样的产品能力，但必须标为 `cindy-dsh` provenance，不能伪称为 DSH native
 > object。
 >
-> **供应链裁决（2026-09-02，用户选择 A）**：生产 runtime 由 Cindy CI 从固定上游
-> `dsh-v0.1.2-alpha.3` → commit `dd6322d604e00eec1ba5e0c8541159906a21094a` → tree
-> `86be9091c78528b5ef0866ae6d58b01d4a53582e` 构建、归档并以 Cindy 的 build provenance
-> attestation 证明；不再把上游 PyPI wheel 的 wheel-to-source 绑定当作生产前提。该上游 tag 是
-> lightweight tag、commit 无 Git 签名，故不得伪称“上游签名 tag 已验证”：每次 CI 必须复核
-> tag 指向固定 commit、tree、上游 lockfile、Cindy pnpm/package-toolchain lock 与 build-script digest，并由 Cindy 受信 workflow 对输出
-> archive 生成可验证 provenance。官方 wheel 只保留为协议对照和迁移证据，绝不作为生产回退。
-> 不能以 `master` 文档、npm 标签或“同名 alpha”推定构建输入或随包运行时的能力。
+> **本地开发范围裁决（2026-09-03，用户更新）**：当前只在本机 `darwin-arm64` 构建和验证受控
+> runtime；不构建 Linux/Windows、不触发 GitHub Actions 或任何远端构建，也不向 `upstream` 推送、提
+> PR 或写 issue。代码只推送至用户自己的 fork。固定上游 source tuple 仍须在本地复核 tag、commit、
+> tree、lockfile、Cindy pnpm/pkg-toolchain 与 build-script digest；本地 archive / hash / tree manifest
+> / ACP E2E 是开发证据，**不是**发行 provenance 或跨平台声明。未来若要分发、上游合入或支持其他
+> 平台，必须先获得用户新的明确授权并恢复独立的发布门禁。官方 wheel 只作协议对照，绝不作为回退。
 >
 > 未准入 ≠ 上游不支持。[§1.4](#14-源码取证pin-tag-上的真实协议面) 是按 tag
 > `dsh-v0.1.2-alpha.3` **读源码**得到的真实协议面，用于区分「Cindy 还没验收」与
@@ -82,7 +80,7 @@ release，只要该能力在 Cindy 选择的 native profile、平台和权限下
 | ACP | Cindy bridge 使用 ACP 的 initialize/new/list/resume/prompt/cancel/close/update/permission 面；Renderer、Mobile、插件和其他 agent 均不得直连 ACP。一个 DSH session 只允许一个 Cindy bridge record 作为 owner。 |
 | 进程模型 | 生产路径按 `账号 × runtime release × 执行位置` 隔离长生命周期 **Cindy DSH scope**。首版可由每 scope 一个 ACP subprocess 承载多个 session；资源/故障证据不足时降级为每 session 一个 scope，不能共享不受控状态。 |
 | 状态权威 | runtime 是 ACP session 与其持久历史的权威；Cindy DB 是任务壳、binding、命令 receipt、跨端路由、`cindy-dsh` activity 和可重建投影的权威。两边不得对同一字段各自写入。 |
-| 运行时 | 只使用 Cindy CI 从受审阅的固定上游 source release 构建、经 provenance、archive hash、sidecar、tree manifest 和版本验证的自包含 runtime；不得回落用户 PATH、系统 Node、上游 wheel 或未验收源码 checkout。 |
+| 运行时 | 当前只使用本机从受审阅固定 source release 构建、经本地 archive hash、sidecar、tree manifest 和版本验证的 `darwin-arm64` 自包含 runtime；不得回落用户 PATH、系统 Node、上游 wheel 或未验收源码 checkout。它不是发布制品。 |
 | 原生扩展 | 默认使用 Cindy 管理的 DSH Home；用户显式选择使用既有 DSH Home、profile、skill 或 plugin 时，Cindy 必须提供可恢复的原生路径，而不是永久禁用。 |
 | 非公开接口 | 不读取或写入 DSH 私有 JSONL / 数据库来模拟 API，不 patch 私有协议。runtime 未公开的 DSH UI object 不进入 Cindy 的 `dsh-native` 类型；需要的产品工作流由 Cindy 自己的 versioned `cindy-dsh` contract 实现、测试和维护。 |
 
@@ -120,7 +118,7 @@ state scraping、Web UI 驱动和未经验证的 profile patch 仍然禁止。
 | 级别 | 原方案的问题 | 审计结论 / 处理 |
 |---|---|---|
 | P0 | 将 ACP 的 MCP、图片、流式 thought/tool/usage、会话恢复、模型/effort 热切换写成**既定**能力 | 源码取证（§1.4）显示这些能力在 pin tag 上**确实存在**，所以问题不是「上游不支持」，而是「未经本仓验收就写成既定」。处理：状态一律为**候选**，由 Gate A 的真二进制实测逐项转正；实测不通过就收缩。不得反过来把未验证写成上游拒绝。 |
-| P0 | 以 npm alpha 和 PyPI wheel 混合描述一个“官方运行时” | Cindy 只分发由固定 source release 的受信 CI 构建、attest 的自包含 payload；上游 wheel 仅作对照证据，npm 包、源码 checkout、系统 Node 和用户全局 `dsh` 都不在生产启动链中。上游轻量 tag 不能当签名，必须复核 tag→commit→tree、lockfile、build-script 和 Cindy provenance。 |
+| P0 | 以 npm alpha 和 PyPI wheel 混合描述一个“官方运行时” | 当前仅在本机用固定 source release 构建并验证 `darwin-arm64` 自包含 payload；上游 wheel 仅作对照证据，npm 包、源码 checkout、系统 Node 和用户全局 `dsh` 都不在启动链中。上游轻量 tag 不能当签名，必须复核 tag→commit→tree、lockfile、build-script 和本地 archive/tree evidence；它不构成发行 provenance。 |
 | P0 | 在 profile patch 中追加 Cindy persona / harness 身份 | 这会进入模型 system prompt，命中 [`maker-core-and-agent-behavior.md`](maker-core-and-agent-behavior.md) §4。MVP 禁止新增该文本；若以后确有必要，必须先取得维护者对文本、行为影响和缓存影响的明确确认，并单独 PR。 |
 | P1 | 直接复用 Pi 的三档权限、MCP bridge、远程与 mobile 路径 | 真正的差异不在「是否逐工具」（dsh 是逐工具，见 §1.4-3），而在**档位不可会话内热切**（§3.4）与远程 / mobile 路径完全未设计。未验证前只提供受限的本机 MVP，不借 Pi 的能力名称宣称等价。 |
 
@@ -201,7 +199,7 @@ terminals、client filesystem operations、elicitation。
 每次升级或首次接入都必须把下列内容作为可 review 的 release evidence packet。任一项缺失：
 `optionalAsset` 路径保持不可用；不得静默退回其他 dsh 来源。
 
-1. **受信构建输入**：写出上游 repository、tag、固定 commit 与 tree；CI 在干净 checkout 中
+1. **受信构建输入**：写出上游 repository、tag、固定 commit 与 tree；本机在干净 checkout 中
    复核 tag→commit（允许 lightweight tag，但其不可被当作签名）、tree、`pnpm-lock.yaml`、
    `scripts/build-exe-for-python-sdk.ts` 和 package manifest digest。上游脚本调用的
    `@yao-pkg/pkg@6.21.0` 不在上游 lockfile：必须经 Cindy 的 `tools/dsh/pkg-toolchain/` 冻结
@@ -216,17 +214,17 @@ terminals、client filesystem operations、elicitation。
    `pkg --sea` 的 `node24` 简写会查询 Node index 并静默升级 base binary。alpha3 的上游 build parser
    原本拒绝精确的 `node24.20.0-*`，所以 Cindy 必须先验证干净上游 source object，再应用 release
    definition 逐文件 preimage/postimage 和 patch SHA-256 均固定的最小 adaptation，使其仅接受完整
-   `node<major>.<minor>.<patch>` target。CI 随后只能使用精确的 `node24.20.0-*`，先从
-   `nodejs.org/dist/v24.20.0/` 下载每平台 archive、按 release definition 的 SHA-256 校验后才写入
+   `node<major>.<minor>.<patch>` target。本机构建随后只能使用精确的 `node24.20.0-macos-arm64`，先从
+   `nodejs.org/dist/v24.20.0/` 取得唯一 macOS archive、按 release definition 的 SHA-256 校验后才写入
    pkg 的 SEA cache sentinel，并在 build 后再验同一 archive；不得让 pkg 查询 index 或以远端
    `SHASUMS256.txt` 的即时结果决定输入。patch 不得扩展为运行时代码改写、不得触碰超过 release
    declaration 的文件，也不得绕过上游 source 的初始 clean-tree / digest 验证。
    上游 build 所需的 `pnpm dlx @yao-pkg/pkg@6.21.0` 只能由临时 PATH shim 接到 Cindy wrapper；不得
    把 wrapper 注入 `npm_execpath`，否则 pnpm 自己的 dependency-state check 可能递归运行 wrapper 并变成
    未声明的 production install。
-2. **Cindy 制品与证明**：每个支持平台的受信 workflow 只用上述输入构建自包含 runtime，保存
-   build identity、archive filename/size/SHA-256、主可执行、`-rg` 与 macOS `-spawn-helper`
-   （如适用）及完整 tree manifest；对 archive 生成 Cindy build provenance attestation。
+2. **本地 macOS 制品与证明**：只对 `darwin-arm64` 本地构建自包含 runtime，保存 source input、
+   archive filename/size/SHA-256、主可执行、`-rg`、`-spawn-helper` 与完整 tree manifest。它不生成
+   GitHub provenance、上传制品或发行声明。
    archive 解包必须拒绝路径穿越、symlink、特殊文件、缺旁车、额外文件或不可执行主文件。
 3. **实际协议探针**：用该主可执行、空的 Cindy 管理 `DSH_HOME`、非项目 launcher `cwd`
    启动 ACP；保存已脱敏的 initialize response、支持的 capability / config option、一次
@@ -235,16 +233,13 @@ terminals、client filesystem operations、elicitation。
 4. **能力 fixture**：对准备打开的每个能力，保存最小的 request / response / update fixture
    与预期失败 fixture。未知 enum、缺字段、乱序 update、重复 done、stdout 杂讯与进程异常
    必须由 adapter 拒绝或确定性收口，不能猜测成功。
-5. **供应链与平台**：构建矩阵是 `linux-x64`、`linux-arm64`、`darwin-arm64`、`win32-x64`；
-   `darwin-x64`、`win32-arm64` 与任何未发布的 libc 变体均为不支持并静默不注册。F0 的 Linux 和
-   macOS runner 至少跑 `--version`、ACP handshake 和关闭 smoke；不能以本机 macOS 成功替代 Linux
-   证据。`win32-x64` 在 F2 的 launch-time、identity-bound Job Object（或等价）落地前只能构建、
-   归档和 attestation，必须标为 `smoke-withheld` 且保持不可注册——不得为了“平台覆盖”执行未被整树
-   containment 约束的 Windows runtime。
+5. **供应链与平台**：本轮唯一声明目标是本机 `darwin-arm64`，运行 `--version`、ACP handshake、
+   close smoke 和 Desktop Main E2E。Linux、Windows、Intel macOS 与任何远端 runner 都没有构建或
+   运行结果，必须保持 unavailable；本机 macOS 结果不得外推为其它平台或发行证据。
 
 上游源码的 `python/sdk-runtime/README.md` 规定自包含可执行、sidecar、非空 `DSH_HOME` 与
-`scripts/build-exe-for-python-sdk.ts` 的构建路径；它不替 Cindy 的 release attestation，也不自动
-证明任何 ACP 扩展能力。
+`scripts/build-exe-for-python-sdk.ts` 的构建路径；它不替本地 archive/tree 验证，也不自动证明任何
+ACP 扩展能力。
 
 -----
 
@@ -252,22 +247,15 @@ terminals、client filesystem operations、elicitation。
 
 ### 3.1 运行时分发
 
-- F0 新增 `tools/dsh/source-release.json` 与 source-build workflow；输入是**已审阅的 source
-  release pin**，不是运行时查询到什么就接受什么。它至少保存 repository、tag、commit、tree、
-  lockfile/Cindy pkg-toolchain/build-script digest、固定 Node/pnpm、每平台 target/sidecar 和 Cindy release identity。
-  轻量 tag 没有上游签名时必须明确记录，而非填造已验证签名。workflow 必须在执行生成 runtime
-  **前**上传刚验证的 archive；测试只能使用从该 archive 新解出的目录；随后由不执行 runtime 的
-  新 runner 再验证同一服务端 artifact 并 attestation，不能让 runtime 在 verify 与 attestation 之间改写 subject。
-- source-build workflow 必须在受控 DSH 输入、构建脚本、bridge E2E 或其 workflow 本身变更时，以
-  受限 `push` / `pull_request` path filter 自动运行，并保留 `workflow_dispatch` 供重跑。只写
-  `workflow_dispatch` 不能验证首个分支版本：GitHub 只允许调度默认分支中已存在的 workflow。
-  fork PR 可以运行无 secret 的 build/smoke，但不得请求 identity token 或创建 provenance；只有
-  官方 `makecindy/cindy` 的 push 或同仓 PR 可在独立二次验证后 attestation。fork 自己的 CI
-  identity 绝不能当作 Cindy release provenance。
-- F2 才新增 `tools/dsh/latest.json` 与 `tools/dsh/update.mjs`。它们只接受已经由 Cindy CI
-  attested 的 archive pin（archive URL/SHA-256/size、可执行相对路径、sidecar、完整目录
-  manifest 与 provenance reference），先校验 archive hash、再校验解压 tree；正式安装包不内置
-  dsh，也不能从 source checkout 或上游 wheel 现场构建。
+- F0 使用 `tools/dsh/source-release.json` 驱动**本机** `darwin-arm64` source build；输入是已审阅的
+  source release pin，不是运行时查询到什么就接受什么。它保存 repository、tag、commit、tree、
+  lockfile/Cindy pkg-toolchain/build-script digest、固定 Node/pnpm、唯一 target/sidecar。轻量 tag
+  没有上游签名时必须明确记录。每次本地构建先验证输入和 SEA archive，再从刚验证 archive 的新解压目录
+  运行 smoke/E2E。禁止 GitHub workflow、上传 archive、attestation 或任何其它平台构建。
+- F2 的 `tools/dsh/latest.json` 与 `tools/dsh/update.mjs` 设计在当前范围内**不实施**。若用户日后
+  明确授权本机受管安装，才可接受由本地验证过的 archive pin（archive URL/SHA-256/size、可执行
+  相对路径、sidecar 与完整目录 manifest），先校验 archive hash、再校验解压 tree；发行、下载源或
+  provenance 另需独立授权，正式安装包也不得从 source checkout 或上游 wheel 现场构建。
 - `VendorKey` / `AgentBinaryKind` 增 `'dsh'`，配置使用 `tar-gz-dir`、`installSubdir: 'dsh'`
   和 `optionalAsset: true`。manifest 缺资产、完整性失败、版本探针失败或准备超时都只使 dsh
   本次不可用，不得阻塞 Cindy 启动，也不得执行系统下载器、npm、pnpm、pip 或 curl 兜底。
@@ -518,7 +506,7 @@ home 恢复、再完成一轮且历史、权限、模型、并发独占、损坏
 | 风险 | 处置 |
 |---|---|
 | alpha / ACP 破坏性变更 | 每次 pin 升级重跑第 2 节 evidence packet 与完整 real-binary integration；握手不兼容即本次不注册。 |
-| 运行时供应链 / sidecar 丢失 | source tag→commit→tree/lockfile/build-script + Cindy provenance + archive hash + extracted-tree manifest 四层验证；绝不使用系统 / 用户 runtime fallback。 |
+| 运行时供应链 / sidecar 丢失 | source tag→commit→tree/lockfile/build-script + 本地 archive hash + extracted-tree manifest 验证；绝不使用系统 / 用户 runtime fallback。当前证据不作 release provenance 声明。 |
 | profile 是可执行配置 | Cindy-owned、不可变、无用户 plugin / patch / live reload；profile / launcher cwd 与工作目录隔离。 |
 | 凭证或工作区 `.env` 泄露 | Main 安全 store + 最小 env 白名单 + 非项目 launcher cwd；无 argv / file / log secret；账户边界清理。 |
 | 约 70–78 MB 的 runtime payload + per-session 进程 | 前者是单份受管下载 / 磁盘体积，不得误报成每会话重复下载；后者的实际内存和启动成本必须在 process monitor、资源上限、终止确认和启动 / 退出压测中测量。**per-session 是 Cindy 的产品选择，不是协议限制** —— ACP 单连接本就支持多 session 并发（§1.4），选 per-session 是为了对齐 CC / Codex / Pi 的 teardown 与账号边界语义。“单连接多 session”将来是独立生命周期设计，不是优化补丁。 |

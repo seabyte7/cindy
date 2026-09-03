@@ -5,7 +5,21 @@ Work type: feature
 Artifact: docs/issues/dsh-native-integration/dsh-native-integration-requirements.md
 Source of truth: docs/dev-rules/dsh-harness.md
 User confirmation: 2026-09-02（要求将该方案拆为可执行的分阶段计划，并创建 GitHub issue；随后明确
-“不依赖上游、我们自己开发”；并选择 A：Cindy CI 从固定上游源码 tag 构建、证明并验证受管 runtime）
+“不依赖上游、我们自己开发”）；2026-09-03（当前仅本机 `darwin-arm64` 开发、构建与验证；仅推送用户
+fork，不做远端构建或 upstream 写操作）
+
+## Scope Adjustment — Local Fork-Only Development (2026-09-03)
+
+The user supersedes every contrary CI, remote-publication and multi-platform assumption for active delivery:
+
+- Active scope is local macOS arm64 Desktop development: pinned-source verification, local source build/archive
+  integrity, public ACP probe and Desktop Main real-binary E2E.
+- Do not build Linux, Windows or another macOS architecture; do not run GitHub Actions, upload artifacts, issue an
+  attestation, distribute a runtime, or make a release claim.
+- Do not push, open a PR, create or update an issue in `upstream`. Code may be pushed only to the user's `origin`
+  fork. The previously published `makecindy/cindy` issues are historical planning references and must not change.
+- F8–F11 and any Mobile/SSH/release implementation remain deferred design, not current acceptance. A later user
+  authorization is required before they become executable work.
 
 ## Goal
 
@@ -65,11 +79,11 @@ create/close/list/reconcile/resume（若 advertise）/prompt/cancel/close 生命
 
 - Cindy Bridge Gate 是完整路线的硬前置条件；不得通过解析私有 JSONL、私有数据库或私有协议
   绕过公开 ACP 和 Cindy bridge contract。
-- production runtime 只允许 Cindy CI 从经审阅固定 source release 构建并 attested 的自包含制品；
-  tag→commit→tree、上游 lockfile/Cindy pkg-toolchain/build-script digest、archive hash、解包目录 manifest、sidecar、平台、
-  版本和真实 handshake 必须一致。上游 lightweight tag 或未签名 commit 不得伪称签名已验；必须
-  以固定 object IDs 和 Cindy build provenance 验证。禁止 PATH、npm、pip、curl、系统 Node、上游
-  wheel 或源码 checkout fallback。
+- 当前本机 runtime 只允许由经审阅固定 source release 构建并以 archive hash、解包目录 manifest、sidecar、
+  平台、版本和真实 handshake 验证的 `darwin-arm64` 自包含制品；tag→commit→tree、上游 lockfile/
+  Cindy pkg-toolchain/build-script digest 必须一致。上游 lightweight tag 或未签名 commit 不得伪称签名
+  已验；本地 object IDs 只证明构建输入，不能冒充 Cindy provenance。禁止 PATH、npm、pip、curl、
+  系统 Node、上游 wheel 或源码 checkout fallback。
 - 默认 Home mode 为 cindy-managed；existing-dsh-home 仅在用户显式选择时启用。切换不得复制、
   删除或迁移对方凭证。
 - 所有 native event 都先经版本化 schema、顺序与归属校验，再投影到 Cindy；未知事件可被安全
@@ -81,9 +95,8 @@ create/close/list/reconcile/resume（若 advertise）/prompt/cancel/close 生命
 
 ## In Scope
 
-- F0–F11 分阶段路线：Cindy bridge 准入、Agent identity、受管 runtime 与 supervisor、bridge
-  与 binding、事件/交互、Desktop、Cindy activity 控制面、MCP/skills/profiles/extensions、SSH、
-  Mobile、Orca 互操作及发布治理。
+- 当前可执行路线是 F0–F7 的本机 Desktop 前置与产品阶段；F8–F11（SSH、Mobile、Orca 互操作和
+  发布治理）仅保留为已审计的 deferred design，未获新授权不得实施或构建。
 - 每阶段的目标文件/模块、接口、数据、测试、审计、依赖、回滚和完成判据。
 - GitHub parent issue 与按一个 focused PR 边界拆分的子 issue。
 
@@ -116,16 +129,15 @@ create/close/list/reconcile/resume（若 advertise）/prompt/cancel/close 生命
    plugins、Orca、design、i18n 与 release 规则。
 4. 对每个高风险结论都有可执行测试或明确的“尚未证明”状态；不把静态检查、mock 或本机
    macOS 结果写成完整 bridge、跨平台、远程或 Mobile 成功。
-5. GitHub 中存在一个 parent program issue 和 12 个阶段 issue；每张阶段卡正文有真实 issue
-   编号的依赖关系、PR 关闭策略、测试和授权边界，且 issue map 与远端一致。若当前凭证无法
-   创建 GitHub 原生 sub-issue 关系，必须显式记录该权限缺口，不得伪称已有层级。
+5. 本地 issue map 保留一个 parent 与 12 个阶段 issue 的历史编号、依赖关系、测试和授权边界；它
+   是本地执行卡的索引，不触发或要求更新任何远端 issue。
 6. 所有文档经过独立范围/一致性审计；P0/P1 文档缺陷在发布 issue 前修复。
 
 ## Open Questions
 
 无阻止计划发布的产品选择。F0 的事实性结果是后续完整路径唯一的决策门：
 
-- 通过：按 F1–F11 推进；每项 runtime capability 仍按 capability status 逐项开放。
+- 通过：按 F1–F7 的本机 Desktop 范围推进；每项 runtime capability 仍按 capability status 逐项开放。
 - 不通过：修复 Cindy bridge/runtime compatibility；不能把未验证能力注册为可用。不得把
   “未发现另一套上游 Host API”误报为 F0 失败。
 

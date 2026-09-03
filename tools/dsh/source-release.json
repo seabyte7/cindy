@@ -86,30 +86,6 @@
     }
   },
   "targets": {
-    "linux-x64": {
-      "buildTarget": "node24.20.0-linux-x64",
-      "seaBase": {
-        "nodeVersion": "v24.20.0",
-        "archive": "node-v24.20.0-linux-x64.tar.gz",
-        "sha256": "855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8ec"
-      },
-      "executable": "deepseek-harness-sdk-runtime-linux-x64",
-      "sidecars": [
-        "deepseek-harness-sdk-runtime-linux-x64-rg"
-      ]
-    },
-    "linux-arm64": {
-      "buildTarget": "node24.20.0-linux-arm64",
-      "seaBase": {
-        "nodeVersion": "v24.20.0",
-        "archive": "node-v24.20.0-linux-arm64.tar.gz",
-        "sha256": "3515603e2487879a39bc75716f1a2affd027500c64ba50e845cf72cb33219013"
-      },
-      "executable": "deepseek-harness-sdk-runtime-linux-arm64",
-      "sidecars": [
-        "deepseek-harness-sdk-runtime-linux-arm64-rg"
-      ]
-    },
     "darwin-arm64": {
       "buildTarget": "node24.20.0-macos-arm64",
       "seaBase": {
@@ -121,18 +97,6 @@
       "sidecars": [
         "deepseek-harness-sdk-runtime-macos-arm64-rg",
         "deepseek-harness-sdk-runtime-macos-arm64-spawn-helper"
-      ]
-    },
-    "win32-x64": {
-      "buildTarget": "node24.20.0-win-x64",
-      "seaBase": {
-        "nodeVersion": "v24.20.0",
-        "archive": "node-v24.20.0-win-x64.zip",
-        "sha256": "6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba"
-      },
-      "executable": "deepseek-harness-sdk-runtime-win-x64.exe",
-      "sidecars": [
-        "deepseek-harness-sdk-runtime-win-x64-rg.exe"
       ]
     }
   }

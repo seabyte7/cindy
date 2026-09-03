@@ -2,7 +2,7 @@
 
 Date: 2026-09-02
 Packet: `deepseek-harness-runtime-bin-0.1.2a3-darwin-arm64.json`
-Decision: **INCOMPLETE — a local, exact-source darwin-arm64 controlled archive now passes its extracted-artifact ACP and Desktop Main E2E probes, but no multi-platform GitHub provenance gate has completed and Windows runtime execution remains withheld pending F2 containment.**
+Decision: **LOCAL-PASS — the user-approved local, exact-source darwin-arm64 controlled archive passes its extracted-artifact ACP and Desktop Main E2E probes. No other platform, remote runner, GitHub artifact or release claim is made.**
 
 This human review complements the legacy, machine-readable F0 wheel packet and records the source selection
 that Cindy's controlled build must re-verify. It does not use a source-only class as proof that either the
@@ -84,9 +84,10 @@ descendant. It signals TERM then KILL to the group and refuses to report cleanup
 confirmed. This is ordinary-descendant evidence only: `setsid` / double-fork escapes are explicitly deferred to
 F2, and Windows runtime execution is withheld until a launch-time identity-bound Job Object exists.
 
-No tool call or permission request was run. The prompt fixture is a provider-wire and bridge-lifecycle proof, not
-a user credential, production route, Desktop UI, Windows/Linux, remote, Mobile, durable-binding migration, or
-release result.
+The F0 permission fixture invokes a runtime tool request only to prove the deny path: a request to widen from
+read-only to workspace-write receives `cancelled`, the requested fixture file remains absent, and no user
+credential is read. It does not prove an allow path, production route, Desktop UI, Windows/Linux, remote, Mobile,
+durable-binding migration, or a release result.
 
 ## Local controlled-source execution record (not release provenance)
 
@@ -107,7 +108,7 @@ its deterministic archive reverified, freshly extracted, and then passed `--vers
 new/cancel/close/list/resume/close, and clean exit. The same extracted binary passed both Desktop Main real-ACP
 E2E fixtures: scope lifecycle/reconcile/resume/cancel and a loopback-only prompt/follow/running-turn-cancel
 fixture using a fake key. This is local darwin-arm64 implementation evidence only; it is not an uploaded CI
-artifact, GitHub provenance attestation, multi-platform result, Windows runtime smoke, or an F0 PASS.
+artifact, GitHub provenance attestation, multi-platform result, Windows runtime smoke, or product release.
 
 ## Historical source-build reproducibility investigation
 
@@ -128,30 +129,23 @@ not satisfy the source-build gate.
 
 ## Gate result and required evidence
 
-`INCOMPLETE` is correct because the checked-in packet is still a legacy wheel comparison packet, the local
-darwin-arm64 result lacks a GitHub provenance attestation, no Linux runner has produced an admitted result, and
-Windows runtime execution is deliberately withheld before F2 containment. The missing upstream wheel-to-source
-provenance is retained as comparison evidence only; it is **not** the production gate after the user-selected
-source-build policy. F0 unit tests prove an abrupt child exit closes the carrier, rejects later writes and leaves
+`LOCAL-PASS` is correct for the updated local-macOS scope because the checked-in packet is comparison-only while
+the separately verified local source archive passes the public ACP and Desktop Main evidence. Linux, Windows,
+remote runner and GitHub provenance are intentionally not attempted. F0 unit tests prove an abrupt child exit closes the carrier, rejects later writes and leaves
 the control plane in an explicit non-retrying `needs-reconcile` state. Durable binding / receipt persistence and
 process-restart recovery intentionally belong to F3; they remain product-registration requirements, but cannot
-be made an F0 PASS condition because F3 depends on F1 and F2. The core Desktop Main bridge result becomes an F1
-handoff input only after the controlled CI evidence below is admitted. This is not a claim that DSH lacks a
+be made an F0 PASS condition because F3 depends on F1 and F2. The core Desktop Main bridge result is an F1 local
+handoff input after the controlled local evidence above is admitted. This is not a claim that DSH lacks a
 separate Host API, and it does not require one to proceed.
 
-F0 passes as a release-evidence handoff for F1 only after:
-
-1. each declared target is built from the committed tag→commit→tree and frozen Cindy toolchain by the reviewed
-   Cindy workflow. Linux and macOS additionally require the controlled archive, tree manifest, public runtime
-   smoke and build provenance attestation to be reviewed and accepted. Windows remains archive-only and
-   unavailable until F2 adds its Job Object containment plus a separately reviewed runtime smoke;
-2. the reviewed Desktop Main bridge retains the currently passing public-ACP create, resume, follow/update,
+F0 passes as a local-macOS development handoff only after the reviewed Desktop Main bridge retains the currently
+passing public-ACP create, resume, follow/update,
    prompt, cancellation during a running turn and close fixtures without exposing credentials or raw runtime data.
 
 F3 separately delivers persistent scope/session ownership, receipt correlation, recovery after EOF/exit and no
 uncertain-prompt replay across a process restart. F0 PASS does not register DSH in the product; it only releases
 the F1 → F3 foundation sequence from an impossible circular dependency.
 
-Until the controlled CI evidence is admitted, DSH remains unavailable in the product and F1–F11 stay blocked.
-After F0 passes, DSH still remains unregistered until the later phase gates, including F3 recovery, have passed.
-Cindy is not waiting for a new upstream Native Host API.
+DSH remains unavailable in the product until later local phase gates, including F3 recovery, have passed. No
+non-macOS, remote or release work follows from this local result. Cindy is not waiting for a new upstream Native
+Host API.

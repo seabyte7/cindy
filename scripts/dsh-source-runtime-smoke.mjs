@@ -2,10 +2,9 @@
 /**
  * Runtime-only smoke for a Cindy source-built DSH archive.
  *
- * This uses the public ACP interface directly so it can prove every builder
- * platform's artifact. It is not a product registration path: the Desktop
- * Main end-to-end bridge suite remains a separate job and Windows remains
- * unavailable to Cindy until its identity-bound process containment exists.
+ * This uses the public ACP interface directly for the only approved local
+ * development artifact: darwin-arm64. It is not a product registration path;
+ * the Desktop Main end-to-end bridge suite remains separate.
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -17,10 +16,7 @@ import { runAcpLifecycle, runVersion } from './dsh-native-host-gate.mjs';
 
 function platformKey() {
   if (process.platform === 'darwin' && process.arch === 'arm64') return 'darwin-arm64';
-  if (process.platform === 'linux' && process.arch === 'x64') return 'linux-x64';
-  if (process.platform === 'linux' && process.arch === 'arm64') return 'linux-arm64';
-  if (process.platform === 'win32' && process.arch === 'x64') return 'win32-x64';
-  throw new Error(`unsupported source-runtime smoke platform: ${process.platform}-${process.arch}`);
+  throw new Error(`local DSH smoke is limited to darwin-arm64, got ${process.platform}-${process.arch}`);
 }
 
 function parseArgs(argv) {

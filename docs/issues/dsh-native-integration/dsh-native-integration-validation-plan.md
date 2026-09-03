@@ -6,6 +6,13 @@ Technical spec: docs/issues/dsh-native-integration/dsh-native-integration-techni
 Development plan: docs/issues/dsh-native-integration/dsh-native-integration-development-plan.md
 Artifact: docs/issues/dsh-native-integration/dsh-native-integration-validation-plan.md
 
+## Scope Adjustment — Local Fork-Only Development (2026-09-03)
+
+For active validation, only local macOS arm64 Desktop evidence is in scope: source tuple/input verification,
+local archive/tree checks, public ACP smoke and Desktop Main real-binary E2E. No Linux/Windows/other-architecture
+build, remote runner, GitHub Actions/artifact/attestation, distribution or upstream mutation is allowed. SSH,
+Mobile and release validation sections are deferred design only and cannot be reported as current coverage.
+
 ## Project Testing Profile
 
 本仓当前没有 .codex/testing-profile.md 或 docs/ai/testing-profile.md。以下以根 package.json 和根
@@ -17,8 +24,8 @@ AGENTS.md 的强制门禁为准：
 - 迁移：pnpm --filter desktop db:validate 和 pnpm --filter desktop test:migration-replay，另加
   本阶段的 targeted migration tests。
 - UI 文案：pnpm check:i18n 和 pnpm check:i18n-glossary。
-- 跨模块、高风险、运行时、DB、协议、remote 或 Mobile 变更按阶段追加 targeted integration；
-  final release 使用 pnpm test:all 及发布 runner。未运行的检查必须如实标记为未验证。
+- 跨模块、高风险、运行时、DB、协议、remote 或 Mobile 变更按阶段追加 targeted integration；当前本地
+  Desktop 范围不运行 final-release runner。未运行的检查必须如实标记为未验证。
 
 所有 F0–F11 PR 在开始前和提交前复核当前 AGENTS.md、嵌套 AGENTS.md、专项规则和当前测试脚本；
 本文件不授权跳过或弱化测试。
@@ -32,7 +39,7 @@ AGENTS.md 的强制门禁为准：
 | Real binary | 固定 release 的 executable、ACP handshake、Cindy bridge operation、stdout/exit/lifecycle | 其他平台、remote、Mobile 或用户真实数据。 |
 | Desktop integration | Main/preload/renderer 与 local DSH 的端到端任务 | SSH、device-link、新旧版本矩阵。 |
 | Remote/mobile integration | 远端 ownership、forward、协议和多端任务连续性 | 发布全平台或完整生态兼容。 |
-| Release evidence | 每一声明的平台/版本/升级状态都由独立 runner 和治理记录支持 | 后续 runtime release 或未测能力。 |
+| Local build evidence | 唯一 `darwin-arm64` source tuple、archive/tree、ACP 与 Desktop Main E2E | 发布 provenance、其它平台、后续 runtime release 或未测能力。 |
 
 测试报告必须分别列出这些层，禁止把其中任一层泛称“DSH 已验证”。
 
@@ -40,9 +47,9 @@ AGENTS.md 的强制门禁为准：
 
 ### F0: Release Evidence
 
-- Parse source-build evidence schema; validate tag→commit→tree, upstream lockfile/Cindy pnpm SRI and pkg-toolchain lock/integrity/build-script digest, fixed builder,
-  Cindy provenance reference, archive URL/version/size/hash, executable/sidecar list and extracted tree
-  manifest against the same signed-off tuple.
+- Parse source-build evidence schema; validate tag→commit→tree, upstream lockfile/Cindy pnpm SRI and pkg-toolchain
+  lock/integrity/build-script digest, fixed local builder inputs, archive version/size/hash, executable/sidecar
+  list and extracted tree manifest against the same signed-off tuple.
 - Negative cases: hash mismatch, zip-slip/path traversal, symlink/special entry, unexpected top-level entry,
   missing sidecar, missing executable, changed API version, non-absolute or Main-unauthorized session cwd,
   unredacted token/path/header pattern.
@@ -52,13 +59,11 @@ AGENTS.md 的强制门禁为准：
   and cannot be resumed before close.
 - Run the same lifecycle through Cindy `DshBridgePort`; assert single owner, scoped receipt correlation,
   timeout/EOF/exit reconciliation and no uncertain prompt replay.
-- Assert F0 ordinary-descendant cleanup: on POSIX, fixtures cover both a live root and a root that exits before
-  its same-group descendant, proving EOF/TERM/KILL still target the dedicated process group; on Windows, the
-  unregistered transport declares DSH unavailable. This is not OS containment: F2 must add an escape fixture
-  (`setsid` / double-fork) and prove it is contained by a platform-specific supervisor before product launch.
-- Record platform runner results separately. A macOS result does not pass Linux; Windows is explicitly
-  `smoke-withheld` and unavailable until F2's launch-time, identity-bound Job Object (or equivalent) exists, so an
-  archive/attestation result cannot be represented as a Windows runtime pass.
+- Assert F0 ordinary-descendant cleanup on the local macOS POSIX host: fixtures cover both a live root and a root
+  that exits before its same-group descendant, proving EOF/TERM/KILL still target the dedicated process group.
+  This is not OS containment: an escape fixture (`setsid` / double-fork) and any product supervisor are deferred.
+- Record only a `darwin-arm64` local result. It does not pass or create a result for Linux, Windows, Intel macOS,
+  remote execution, Mobile, a GitHub artifact or a release.
 
 ### F1: Identity Closure
 
@@ -146,11 +151,12 @@ AGENTS.md 的强制门禁为准：
   projection tests.
 - Full regressions for existing Claude/Codex/Pi Orca paths.
 
-### F11: Release Governance
+### F11: Release Governance (Deferred)
 
 - Rebuild F0 packet for the release candidate and compare ACP/Cindy bridge capability diff to the accepted packet.
-- Run selected local Desktop, supported Windows/Linux/macOS runner, remote, device-link/Mobile, upgrade and
-  rollback suites; record each platform/version result separately.
+- Do not run a release matrix in the current scope. Any future selected local Desktop, supported platform,
+  remote, device-link/Mobile, upgrade or rollback suite requires a new user authorization and separately recorded
+  result.
 - pnpm test:all, DCO, lint/typecheck/test gates and independent P0/P1 adversarial review.
 - Upgrade test begins from an earlier binding/Home/profile/plugin state and proves preservation or a documented,
   reversible block; never masks incompatibility by reinstallation.
@@ -214,7 +220,7 @@ A child issue passes only when its phase-specific tests, root mandatory checks, 
 audit all pass; it is not merged merely because a later phase is planned. A phase may expose only capabilities
 with both F0 evidence and Cindy contract/UI tests.
 
-The program passes only when F11 has a single release matrix showing:
+The full program can pass only after a later, explicitly authorized F11 has a single release matrix showing:
 
 - F0 Cindy Bridge Gate is PASS for the exact promoted release;
 - every enabled F1–F10 capability has successful evidence at its required layers;
@@ -225,11 +231,11 @@ The program passes only when F11 has a single release matrix showing:
 
 ## Known Validation Gaps
 
-Current F0 evidence for the darwin-arm64 alpha.3 wheel (comparison-only, not a production input) covers version, SDK lifecycle, ACP
+Current F0 evidence for the local source-built darwin-arm64 alpha.3 archive covers version, SDK lifecycle, ACP
 initialize/new/list/close/resume, Cindy-controlled prompt, session/update follow, running-turn cancellation and
-the constrained terminal result. The F0 handoff remains incomplete until Cindy CI produces and attests the fixed
-source-built release on every declared platform; an upstream wheel-to-source signature is no longer the required
-trust mechanism. Durable binding/receipt persistence, control-plane EOF/exit recovery across a process restart and
+the constrained terminal result. The local F0 handoff is complete for that one development target; it is not a
+release, remote-runner, attestation or cross-platform PASS. Durable binding/receipt persistence, control-plane
+EOF/exit recovery across a process restart and
 no-uncertain-prompt-replay are open F3 requirements; they prevent product registration but must not be used as an
 F0 PASS precondition because F3 depends on F1 and F2. F0 only proves a fail-closed in-memory
 `needs-reconcile` boundary after carrier EOF/exit. Later phases must not infer the F3 work as complete.

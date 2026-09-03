@@ -5,6 +5,15 @@ Requirements: docs/issues/dsh-native-integration/dsh-native-integration-requirem
 Technical spec: docs/issues/dsh-native-integration/dsh-native-integration-technical-spec.md
 Artifact: docs/issues/dsh-native-integration/dsh-native-integration-development-plan.md
 
+## Scope Adjustment — Local Fork-Only Development (2026-09-03)
+
+Active delivery is local macOS arm64 Desktop work only. It may verify the pinned source locally, build one
+`darwin-arm64` archive locally, and run its local smoke/real-binary E2E. It must not build another target, use a
+remote runner or GitHub Actions, upload/attest/distribute a runtime, or write to `upstream`. Any code push goes
+only to the user's `origin` fork. The F8–F11 branches below are deferred architecture; do not start them, or any
+SSH/Mobile/release work, without a new explicit user authorization. Existing GitHub issue numbers remain a
+historical local index and must not be updated.
+
 ## Delivery Model
 
 - 一个阶段对应一个 GitHub child issue、one focused PR、一次独立审计和可回滚交付。
@@ -39,13 +48,13 @@ Artifact: docs/issues/dsh-native-integration/dsh-native-integration-development-
       |       |
       +---+---+
           |
-       F8 SSH remote
+       F8 SSH remote (deferred)
           |
-       F9 device-link and Mobile
+       F9 device-link and Mobile (deferred)
           |
-       F10 Orca boundary
+       F10 Orca boundary (deferred)
           |
-       F11 release governance
+       F11 release governance (deferred)
 
 F6 与 F7 可在 F5 后并行，但共用的 contract 只允许 F4/F5 已发布的稳定版本。F8 开始前必须拿到
 F6 的 session/activity ownership 规则；F9 不得在 F8 之前假定远端控制语义；F10 只消费稳定的
@@ -57,12 +66,13 @@ Goal: 用真实、受管的同一 DSH release 判定 Cindy-owned control plane �
 
 Scope:
 - 建立 release evidence packet schema、redacted fixtures、verification runner 和审阅清单。
-- 在 Cindy CI 的干净 checkout 复核 source tag→commit→tree、上游 lockfile/Cindy pnpm/package-toolchain
+- 在本机干净 checkout 复核 source tag→commit→tree、上游 lockfile/Cindy pnpm/package-toolchain
   lock/integrity/build-script digest；若上游 parser 阻止 release definition 的精确 Node target，只能在
   输入验证后应用 patch SHA-256 与逐文件 preimage/postimage 固定的最小 Cindy adaptation，并在 install 后、
   build 前复验；Node 自带 npm 仅以 `--ignore-scripts` 获取并验证 SRI 固定的 pnpm tarball，禁止
-  Corepack/runner-global pnpm 回退；以该 pnpm 的 frozen install 构建每个平台 archive，并记录 provenance、hash、size、license/notices、
-  可执行及 sidecar/tree manifest、支持平台。上游 wheel 仅作对照，不是 production input。
+  Corepack/runner-global pnpm 回退；以该 pnpm 的 frozen install 仅构建 `darwin-arm64` archive，并记录本地
+  hash、size、license/notices、可执行及 sidecar/tree manifest。上游 wheel 仅作对照，不是 production input，
+  且本地记录不是 provenance 或发行声明。
 - 以空 cindy-managed DSH_HOME 与非项目 launcher cwd 启动实际可执行文件；POSIX 在专用 process group
   中验证 version、
   ACP protocol/capabilities、create/close/list/reconcile/resume（若 advertise）、prompt/follow/
@@ -71,11 +81,10 @@ Scope:
 - 实现并验证 Cindy `DshBridgePort` 的 session owner、command receipt、sequence、EOF/exit、
   operation timeout 与 `needs-reconcile` contract：所有可能已到达 runtime 的超时均关闭 carrier、
   保留既有 binding 并禁止重发；真实 transport 只由该 port 使用。
-- 把 child 回收当作整棵运行时树而非 direct child：F0 的 POSIX launch 创建独立进程组且 TERM/KILL
-  作用于整组，并覆盖 root 先退出的同组后代；这不能阻止 `setsid` / double-fork。F2 开通产品 launch
-  前，Linux 必须有 delegated cgroup / 受监督 launcher，macOS 必须有等价受监督原生方案，Windows 必须有
-  launch-time identity-bound Job Object（或等价证明）；否则该平台 DSH 保持 unavailable，不能以裸 PID
-  `taskkill` 或 process-group best-effort 声称回收成功。
+- 把 child 回收当作整棵运行时树而非 direct child：F0 的本机 macOS POSIX launch 创建独立进程组且
+  TERM/KILL 作用于整组，并覆盖 root 先退出的同组后代；这不能阻止 `setsid` / double-fork，也不构成
+  产品 containment 或其它 OS 证据。F2 的任何产品 launch/supervisor 设计均 deferred，未经新授权不得
+  以 process-group best-effort 宣称完成。
 - 保存正例和负例：错误 hash、缺 sidecar、未知 API version、无 controller、无认证、stdout
   杂讯、乱序/重复 event、cancel/reconnect。
 
@@ -93,12 +102,12 @@ Required rules:
 Tests:
 - fixture schema parser、hash/tree-manifest validator、redaction scan。
 - 真实 binary integration，不用 in-memory mock 替代。
-- Linux/macOS runner 的 version/handshake/close smoke；Windows 在 F2 Job Object 前必须保持
-  `smoke-withheld`（虽可构建/归档/attest），不能把未受 whole-tree containment 约束的执行计入平台覆盖。
+- 本机 `darwin-arm64` 的 version/handshake/close smoke 和 Desktop Main real-binary E2E；不得产出、
+  代跑或暗示 Linux/Windows/Intel macOS 结果。
 
 Acceptance:
-- 一份可重跑、可审计、无 secret 的 packet 把 source objects、Cindy attested archive、binary、ACP capability 与 Cindy bridge
-  operations 绑定为同一 release。
+- 一份可重跑、可审计、无 secret 的 local packet 把 source objects、本地 archive、binary、ACP capability
+  与 Cindy bridge operations 绑定为同一 `darwin-arm64` 开发输入；它不是 attestation 或 release。
 - Cindy Bridge Gate 的 PASS/FAIL 由维护者基于 packet 记录；没有 PASS 不创建任何可用 DSH runtime。
 
 Rollback:
@@ -449,9 +458,10 @@ Acceptance:
 Rollback:
 - remove only explicit interop registration/policy; keep DSH native sessions and Orca historical data distinct.
 
-## Phase 11: Release, Upgrade and Regression Governance
+## Phase 11: Release, Upgrade and Regression Governance (Deferred)
 
-Goal: 将设计正本转为有持续证据的发布与升级制度，确保“完整 DSH”只在条件满足时出现。
+Goal: 将设计正本转为有持续证据的发布与升级制度，确保“完整 DSH”只在条件满足时出现。当前不执行；
+仅在用户重新授权发布、远端或非 macOS 工作后才恢复本阶段。
 
 Scope:
 - Add platform runners, F0 packet refresh workflow, ACP/Cindy bridge capability diff check, release fixture suite,

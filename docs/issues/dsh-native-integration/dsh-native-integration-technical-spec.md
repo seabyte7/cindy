@@ -16,6 +16,15 @@ F0 先产出同一 release 的制品、ACP capability 和 Cindy bridge 真实 li
 不创建生产 DshHostManager、DshAgent、binding、UI 或 remote/Mobile 接口；但“没有上游 Host API”
 不构成 F0 失败。
 
+## Scope Adjustment — Local Fork-Only Development (2026-09-03)
+
+This specification's active implementation boundary is local `darwin-arm64` Desktop only. F0 uses a locally
+verified source tuple, local archive/tree integrity and real-binary ACP/Desktop Main E2E. It must not trigger a
+remote runner, GitHub Actions, artifact upload, attestation, release/distribution, non-macOS build or upstream
+write. F8–F11, SSH, Mobile and release paths below are retained as deferred architecture only; they are not an
+acceptance target or implementation authorization until the user explicitly reopens them. Any push is only to the
+user's `origin` fork.
+
 ## Repository Evidence
 
 | 事实 | 当前证据 | 对设计的影响 |
@@ -63,17 +72,18 @@ runtime tuple:
 
 - upstream release/tag and license/notices provenance;
 - fixed upstream tag→commit→tree, upstream lockfile, Cindy pkg-toolchain lock/integrity and build-script digests, pinned Node/pnpm and frozen install command; where an upstream build parser blocks a security-required exact target, a Cindy adaptation must be patch-SHA-bound and per-file preimage/postimage-bound, be rechecked after dependency install, and touch no undeclared file;
-- Cindy CI builder identity/provenance reference plus each controlled archive's filename, size and SHA-256;
+- local builder record plus the controlled archive's filename, size and SHA-256; this is development evidence,
+  not CI provenance or a release claim;
 - extracted executable, required sidecars and canonical tree-manifest hash;
 - supported platform tuple and unsupported-platform rationale;
 - executable version output, ACP protocol/capability snapshot and handshake transcript;
 - create, prompt, follow/history, cancel, close, resume and abnormal-exit observations;
 - redacted positive and negative fixtures.
 
-The F0 test harness starts only the pinned executable with an empty Cindy-managed DSH_HOME and a non-project
-launcher cwd. POSIX evidence uses a dedicated process group and confirms cleanup after a root-first ordinary
-descendant exit; Windows executes no runtime until F2 supplies launch-time, identity-bound whole-tree
-containment. It must prove the published ACP protocol can negotiate capability and that a Cindy-owned bridge
+The F0 test harness starts only the pinned local macOS executable with an empty Cindy-managed DSH_HOME and a
+non-project launcher cwd. POSIX evidence uses a dedicated process group and confirms cleanup after a root-first
+ordinary descendant exit. It does not claim whole-tree containment or support for another OS. It must prove the
+published ACP protocol can negotiate capability and that a Cindy-owned bridge
 can complete create/list/resume (when advertised)/follow/prompt/cancel/close with scope/session ownership,
 Main-injected workdir authorization, command receipts, ordered follow delivery, bounded EOF/exit behavior and honest reconciliation. F0's EOF/exit
 behavior is fail-closed `needs-reconcile`, never prompt replay; durable recovery is F3. A private file format,
@@ -99,10 +109,12 @@ CapabilitySnapshot; Renderer and Mobile receive a display-safe projection, never
 
 ### 3. Managed runtime, Home and Host scope
 
-F2 creates tools/dsh/latest.json and tools/dsh/update.mjs plus Desktop Main dsh-host modules. The asset
-descriptor is optional and directory-based, with installSubdir dsh. The updater must:
+F2 may later create tools/dsh/latest.json and tools/dsh/update.mjs plus Desktop Main dsh-host modules, but those
+distribution/update paths are deferred in the current local-only scope. If reauthorized, the asset descriptor is
+optional and directory-based, with installSubdir dsh. The updater must:
 
-1. receive only a Cindy-attested archive built from a reviewed source tag→commit→tree pin rather than discover a mutable “latest” release;
+1. receive only a user-authorized, integrity-verified archive built from a reviewed source tag→commit→tree pin
+   rather than discover a mutable “latest” release; release provenance has its own future gate;
 2. download into a staging directory, validate archive hash before extraction, reject traversal, symlink,
    special-file, unexpected top-level file and missing-sidecar cases;
 3. validate executable mode and the full extracted-tree manifest before producing the Cindy archive;
@@ -263,10 +275,7 @@ corrupt binding and an interrupted upgrade.
 | F2 | tools/dsh/, apps/desktop/src/main/agent-binaries/, apps/desktop/src/main/dsh-host/, process monitor and credential adapters. |
 | F3–F4 | packages/maker-core/src/agents/dsh/, packages/maker-core/src/types/, Desktop dsh-host bridge/projection, localDb schema/migration/tests. |
 | F5–F7 | Desktop maker IPC/preload, renderer session/activity/settings surfaces, i18n, design tokens and internal MCP lifecycle. |
-| F8 | packages/maker-remote-ssh plus Desktop remote host integration and remote DSH test fixtures. |
-| F9 | packages/maker-shared, packages/device-link, Desktop device-link handlers and apps/mobile reducers/UI. |
-| F10 | packages/orca-workflow, Orca storage/projection only after explicit provenance contract. |
-| F11 | CI runners, release fixtures, compatibility ledger, diagnostics and support runbook. |
+| F8–F11 | Deferred: remote SSH, device-link/Mobile, Orca and release/governance paths require a new user authorization before any implementation or build. |
 
 Names above are planned ownership paths, not permission to alter adjacent modules without their own applicable
 rules and focused issue scope.
@@ -275,7 +284,7 @@ rules and focused issue scope.
 
 | Risk | Control |
 |---|---|
-| F0 incorrectly assumes source-tag capability equals shipped runtime capability | One source-build release tuple ties fixed source objects, frozen build inputs, Cindy provenance, actual archive/binary version and real controller fixtures together. |
+| F0 incorrectly assumes source-tag capability equals shipped runtime capability | One local source-build tuple ties fixed source objects, frozen build inputs, local archive/binary version and real controller fixtures together; it is not release provenance. |
 | native event data leaks secrets or gains Renderer privileges | Main-only bridge, schema projection, token-less IPC and redaction tests. |
 | DSH id or event sequence crosses account/session/scope | binding uniqueness, scope checks, correlation, monotonic cursor and multi-session tests. |
 | Alpha runtime upgrade breaks existing data or plugins | version negotiation, capability diff, compatibility gate and reversible upgrade path. |

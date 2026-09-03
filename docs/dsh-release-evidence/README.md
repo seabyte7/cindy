@@ -4,22 +4,19 @@ This directory stores public, repeatable, secret-free F0 evidence packets. It is
 installation location, or user-data directory. Never commit a wheel, executable, `DSH_HOME`, profile, session,
 full stderr, or credential.
 
-The current wheel verifier is retained for **comparison-only** alpha.3 protocol evidence. It cannot admit a
-production runtime after the source-build decision; production admission requires the controlled source-build
-workflow, its archive manifest and Cindy provenance attestation.
+The current wheel verifier is retained for **comparison-only** alpha.3 protocol evidence. The approved runtime
+development path is a local `darwin-arm64` source build; it is not a production or distribution admission path.
 
-The controlled workflow reads [`tools/dsh/source-release.json`](../../tools/dsh/source-release.json), verifies
+The local controlled build reads [`tools/dsh/source-release.json`](../../tools/dsh/source-release.json), verifies
 the upstream tag→commit→tree tuple, then applies its SHA-256-bound, preimage/postimage-checked minimal build
 adaptation that permits the exact Node SEA target the alpha.3 parser otherwise rejects. It downloads the
 release-SRI-pinned pnpm tarball with npm scripts disabled and verifies it before execution, then uses the frozen
 `tools/dsh/pkg-toolchain/` closure for the one upstream `@yao-pkg/pkg` invocation that is not included in the
-upstream lockfile. The exact Node SEA archive is SHA-256-checked before and after build. The workflow verifies
-and uploads each archive **before** executing its generated runtime, tests only a fresh extraction of that
-uploaded archive, then uses a separate no-runtime attestation runner to verify and attest the service-side
-artifact. Linux and macOS execute this smoke under a dedicated POSIX process group; Windows remains
-`smoke-withheld` until F2 supplies launch-time, identity-bound whole-tree containment. A workflow definition or
-local build is not itself release evidence: the resulting artifact, provenance and every claimed-platform smoke
-must be reviewed before F1 can begin.
+upstream lockfile. The exact Node SEA archive is SHA-256-checked before and after build. The local build flow
+packages and verifies the `darwin-arm64` archive **before** executing its generated runtime, then tests only a fresh
+local extraction. It does not upload artifacts, request a GitHub identity token, create an attestation, run a
+remote workflow, or build another platform. This local evidence admits only the next local development phase;
+it is not release evidence.
 
 Run the legacy verifier with a reviewer-supplied wheel in a temporary directory:
 
@@ -44,14 +41,12 @@ cancel-under-turn evidence without an external credential or network route.
 
 Result states:
 
-- `PASS`: only the controlled source-build CI evidence packet may claim this state, after its fixed-source,
-  Cindy-attested archive and Desktop Main-owned, versioned Cindy bridge prove
+- `LOCAL-PASS`: the controlled local `darwin-arm64` source build and Desktop Main-owned, versioned Cindy bridge prove
   create/resume/follow/prompt/cancel/close under the accepted lifecycle contract.
 - `FAIL`: a comparison packet, source input, controlled archive, tree, version, ACP lifecycle, or an operation
   declared as passed is inconsistent or failed.
-- `INCOMPLETE`: the real runtime works only for the subset evidenced so far, or required Cindy source-build
-  provenance / production-bridge boundaries remain unproven. This is the expected current state; it does not authorize DSH
-  registration.
+- `INCOMPLETE`: the real runtime works only for a subset of the local contract. Neither result authorizes a
+  product registration, release, remote runner or non-macOS platform claim.
 
 The alpha.3 darwin-arm64 packet proves binary/SDK lifecycle, ACP initialize/new/close/list/resume, and the
 Desktop Main `DshControlPlane` core lifecycle (create, close, reconcile, resume, idle cancel, close), plus a
@@ -59,6 +54,8 @@ loopback-only prompt, ordered session-owned `session/update` follow, running-tur
 constrained `stopReason: cancelled` result. Every runtime operation has a bounded control-plane timeout; a timeout
 closes the carrier and puts the F0 bridge into a no-retry `needs-reconcile` state, just like EOF/exit. This only
 proves the in-memory fail-closed boundary, not a durable recovery record. Unit coverage additionally proves that
-malformed or unrecognized ACP stdout closes the carrier without logging a runtime-content preview. It does not prove tool or permission handling, Desktop UI, other
-platforms, remote, Mobile, durable binding persistence, process-restart recovery, or a release. The source review
+malformed or unrecognized ACP stdout closes the carrier without logging a runtime-content preview. The F0 real-binary
+fixture also proves that a workspace-write `session/request_permission` is returned as `cancelled` and makes no
+write; it does not prove an allow path, Desktop UI, other platforms, remote, Mobile, durable binding persistence,
+process-restart recovery, or a release. The source review
 is in [`deepseek-harness-alpha3-source-controller-audit.md`](deepseek-harness-alpha3-source-controller-audit.md).

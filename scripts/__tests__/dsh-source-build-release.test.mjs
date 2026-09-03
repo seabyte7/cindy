@@ -23,7 +23,6 @@ import {
 
 const repoRoot = path.resolve(import.meta.dirname, '../..');
 const releasePath = path.join(repoRoot, 'tools/dsh/source-release.json');
-const workflowPath = path.join(repoRoot, '.github/workflows/dsh-source-runtime.yml');
 const temporaryRoots = [];
 
 function temporaryRoot() {
@@ -38,7 +37,7 @@ function fixtureRelease() {
   return release;
 }
 
-function writeRuntime(root, release, targetKey = 'linux-x64') {
+function writeRuntime(root, release, targetKey = 'darwin-arm64') {
   const runtime = path.join(root, release.runtime.directory);
   fs.mkdirSync(runtime, { recursive: true });
   const target = release.targets[targetKey];
@@ -64,7 +63,7 @@ test('checked-in source release schema is valid and declares the user-approved i
   assert.equal(release.targets['darwin-arm64'].seaBase.archive, 'node-v24.20.0-darwin-arm64.tar.gz');
   assert.equal(release.source.adaptations.length, 1);
   assert.equal(release.source.adaptations[0].files[0].afterSha256, '8053640bda901c12bb9003f5943100721604c0f01f39efa97b9b79272109e957');
-  assert.deepEqual(Object.keys(release.targets).sort(), ['darwin-arm64', 'linux-arm64', 'linux-x64', 'win32-x64']);
+  assert.deepEqual(Object.keys(release.targets).sort(), ['darwin-arm64']);
 });
 
 test('checked-in pkg build-tool closure is digest-bound and declares the pinned package integrity', () => {
@@ -103,23 +102,6 @@ test('SEA base archive must be a release-bound platform filename and digest', ()
   assert.throws(() => verifySeaBaseArchive({ release, targetKey: 'darwin-arm64', archivePath: archive }), /digest/);
 });
 
-test('controlled workflow never lets the pinned pnpm bootstrap auto-download another package manager', () => {
-  const workflow = fs.readFileSync(workflowPath, 'utf8');
-  assert.match(workflow, /COREPACK_ROOT: cindy-dsh-controlled-bootstrap/);
-  assert.match(workflow, /--pm-on-fail=ignore install --frozen-lockfile/);
-  assert.match(workflow, /--pm-on-fail=ignore --filter desktop exec vitest/);
-  assert.match(workflow, /verify-sea-base/);
-  assert.match(workflow, /apply-adaptations/);
-  assert.match(workflow, /verify-adaptations/);
-  assert.match(workflow, /platform: win32-x64[\s\S]*runtimeSmoke: false/);
-  assert.match(workflow, /Run public ACP runtime smoke on the extracted controlled archive\n\s+if: matrix\.runtimeSmoke/);
-  assert.match(workflow, /sea_version=\$\{target\.seaBase\.nodeVersion\.slice\(1\)\}/);
-  assert.match(workflow, /cindy-dsh-pnpm-shim/);
-  assert.match(workflow, /CINDY_DSH_PNPM_WRAPPER/);
-  assert.doesNotMatch(workflow, /npm_execpath:/);
-  assert.doesNotMatch(workflow, /corepack prepare/);
-});
-
 test('reviewed source adaptation has one declared file and exact pre/postimage binding', () => {
   const release = fixtureRelease();
   const root = temporaryRoot();
@@ -152,12 +134,12 @@ test('a lightweight source tag cannot be represented as a signed tag', () => {
   assert.match(validation.errors.join('\n'), /lightweight tag/i);
 });
 
-test('source release requires the full declared target matrix', () => {
+test('source release rejects every target outside the approved local macOS scope', () => {
   const release = fixtureRelease();
-  delete release.targets['linux-arm64'];
+  release.targets['linux-x64'] = structuredClone(release.targets['darwin-arm64']);
   const validation = validateSourceRelease(release);
   assert.equal(validation.ok, false);
-  assert.match(validation.errors.join('\n'), /supported Cindy platform keys/);
+  assert.match(validation.errors.join('\n'), /approved local macOS development platform key/);
 });
 
 test('runtime manifest rejects unexpected direct artifacts', () => {
@@ -166,7 +148,7 @@ test('runtime manifest rejects unexpected direct artifacts', () => {
   const runtime = writeRuntime(root, release);
   fs.writeFileSync(path.join(runtime, 'unreviewed-runtime-file'), 'nope');
   assert.throws(
-    () => runtimeTreeManifest(runtime, [release.targets['linux-x64'].executable, ...release.targets['linux-x64'].sidecars]),
+    () => runtimeTreeManifest(runtime, [release.targets['darwin-arm64'].executable, ...release.targets['darwin-arm64'].sidecars]),
     /unexpected or missing direct artifacts/,
   );
 });
@@ -175,10 +157,10 @@ test('runtime manifest rejects missing sidecars and symlinks', () => {
   const release = fixtureRelease();
   const root = temporaryRoot();
   const runtime = writeRuntime(root, release);
-  const sidecar = path.join(runtime, release.targets['linux-x64'].sidecars[0]);
+  const sidecar = path.join(runtime, release.targets['darwin-arm64'].sidecars[0]);
   fs.rmSync(sidecar);
   assert.throws(
-    () => runtimeTreeManifest(runtime, [release.targets['linux-x64'].executable, ...release.targets['linux-x64'].sidecars]),
+    () => runtimeTreeManifest(runtime, [release.targets['darwin-arm64'].executable, ...release.targets['darwin-arm64'].sidecars]),
     /ENOENT/,
   );
 });
@@ -187,9 +169,9 @@ test('runtime manifest rejects a non-executable POSIX runtime artifact', () => {
   const release = fixtureRelease();
   const root = temporaryRoot();
   const runtime = writeRuntime(root, release);
-  fs.chmodSync(path.join(runtime, release.targets['linux-x64'].executable), 0o600);
+  fs.chmodSync(path.join(runtime, release.targets['darwin-arm64'].executable), 0o600);
   assert.throws(
-    () => runtimeTreeManifest(runtime, [release.targets['linux-x64'].executable, ...release.targets['linux-x64'].sidecars]),
+    () => runtimeTreeManifest(runtime, [release.targets['darwin-arm64'].executable, ...release.targets['darwin-arm64'].sidecars]),
     /not executable/,
   );
 });
@@ -198,9 +180,9 @@ test('runtime manifest rejects a group/world writable runtime artifact', () => {
   const release = fixtureRelease();
   const root = temporaryRoot();
   const runtime = writeRuntime(root, release);
-  fs.chmodSync(path.join(runtime, release.targets['linux-x64'].executable), 0o777);
+  fs.chmodSync(path.join(runtime, release.targets['darwin-arm64'].executable), 0o777);
   assert.throws(
-    () => runtimeTreeManifest(runtime, [release.targets['linux-x64'].executable, ...release.targets['linux-x64'].sidecars]),
+    () => runtimeTreeManifest(runtime, [release.targets['darwin-arm64'].executable, ...release.targets['darwin-arm64'].sidecars]),
     /group\/world writable/,
   );
 });
@@ -209,7 +191,7 @@ test('deterministic archive has stable bytes and only regular declared files', (
   const release = fixtureRelease();
   const root = temporaryRoot();
   const runtime = writeRuntime(root, release);
-  const files = [release.targets['linux-x64'].executable, ...release.targets['linux-x64'].sidecars];
+  const files = [release.targets['darwin-arm64'].executable, ...release.targets['darwin-arm64'].sidecars];
   const first = createDeterministicTarGz(runtime, files);
   const second = createDeterministicTarGz(runtime, files);
   assert.deepEqual(first, second);
@@ -225,13 +207,13 @@ test('package output binds source input, artifact digest and tree manifest', () 
   const output = packageSourceRuntime({
     release,
     sourceRoot: root,
-    targetKey: 'linux-x64',
+    targetKey: 'darwin-arm64',
     outputDir: path.join(root, 'out'),
   });
   const manifest = JSON.parse(fs.readFileSync(output.manifestPath, 'utf8'));
   const checked = verifyReleaseBundle({ manifest, archivePath: output.archivePath });
   assert.equal(manifest.artifact.filename, path.basename(output.archivePath));
-  assert.equal(checked.files.length, 2);
+  assert.equal(checked.files.length, 1 + release.targets['darwin-arm64'].sidecars.length);
 });
 
 test('bundle verification rejects an archive whose bytes change after manifest creation', () => {
@@ -241,7 +223,7 @@ test('bundle verification rejects an archive whose bytes change after manifest c
   const output = packageSourceRuntime({
     release,
     sourceRoot: root,
-    targetKey: 'linux-x64',
+    targetKey: 'darwin-arm64',
     outputDir: path.join(root, 'out'),
   });
   const manifest = JSON.parse(fs.readFileSync(output.manifestPath, 'utf8'));
@@ -256,7 +238,7 @@ test('verified bundle extraction runs only the archive files in a new private di
   const output = packageSourceRuntime({
     release,
     sourceRoot: root,
-    targetKey: 'linux-x64',
+    targetKey: 'darwin-arm64',
     outputDir: path.join(root, 'out'),
   });
   const manifest = JSON.parse(fs.readFileSync(output.manifestPath, 'utf8'));
@@ -264,8 +246,8 @@ test('verified bundle extraction runs only the archive files in a new private di
   const result = extractVerifiedRuntimeBundle({ manifest, archivePath: output.archivePath, outputDir: extracted });
   assert.equal(result.outputDir, extracted);
   assert.deepEqual(fs.readdirSync(extracted).sort(), [
-    release.targets['linux-x64'].executable,
-    ...release.targets['linux-x64'].sidecars,
+    release.targets['darwin-arm64'].executable,
+    ...release.targets['darwin-arm64'].sidecars,
   ].sort());
   assert.throws(
     () => extractVerifiedRuntimeBundle({ manifest, archivePath: output.archivePath, outputDir: extracted }),

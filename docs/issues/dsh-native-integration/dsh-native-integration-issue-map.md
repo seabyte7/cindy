@@ -1,14 +1,21 @@
 # DSH Cindy 控制面接入 Issue Map
 
-Status: published, revised for Cindy-owned control plane, and remote-audited
+Status: published historical map; active execution revised for local fork-only development
 Requirements: docs/issues/dsh-native-integration/dsh-native-integration-requirements.md
 Technical spec: docs/issues/dsh-native-integration/dsh-native-integration-technical-spec.md
 Development plan: docs/issues/dsh-native-integration/dsh-native-integration-development-plan.md
 Validation plan: docs/issues/dsh-native-integration/dsh-native-integration-validation-plan.md
-Repository: makecindy/cindy
-Publication authorization: user explicitly authorized authenticated gh issue creation on 2026-09-02
+Repository: historical publication `makecindy/cindy`; active code remote is the user's `origin` fork only
+Publication authorization: historical user authorization applied on 2026-09-02; no current upstream issue mutation
 Canonical-document notice: these repository-relative paths become clickable GitHub links when the planning documents
 are included in their documentation PR; issue bodies retain the paths as the canonical source before that merge.
+
+## Scope Adjustment — Local Fork-Only Development (2026-09-03)
+
+This map records already-published upstream issue numbers for traceability only. The user now authorizes only local
+`darwin-arm64` Desktop development/build/validation and code pushes to the user's `origin` fork. Do not update,
+comment on, create, close or link any upstream issue/PR; do not trigger a remote build, GitHub Actions, artifact
+upload, attestation, distribution or non-macOS build. F8–F11 are deferred design, not executable current work.
 
 ## Parent Issue Draft
 
@@ -78,12 +85,12 @@ Purpose: 证明一个同一版本的 Cindy source-built runtime、binary、公�
 
 Deliverables:
 - secret-free release evidence packet, redacted fixtures and verifier;
-- source tag→commit→tree/upstream-lockfile/Cindy-pkg-toolchain/build-script verification, Cindy build provenance, archive/hash/sidecar/tree manifest/platform/license;
+- source tag→commit→tree/upstream-lockfile/Cindy-pkg-toolchain/build-script verification, local macOS
+  archive/hash/sidecar/tree manifest/platform/license; no provenance or release claim;
 - real binary ACP handshake plus create/prompt/follow/history/cancel/close/resume/exit evidence;
 - Cindy bridge scope/session ownership, receipt, ordered follow routing, fail-closed EOF/exit and reconcile evidence;
-- POSIX ordinary-descendant process-group teardown evidence, including root-first exit; Windows must remain
-  unavailable until identity-bound whole-tree termination is implemented and tested. F2 additionally blocks
-  product launch until POSIX `setsid` / double-fork escape is contained by an OS-specific supervisor;
+- local macOS POSIX ordinary-descendant process-group teardown evidence, including root-first exit; it is not
+  product containment or an assertion about another platform. Product launch/supervisor work remains deferred;
 - PASS/FAIL/INCOMPLETE gate record.
 
 Acceptance:
@@ -92,7 +99,7 @@ Acceptance:
 - F1 cannot begin without a maintainer-approved PASS; failed or incomplete result blocks complete integration.
 
 Tests and audit:
-- schema/hash/manifest/redaction negative cases and real-binary integration on each claimed platform;
+- schema/hash/manifest/redaction negative cases and local `darwin-arm64` real-binary integration only;
 - audit for secret leakage, mutable-version inference, non-reproducible source-build overclaim and ACP/Web/private-state workaround.
 
 Scope and authorization:

@@ -2,11 +2,11 @@
 /**
  * Build-bound release helper for the Cindy-managed DSH runtime.
  *
- * This helper does not compile DSH and it never installs a runtime. CI first
- * checks out the immutable upstream source tuple and invokes the upstream
- * build command. This file then admits only the declared executable/sidecars,
- * writes a deterministic tar.gz plus a reviewable manifest, and verifies the
- * resulting bundle before it can be uploaded and attested.
+ * This helper does not compile DSH and it never installs a runtime. The local
+ * macOS development flow first checks out the immutable upstream source tuple
+ * and invokes the upstream build command. This file then admits only the
+ * declared executable/sidecars, writes a deterministic tar.gz plus a
+ * reviewable manifest, and verifies the resulting local bundle.
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -20,7 +20,7 @@ const ZERO_BLOCK = Buffer.alloc(BLOCK_BYTES);
 const SHA256 = /^[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}$/;
 const SAFE_RELATIVE_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.?\/$)(?!.*(?:^|\/)\.\.?$)[A-Za-z0-9._@+\-/]+$/;
-const EXPECTED_TARGETS = new Set(['linux-x64', 'linux-arm64', 'darwin-arm64', 'win32-x64']);
+const LOCAL_DEVELOPMENT_TARGETS = new Set(['darwin-arm64']);
 const MAX_RUNTIME_ARCHIVE_BYTES = 1024 * 1024 * 1024;
 const MAX_RUNTIME_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_RUNTIME_FILE_BYTES = 1024 * 1024 * 1024;
@@ -157,8 +157,8 @@ export function validateSourceRelease(release) {
 
     if (!isPlainObject(release.targets)) throw new Error('targets must be an object');
     const keys = Object.keys(release.targets).sort();
-    if (keys.length !== EXPECTED_TARGETS.size || keys.some((key) => !EXPECTED_TARGETS.has(key))) {
-      throw new Error('targets must contain exactly the supported Cindy platform keys');
+    if (keys.length !== LOCAL_DEVELOPMENT_TARGETS.size || keys.some((key) => !LOCAL_DEVELOPMENT_TARGETS.has(key))) {
+      throw new Error('targets must contain exactly the approved local macOS development platform key');
     }
     for (const key of keys) {
       const target = release.targets[key];
@@ -353,7 +353,7 @@ export function verifyPinnedBuildToolchain({ release, repoRoot }) {
   return { directory, packageName: toolchain.packageName, version: toolchain.version };
 }
 
-/** Verify the exact pnpm package tarball before it is ever executed in CI. */
+/** Verify the exact pnpm package tarball before it is ever executed locally. */
 export function verifyPinnedPnpmTarball({ release, tarballPath }) {
   const candidate = path.resolve(tarballPath);
   const stat = fs.lstatSync(candidate);
@@ -595,12 +595,12 @@ export function verifyReleaseBundle({ manifest, archivePath }) {
 
 /**
  * Materialize an already-verified archive into a brand-new, private staging
- * directory. CI uses this for runtime smoke so it never tests the mutable
+ * directory. The local macOS smoke uses this so it never tests the mutable
  * upstream build tree instead of the exact files that were archived.
  *
  * This is intentionally not the future F2 installer: it has no download or
  * user-data semantics. It exists only to make F0's build evidence test the
- * artifact bytes that are later uploaded for independent attestation.
+ * artifact bytes that are locally smoke-tested.
  */
 export function extractVerifiedRuntimeBundle({ manifest, archivePath, outputDir }) {
   const { files } = verifyReleaseBundle({ manifest, archivePath });
