@@ -41,8 +41,9 @@ Plan: [`dsh-native-integration-development-plan.md`](../issues/dsh-native-integr
   into a product safety claim.
 - The no-network macOS Seatbelt experiment is a negative result. Shell → `sandbox-exec` → installed DSH
   `--version` exited successfully, but Node/Desktop Main `spawn()` of the same binary/profile exited `SIGABRT`
-  before ACP initialize (with and without a detached process group). The experimental adapter was removed;
-  DSH-under-native-containment handshake, compatibility and real tree teardown remain F2 exit work. No
-  network-capable profile was run.
+  before ACP initialize (with and without a detached process group). A minimal native C parent with a private
+  POSIX session and child process group produced the same dyld-stage `SIGABRT`; it was also discarded. The
+  experimental adapters were removed; DSH-under-native-containment handshake, compatibility and real tree
+  teardown remain F2 exit work. No network-capable profile was run.
 - No CDN, remote runner, GitHub Actions, artifact upload, release, Linux, Windows, Intel macOS, SSH, Mobile or
   upstream operation was run or claimed.

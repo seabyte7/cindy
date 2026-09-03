@@ -444,8 +444,9 @@ process-group transport 仍只可作 F0 evidence。用户 existing DSH Home 也�
 
 macOS 的 `sandbox-exec` 不能被当作该 adapter：本机无网络实验中，shell 直接启动同一受限 DSH
 `--version` 可退出成功，但 Node/Desktop Main `spawn()` 启动同一 profile 与已校验 runtime 会在 ACP 前
-`SIGABRT`（attached 与 detached 均然）。该实验实现不得接入产品；F2 只能以可从 Desktop 进程完成
-identity-bound containment、ACP handshake 和真实整树回收证明的原生 launcher 退出。
+`SIGABRT`（attached 与 detached 均然）；一个独立 POSIX session/child group 的 native C parent 也未
+改变该 dyld-stage 故障。该实验实现不得接入产品；F2 只能以可从 Desktop 进程完成 identity-bound
+containment、ACP handshake 和真实整树回收证明的原生 launcher 退出。
 
 ### 阶段 3：Desktop host（本机实验入口）
 

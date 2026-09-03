@@ -185,8 +185,9 @@ Remaining F2 exit blockers:
 - Implement and run an identity-bound macOS native containment launcher against the installed DSH runtime. The
   no-network Seatbelt experiment is a negative result, not a fallback: shell → `sandbox-exec` → DSH `--version`
   succeeded, but the same installed runtime launched through Node/Desktop Main `spawn()` exited `SIGABRT` before
-  ACP initialize, with both detached and attached variants. The experiment was removed; no Seatbelt adapter ships.
-  A future launcher must prove ACP initialize/create/close and real process-tree teardown from the Desktop process.
+  ACP initialize, with both detached and attached variants. A native C parent with its own POSIX session and child
+  process group also failed in dyld. The experiments were removed; no Seatbelt adapter ships. A future launcher
+  must prove ACP initialize/create/close and real process-tree teardown from the Desktop process.
 - Wire an optional local asset/status into Desktop bootstrap only after that containment evidence exists. Do not
   add a remote distribution path as a substitute.
 
