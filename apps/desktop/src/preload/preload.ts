@@ -5278,6 +5278,53 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onAgentsChanged: fanOutMakerAgentsChanged,
     getCapabilities: (agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh'): Promise<unknown> =>
       ipcRenderer.invoke('maker:get-capabilities', agentKind),
+    /** Cindy-owned DSH plan/todo state; local desktop only, never ACP data. */
+    readDshActivity: (
+      sessionId: string,
+    ): Promise<import('../shared/dshActivity').DshActivityReadResult> =>
+      ipcRenderer.invoke('maker:dsh-activity:read', { sessionId }),
+    createDshPlan: (
+      sessionId: string,
+      label: string,
+    ): Promise<import('../shared/dshActivity').DshActivityMutationResult> =>
+      ipcRenderer.invoke('maker:dsh-plan:create', { sessionId, label }),
+    createDshTodo: (
+      sessionId: string,
+      planActivityId: string,
+      label: string,
+    ): Promise<import('../shared/dshActivity').DshActivityMutationResult> =>
+      ipcRenderer.invoke('maker:dsh-todo:create', { sessionId, planActivityId, label }),
+    completeDshActivity: (
+      sessionId: string,
+      activityId: string,
+    ): Promise<import('../shared/dshActivity').DshActivityMutationResult> =>
+      ipcRenderer.invoke('maker:dsh-activity:complete', { sessionId, activityId }),
+    cancelDshActivity: (
+      sessionId: string,
+      activityId: string,
+    ): Promise<import('../shared/dshActivity').DshActivityMutationResult> =>
+      ipcRenderer.invoke('maker:dsh-activity:cancel', { sessionId, activityId }),
+    /** Live DSH choices are opaque Main-issued tokens, never ACP values. */
+    getDshRuntimeConfiguration: (
+      sessionId: string,
+    ): Promise<import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationSnapshot> =>
+      ipcRenderer.invoke('maker:dsh-runtime-configuration:get', { sessionId }),
+    setDshRuntimeConfiguration: (
+      sessionId: string,
+      controlId: import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationId,
+      choiceId: string,
+    ): Promise<import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationSnapshot> =>
+      ipcRenderer.invoke('maker:dsh-runtime-configuration:set', { sessionId, controlId, choiceId }),
+    /**
+     * Existing DSH Home selection is Main-owned. These calls have no inputs
+     * and only return a display-safe mode/status projection.
+     */
+    getDshExistingHome: (): Promise<import('../shared/dshExistingHome').DshExistingHomeProjection> =>
+      ipcRenderer.invoke('maker:dsh-existing-home:get'),
+    selectDshExistingHome: (): Promise<import('../shared/dshExistingHome').DshExistingHomeProjection> =>
+      ipcRenderer.invoke('maker:dsh-existing-home:select'),
+    resetDshExistingHome: (): Promise<import('../shared/dshExistingHome').DshExistingHomeProjection> =>
+      ipcRenderer.invoke('maker:dsh-existing-home:reset'),
     listTurnChangeSets: (
       sessionId: string,
     ): Promise<import('../shared/turnChangeSet').TurnChangeSetSummary[]> =>

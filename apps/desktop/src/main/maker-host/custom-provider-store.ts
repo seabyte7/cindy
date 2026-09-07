@@ -44,7 +44,10 @@ export const CUSTOM_PROVIDER_ID_RE = /^[a-z0-9_-]+$/;
 // 'cindy' 是 pi models.json 里网关 provider 的保留 id;自定义 provider 撞名会让其模型
 // 既被排除出网关块又不写入原生块 → --model 校验失败,故一并保留。
 const RESERVED_IDS = new Set(['anthropic', 'openai', 'xai', 'xd', 'cindy']);
-const VALID_AGENTS: readonly AgentKind[] = ['claude-code', 'codex', 'pi'];
+// `dsh` deliberately shares the durable custom-provider record but not the
+// generic model catalog. It is a fixed ACP adapter profile, so it has no
+// selectable model, custom request path, wire protocol, or request headers.
+const VALID_AGENTS: readonly AgentKind[] = ['claude-code', 'codex', 'pi', 'dsh'];
 const MAX_ID_LEN = 40;
 const MAX_NAME_LEN = 60;
 
@@ -86,7 +89,10 @@ function isPiReasoningEffort(value: unknown): value is PiReasoningEffort {
 
 function isReasoningEffortForAgent(agent: string, value: unknown): boolean {
   if (agent === 'pi') return isPiReasoningEffort(value);
-  return typeof value === 'string' && (CINDY_RUNTIME_REASONING_EFFORTS as readonly string[]).includes(value);
+  return (
+    typeof value === 'string' &&
+    (CINDY_RUNTIME_REASONING_EFFORTS as readonly string[]).includes(value)
+  );
 }
 
 function isPiModelApi(value: unknown): value is PiModelApi {
@@ -207,6 +213,31 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
     }
   } catch {
     return invalid(`runtime '${agent}' baseUrl is not a valid URL`);
+  }
+  if (agent === 'dsh') {
+    // DSH is an independently admitted external ACP route. Do not let the
+    // generic provider form smuggle model-routing or header credentials into
+    // its fixed managed profile; its only credential is the per-runtime API
+    // key held by main-owned safeStorage.
+    if (runtimeUrl.protocol !== 'https:') {
+      return invalid("runtime 'dsh' baseUrl must use https");
+    }
+    if (runtimeUrl.search || runtimeUrl.hash) {
+      return invalid("runtime 'dsh' baseUrl must not contain query or fragment");
+    }
+    if (!Array.isArray(r.models) || r.models.length !== 0) {
+      return invalid("runtime 'dsh' models must be an empty array");
+    }
+    for (const field of [
+      'wireProtocol',
+      'requestPath',
+      'headers',
+      'modelsUrl',
+      'piCatalogProviderId',
+    ]) {
+      if (r[field] !== undefined) return invalid(`runtime 'dsh' ${field} is not supported`);
+    }
+    return { ok: true };
   }
   if (r.requestPath !== undefined && !isProviderRequestPath(r.requestPath)) {
     return invalid(`runtime '${agent}' requestPath invalid`);
@@ -495,6 +526,9 @@ export function validateCustomProviderConfig(
     const r = validateRuntime(k, rts[k]);
     if (!r.ok) return r;
   }
+  if (rts.dsh && c.auth && (c.auth as Record<string, unknown>).method !== 'apiKey') {
+    return invalid("runtime 'dsh' requires apiKey auth");
+  }
   return validateNoAuthLoopbackBoundary(
     c.auth as CustomProviderConfig['auth'],
     rts as Partial<Record<AgentKind, CustomProviderRuntimeConfig>>,
@@ -506,6 +540,12 @@ function normalizeRuntime(
   agent: AgentKind,
   rt: CustomProviderRuntimeConfig,
 ): CustomProviderRuntimeConfig {
+  if (agent === 'dsh') {
+    // The validator has established that no generic model-routing field is
+    // present. Reconstruct the closed shape instead of forwarding properties
+    // from an untrusted form object into the local database.
+    return { baseUrl: rt.baseUrl.trim(), models: [] };
+  }
   const seen = new Set<string>();
   const models = rt.models
     .map((m) => ({
@@ -702,6 +742,22 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
     const rt = obj[agent];
     if (!rt || typeof rt !== 'object') continue;
     const r = rt as Record<string, unknown>;
+    // Unlike the legacy generic runtimes, DSH must never be repaired by a
+    // permissive read. A row that contains a generic routing/header field is
+    // unavailable until the user explicitly saves the closed DSH shape again.
+    if (agent === 'dsh') {
+      const keys = Object.keys(r);
+      if (
+        keys.some((key) => key !== 'baseUrl' && key !== 'models') ||
+        typeof r.baseUrl !== 'string' ||
+        !Array.isArray(r.models) ||
+        r.models.length !== 0
+      ) {
+        continue;
+      }
+      out.dsh = { baseUrl: r.baseUrl, models: [] };
+      continue;
+    }
     const baseUrl = typeof r.baseUrl === 'string' ? r.baseUrl : '';
     const models = Array.isArray(r.models)
       ? r.models
@@ -750,7 +806,9 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
     if (r.headers && typeof r.headers === 'object' && !Array.isArray(r.headers)) {
       entry.headers = r.headers as Record<string, string>;
     }
-    if (typeof r.modelsUrl === 'string' && r.modelsUrl.length > 0) entry.modelsUrl = r.modelsUrl;
+    if (typeof r.modelsUrl === 'string' && r.modelsUrl.length > 0) {
+      entry.modelsUrl = r.modelsUrl;
+    }
     if (
       agent === 'pi' &&
       typeof r.piCatalogProviderId === 'string' &&

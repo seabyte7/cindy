@@ -660,7 +660,7 @@ interface ChatInputProps {
    * M35: Vendor lock — when provided, ModelSelector only shows models
    * belonging to this vendor ('cc' for Claude, 'codex' for OpenAI Codex).
    */
-  vendorKey?: 'cc' | 'codex' | 'pi';
+  vendorKey?: 'cc' | 'codex' | 'pi' | 'dsh';
   /**
    * Optional override for the composerDraftStore key used to persist editor
    * content (and via attachmentState, attachments) across mount/unmount.
@@ -1125,6 +1125,7 @@ export function ChatInput({
   // 预测守卫用原始值区分 null vs undefined,下游通路继续用 ?? undefined 归一化。
   const deviceLinkDeviceId = _deviceLinkDeviceId;
   const { t } = useTranslation();
+  const isDshManagedRuntime = vendorKey === 'dsh';
   const navigate = useNavigate();
   const { preference: composerSendShortcutPreference } = useComposerSendShortcutPreference();
   // ── 推荐提示词 ────────────────────────────────────────────────────
@@ -1492,12 +1493,14 @@ export function ChatInput({
   addFilesRef.current = addFiles;
   const addFolderPathRef = useRef(addFolderPath);
   addFolderPathRef.current = addFolderPath;
-  const localAttachmentPickerEnabled = canUseLocalAttachmentPicker({
-    sessionId,
-    runtimeAgentKind,
-    remoteHostId,
-    deviceLinkDeviceId,
-  });
+  const localAttachmentPickerEnabled =
+    !isDshManagedRuntime &&
+    canUseLocalAttachmentPicker({
+      sessionId,
+      runtimeAgentKind,
+      remoteHostId,
+      deviceLinkDeviceId,
+    });
   const suggestionFileInputRef = useRef<HTMLInputElement>(null);
 
   // ── 「+」合成打开统一建议面板(Codex 模式)────────────────────────────
@@ -1720,7 +1723,7 @@ export function ChatInput({
     return () => clearTimeout(timer);
   }, [initialModel, initialEffort, initialProviderId, pendingRemoteSwitch]);
 
-  const agentKind = vendorKeyToAgentKind(vendorKey);
+  const agentKind = vendorKeyToAgentKind(isDshManagedRuntime ? undefined : vendorKey);
   // device-link 远程会话:能力(模型 / fast / effort)从被控端读;本地会话 deviceLinkDeviceId undefined → 本地。
   const ccCaps = useAgentCapabilities('claude-code', deviceLinkDeviceId ?? undefined);
   const codexCaps = useAgentCapabilities('codex', deviceLinkDeviceId ?? undefined);
@@ -2171,7 +2174,7 @@ export function ChatInput({
         //      getPathForFile; no base64 read in renderer)
         //   3. Bitmap on clipboard with no backing file (screenshot, web
         //      "Copy image") → addClipboardImage
-        const items = event.clipboardData?.items;
+        const items = isDshManagedRuntime ? undefined : event.clipboardData?.items;
         if (items && items.length > 0) {
           const filesWithPath: File[] = [];
           let handledAny = false;
@@ -5151,6 +5154,13 @@ export function ChatInput({
         // (截图在下方并入 filesToSend,与文本块里的 "attached as a labeled image"
         // caption 对应)。
         const text = formatBrowserCommentsForSend(commentsForSend, editorText);
+        if (
+          isDshManagedRuntime &&
+          (attachmentsForSend.length > 0 || commentsForSend.length > 0)
+        ) {
+          toast.warning(t('newChat.dsh.textOnlyInput'));
+          return;
+        }
         // Allow send if there is text, attachments, or a host-capability chip
         // (host-capability chips carry routing metadata but no visible text).
         if (!text && attachmentsForSend.length === 0 && !hostCapability) return;
@@ -5728,6 +5738,7 @@ export function ChatInput({
       captureSendFocusForRestore,
       slashCommandsReady,
       mergedCommands,
+      isDshManagedRuntime,
     ],
   );
   useEffect(() => {
@@ -6524,7 +6535,7 @@ export function ChatInput({
   const sessionEngineFilter = useMemo(() => {
     if (!unifiedModelPanelEnabled) return undefined;
     if (!sessionId || !vendorKey || remoteHostId || !sessionAgentSwitchSupported) return undefined;
-    const currentAgent = intentTargetAgent ?? vendorKeyToAgentKind(vendorKey);
+    const currentAgent = intentTargetAgent ?? vendorKeyToAgentKind(isDshManagedRuntime ? undefined : vendorKey);
     if (!currentAgent) return undefined;
     return {
       currentAgent,
@@ -6599,6 +6610,7 @@ export function ChatInput({
     unifiedModelPanelEnabled,
     sessionId,
     vendorKey,
+    isDshManagedRuntime,
     intentTargetAgent,
     remoteHostId,
     runtimeAgentKind,
@@ -6615,7 +6627,9 @@ export function ChatInput({
   //     身份未加载时 resolveModelSelectorAgentIdentity 返回 undefined → 不画
   //     (绝不拿 vendorKey 的 Claude Code 回退冒充,见 runtimeAgentKind 的 prop 说明);
   //   · 草稿:没有 session 身份可言,当前引擎就是 vendorKey 本身。
-  const composerEngineMarkVendor = sessionId
+  const composerEngineMarkVendor = isDshManagedRuntime
+    ? null
+    : sessionId
     ? (resolveModelSelectorAgentIdentity(runtimeAgentKind, agentSwitchIntent?.target)?.vendorKey ??
       null)
     : (vendorKey ?? null);
@@ -7929,6 +7943,7 @@ export function ChatInput({
               setIsDragOver(false);
               if (composerMutationLocked) return;
               onComposerDropHandled?.();
+              if (isDshManagedRuntime) return;
               // .cindy / .cshare 已被窗口级 capture 接管(装入 / 导入链路),
               // 这里只清理拖拽 UI 状态,不当附件消费。
               if (isGlobalDropIntercepted(e.nativeEvent)) {
@@ -8279,16 +8294,18 @@ export function ChatInput({
                   dense={effectiveDenseToolbar}
                   visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
                 />
-                <PermissionSelector
-                  permissionMode={activePermissionMode}
-                  onPermissionModeChange={handlePermissionModeChange}
-                  vendorKey={vendorKey}
-                  deviceId={deviceLinkDeviceId ?? undefined}
-                  disabled={composerEditorLocked || settingsLocked}
-                  dense={effectiveDenseToolbar}
-                  iconOnly={useUltraCompactToolbar}
-                  visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
-                />
+                {!isDshManagedRuntime && (
+                  <PermissionSelector
+                    permissionMode={activePermissionMode}
+                    onPermissionModeChange={handlePermissionModeChange}
+                    vendorKey={vendorKey}
+                    deviceId={deviceLinkDeviceId ?? undefined}
+                    disabled={composerEditorLocked || settingsLocked}
+                    dense={effectiveDenseToolbar}
+                    iconOnly={useUltraCompactToolbar}
+                    visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
+                  />
+                )}
                 {useNarrowToolbar && !useCompactMiddleToolbar && <>{middleToolbarSlot}</>}
               </div>
               <div
@@ -8311,6 +8328,16 @@ export function ChatInput({
                     <>{middleToolbarSlot}</>
                   ))}
                 <div className={useNarrowToolbar ? 'min-w-0 shrink' : undefined}>
+                  {isDshManagedRuntime ? (
+                    <span
+                      data-testid="dsh-managed-runtime-badge"
+                      className="inline-flex h-[30px] max-w-full items-center rounded-full border border-[var(--border-default)] bg-[var(--composer-pill-bg)] px-2.5 text-12 font-medium text-[var(--text-primary)]"
+                      title={t('newChat.dsh.managedRuntimeDetails')}
+                      aria-label={t('newChat.dsh.managedRuntimeDetails')}
+                    >
+                      {t('newChat.dsh.managedRuntime')}
+                    </span>
+                  ) : (
                   <ModelSelector
                     // 选中态一律是会话 / 草稿持有的 **wire model id**(sessions.model 或
                     // lastByVendor.model)。面板行的归一化 id 只活在面板内部 —— 从这里递进去
@@ -8466,6 +8493,7 @@ export function ChatInput({
                     useMorphPopover
                     restoreFocusTarget={composerSuggestionFocusTarget}
                   />
+                  )}
                 </div>
                 <div
                   className={

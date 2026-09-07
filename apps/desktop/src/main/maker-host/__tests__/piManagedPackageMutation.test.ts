@@ -102,18 +102,18 @@ describe('Pi managed package Main authorization', () => {
     expect(makerHostSource).toContain(
       'await captureLocalPiPackageRuntimeInvalidationSnapshot(maker)',
     );
-    expect(makerHostSource).toContain(
-      'pendingPiPackageRuntimeSnapshots[pendingPiPackageRuntimeSnapshots.length - 1] = snapshot',
+    expect(makerHostSource).toMatch(
+      /pendingPiPackageRuntimeSnapshots\[pendingPiPackageRuntimeSnapshots\.length - 1\]\s*=\s*snapshot/,
     );
-    expect(makerHostSource).toContain(
-      'snapshot.entries.filter(({ session }) => session.id === callerSessionId)',
+    expect(makerHostSource).toMatch(
+      /snapshot\.entries\.filter\(\s*\(\{ session \}\) => session\.id === callerSessionId,?\s*\)/,
     );
-    expect(makerHostSource).toContain(
-      'snapshot.entries.filter(({ session }) => session.id !== callerSessionId)',
+    expect(makerHostSource).toMatch(
+      /snapshot\.entries\.filter\(\s*\(\{ session \}\) => session\.id !== callerSessionId,?\s*\)/,
     );
     expect(makerHostSource).toContain("recoveryAction: 'restart-cindy-to-refresh-packages'");
     const publishIndex = makerHostSource.indexOf('if (initiallyPartial) partial()');
-    const callerRetirementIndex = makerHostSource.indexOf('{ entries: callerEntries }');
+    const callerRetirementIndex = makerHostSource.indexOf('entries: callerEntries');
     expect(publishIndex).toBeGreaterThan(-1);
     expect(callerRetirementIndex).toBeGreaterThan(publishIndex);
   });

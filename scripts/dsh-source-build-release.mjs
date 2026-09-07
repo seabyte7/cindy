@@ -3,8 +3,8 @@
  * Build-bound release helper for the Cindy-managed DSH runtime.
  *
  * This helper does not compile DSH and it never installs a runtime. The local
- * macOS development flow first checks out the immutable upstream source tuple
- * and invokes the upstream build command. This file then admits only the
+ * macOS development flow receives an already-local checkout at the immutable
+ * source tuple and invokes the upstream build command. This file then admits only the
  * declared executable/sidecars, writes a deterministic tar.gz plus a
  * reviewable manifest, and verifies the resulting local bundle.
  */
@@ -132,7 +132,7 @@ export function validateSourceRelease(release) {
     if (!isPlainObject(release.builder.toolchain)) throw new Error('builder.toolchain must be an object');
     const toolchain = release.builder.toolchain;
     assertSafePath(toolchain.directory, 'builder.toolchain.directory');
-    for (const key of ['manifest', 'lockfile', 'workspace']) {
+    for (const key of ['manifest', 'lockfile', 'workspace', 'wrapper']) {
       if (!isPlainObject(toolchain[key])) throw new Error(`builder.toolchain.${key} must be an object`);
       assertSafePath(toolchain[key].path, `builder.toolchain.${key}.path`);
       assertSha(toolchain[key].sha256, `builder.toolchain.${key}.sha256`);
@@ -188,6 +188,38 @@ export function validateSourceRelease(release) {
         if (path.basename(sidecar) !== sidecar || names.has(sidecar)) throw new Error(`targets.${key}.sidecars contains an invalid or duplicate filename`);
         names.add(sidecar);
       }
+      if (target.nativeAddons !== undefined) {
+        if (!Array.isArray(target.nativeAddons) || target.nativeAddons.length === 0) {
+          throw new Error(`targets.${key}.nativeAddons must be a non-empty array when declared`);
+        }
+        const cachePaths = new Set();
+        for (const addon of target.nativeAddons) {
+          if (!isPlainObject(addon)) throw new Error(`targets.${key}.nativeAddons must contain objects`);
+          assertSafePath(addon.sourcePath, `targets.${key}.nativeAddons.sourcePath`);
+          assertSafePath(addon.cachePath, `targets.${key}.nativeAddons.cachePath`);
+          if (path.dirname(addon.sourcePath) === '.' || path.dirname(addon.cachePath) === '.'
+            || !addon.sourcePath.endsWith('.node') || !addon.cachePath.endsWith('.node')
+            || path.basename(addon.sourcePath) !== path.basename(addon.cachePath)
+            || names.has(addon.sourcePath) || cachePaths.has(addon.cachePath)) {
+            throw new Error(`targets.${key}.nativeAddons contains an invalid or duplicate native addon path`);
+          }
+          names.add(addon.sourcePath);
+          cachePaths.add(addon.cachePath);
+        }
+      }
+      if (target.pkgNativeCache !== undefined) {
+        if (!isPlainObject(target.pkgNativeCache)) {
+          throw new Error(`targets.${key}.pkgNativeCache must be an object when declared`);
+        }
+        const cache = target.pkgNativeCache;
+        assertSafePath(cache.sourceDirectory, `targets.${key}.pkgNativeCache.sourceDirectory`);
+        assertSafePath(cache.cacheDirectory, `targets.${key}.pkgNativeCache.cacheDirectory`);
+        if (path.dirname(cache.sourceDirectory) !== '.' || path.dirname(cache.cacheDirectory) !== '.'
+          || cache.sourceDirectory === cache.cacheDirectory || names.has(cache.sourceDirectory)) {
+          throw new Error(`targets.${key}.pkgNativeCache must use distinct direct-child directories`);
+        }
+        names.add(cache.sourceDirectory);
+      }
     }
   });
   return { ok: errors.length === 0, errors };
@@ -205,23 +237,26 @@ function git(root, args) {
 }
 
 /**
- * Prove that a fresh upstream checkout is exactly the source object set in
- * the definition. Fetching the named tag is deliberate: checkout by commit
- * alone would not catch a later tag retarget. This is an input check, so it
+ * Prove that an already-local checkout is exactly the source object set in
+ * the definition. This is deliberately offline: a missing local tag is an
+ * unavailable build input, never an instruction to contact its remote. It
  * runs before dependency installation or the upstream build mutates outputs.
  */
-export function verifySourceInput({ release, sourceRoot, fetchTag = true }) {
+export function verifySourceInput({ release, sourceRoot }) {
   const root = path.resolve(sourceRoot);
   if (!fs.statSync(root).isDirectory()) throw new Error('sourceRoot must be a directory');
-  if (fetchTag) {
-    execFileSync('git', ['-C', root, 'fetch', '--no-tags', 'origin', `refs/tags/${release.source.tag}:refs/tags/${release.source.tag}`], {
-      stdio: 'inherit',
-    });
+  let head;
+  let tagCommit;
+  let tree;
+  let dirty;
+  try {
+    head = git(root, ['rev-parse', 'HEAD']);
+    tagCommit = git(root, ['rev-parse', `refs/tags/${release.source.tag}^{commit}`]);
+    tree = git(root, ['rev-parse', 'HEAD^{tree}']);
+    dirty = git(root, ['status', '--porcelain=v1']);
+  } catch {
+    throw new Error('source checkout must already contain the pinned local HEAD, tree and tag; source verification never fetches');
   }
-  const head = git(root, ['rev-parse', 'HEAD']);
-  const tagCommit = git(root, ['rev-parse', `refs/tags/${release.source.tag}^{commit}`]);
-  const tree = git(root, ['rev-parse', 'HEAD^{tree}']);
-  const dirty = git(root, ['status', '--porcelain=v1']);
   const errors = [];
   if (head !== release.source.commit) errors.push('HEAD does not match source.commit');
   if (tagCommit !== release.source.commit) errors.push('tag does not resolve to source.commit');
@@ -265,7 +300,11 @@ export function applyReleaseAdaptations({ release, repoRoot, sourceRoot }) {
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('adaptation target must be a regular file');
       if (sha256File(candidate) !== file.beforeSha256) throw new Error(`adaptation target does not match its preimage: ${file.path}`);
     }
-    const numstat = execFileSync('git', ['-C', source, 'apply', '--check', '--unidiff-zero', '--numstat', '--whitespace=error', patchPath], {
+    // `git diff` normally writes correct hunk counts, but the checked-in
+    // adaptation contract is about the declared file and byte pre/postimages,
+    // not textual hunk counters. Recount before both validation and apply so
+    // an otherwise exact patch cannot be interpreted inconsistently.
+    const numstat = execFileSync('git', ['-C', source, 'apply', '--check', '--recount', '--unidiff-zero', '--numstat', '--whitespace=error', patchPath], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim().split('\n').filter(Boolean);
@@ -274,7 +313,7 @@ export function applyReleaseAdaptations({ release, repoRoot, sourceRoot }) {
       || changedPaths.some((file) => !file || !expectedPaths.has(file))) {
       throw new Error('adaptation patch changes files outside its release declaration');
     }
-    execFileSync('git', ['-C', source, 'apply', '--unidiff-zero', '--whitespace=error', patchPath], { stdio: 'inherit' });
+    execFileSync('git', ['-C', source, 'apply', '--recount', '--unidiff-zero', '--whitespace=error', patchPath], { stdio: 'inherit' });
     for (const file of adaptation.files) {
       const candidate = path.resolve(source, file.path);
       const stat = fs.lstatSync(candidate);
@@ -292,6 +331,7 @@ export function verifyAppliedReleaseAdaptations({ release, repoRoot, sourceRoot 
   const repository = path.resolve(repoRoot);
   const source = path.resolve(sourceRoot);
   const results = [];
+  const finalPostimages = new Map();
   for (const adaptation of release.source.adaptations) {
     const patchPath = path.resolve(repository, adaptation.patch.path);
     if (!patchPath.startsWith(`${repository}${path.sep}`)) throw new Error('adaptation patch escapes repository root');
@@ -300,14 +340,21 @@ export function verifyAppliedReleaseAdaptations({ release, repoRoot, sourceRoot 
       throw new Error('adaptation patch digest does not match source release');
     }
     for (const file of adaptation.files) {
-      const candidate = path.resolve(source, file.path);
-      if (!candidate.startsWith(`${source}${path.sep}`)) throw new Error('adaptation target escapes source root');
-      const stat = fs.lstatSync(candidate);
-      if (!stat.isFile() || stat.isSymbolicLink() || sha256File(candidate) !== file.afterSha256) {
-        throw new Error(`adaptation target does not match its postimage: ${file.path}`);
-      }
+      // Multiple reviewed adaptations may intentionally update one source file
+      // in sequence. At this post-install stage only the final declared
+      // postimage is meaningful; applyReleaseAdaptations already verifies each
+      // intermediate pre/postimage immediately after its patch is applied.
+      finalPostimages.set(file.path, file.afterSha256);
     }
     results.push({ patch: adaptation.patch.path, files: adaptation.files.map((file) => file.path).sort() });
+  }
+  for (const [filePath, expectedSha256] of finalPostimages) {
+    const candidate = path.resolve(source, filePath);
+    if (!candidate.startsWith(`${source}${path.sep}`)) throw new Error('adaptation target escapes source root');
+    const stat = fs.lstatSync(candidate);
+    if (!stat.isFile() || stat.isSymbolicLink() || sha256File(candidate) !== expectedSha256) {
+      throw new Error(`adaptation target does not match its final postimage: ${filePath}`);
+    }
   }
   return results;
 }
@@ -317,7 +364,7 @@ export function verifyPinnedBuildToolchain({ release, repoRoot }) {
   const root = path.resolve(repoRoot);
   const toolchain = release.builder.toolchain;
   const errors = [];
-  for (const key of ['manifest', 'lockfile', 'workspace']) {
+  for (const key of ['manifest', 'lockfile', 'workspace', 'wrapper']) {
     const entry = toolchain[key];
     const candidate = path.resolve(root, entry.path);
     if (!candidate.startsWith(`${root}${path.sep}`) || !fs.existsSync(candidate) || sha256File(candidate) !== entry.sha256) {
@@ -349,8 +396,15 @@ export function verifyPinnedBuildToolchain({ release, repoRoot }) {
   } catch {
     errors.push('toolchain workspace cannot be read');
   }
+  const wrapper = path.resolve(root, toolchain.wrapper.path);
+  try {
+    const stat = fs.lstatSync(wrapper);
+    if (!stat.isFile() || stat.isSymbolicLink()) errors.push('toolchain wrapper must be a regular file');
+  } catch {
+    errors.push('toolchain wrapper cannot be read');
+  }
   if (errors.length > 0) throw new Error(errors.join('; '));
-  return { directory, packageName: toolchain.packageName, version: toolchain.version };
+  return { directory, wrapper, packageName: toolchain.packageName, version: toolchain.version };
 }
 
 /** Verify the exact pnpm package tarball before it is ever executed locally. */
@@ -378,34 +432,121 @@ export function verifySeaBaseArchive({ release, targetKey, archivePath }) {
   return { target: targetKey, archive: candidate, sha256: actual, bytes: stat.size };
 }
 
-function targetFiles(release, targetKey) {
+function targetFiles(release, targetKey, runtimeDir) {
   const target = release.targets[targetKey];
   if (!target) throw new Error(`unknown source release target: ${targetKey}`);
-  return [target.executable, ...target.sidecars].sort();
+  const files = [target.executable, ...target.sidecars, ...(target.nativeAddons ?? []).map((addon) => addon.sourcePath)];
+  if (target.pkgNativeCache) {
+    files.push(...declaredRuntimeDirectoryFiles(runtimeDir, target.pkgNativeCache.sourceDirectory));
+  }
+  return files.sort();
 }
 
-export function runtimeTreeManifest(runtimeDir, expectedFiles) {
+function sortedNativeAddons(nativeAddons) {
+  return (nativeAddons ?? [])
+    .map((addon) => ({ sourcePath: addon.sourcePath, cachePath: addon.cachePath }))
+    .sort((left, right) => left.sourcePath.localeCompare(right.sourcePath) || left.cachePath.localeCompare(right.cachePath));
+}
+
+/**
+ * Resolve a declared runtime file without ever traversing a symlinked parent.
+ * F0 artifacts are all top-level files. F2 additionally admits explicitly
+ * declared nested native add-ons, so a simple final-path lstat is no longer
+ * enough to prevent a source-tree symlink from escaping the reviewed staging
+ * root before it is archived.
+ */
+function declaredRuntimeFile(runtimeDir, name) {
+  if (!isSafeRelativePath(name)) throw new Error(`runtime artifact path is unsafe: ${name}`);
+  const root = path.resolve(runtimeDir);
+  const rootStat = fs.lstatSync(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error('runtime directory must be a real directory');
+  }
+  const segments = name.split('/');
+  let candidate = root;
+  for (const [index, segment] of segments.entries()) {
+    candidate = path.join(candidate, segment);
+    const stat = fs.lstatSync(candidate);
+    const isLast = index === segments.length - 1;
+    if (!isLast) {
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error(`runtime artifact has a non-directory or symlink parent: ${name}`);
+      }
+    } else if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`runtime artifact must be a regular file: ${name}`);
+    }
+  }
+  return { candidate, stat: fs.lstatSync(candidate) };
+}
+
+/**
+ * A sealed pkg native cache is data rather than an executable entrypoint. Its
+ * exact regular-file tree is nevertheless part of the verified runtime
+ * archive. Rejecting every symlink here prevents a staged cache from pointing
+ * at a mutable developer or user location before the Helper signs it.
+ */
+function declaredRuntimeDirectoryFiles(runtimeDir, directoryName) {
+  if (!isSafeRelativePath(directoryName) || path.dirname(directoryName) !== '.') {
+    throw new Error(`runtime data directory is unsafe: ${directoryName}`);
+  }
+  const root = path.resolve(runtimeDir);
+  const directory = path.resolve(root, directoryName);
+  if (!directory.startsWith(`${root}${path.sep}`)) {
+    throw new Error('runtime data directory escapes runtime root');
+  }
+  const directoryStat = fs.lstatSync(directory);
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+    throw new Error(`runtime data directory must be a real directory: ${directoryName}`);
+  }
+  const files = [];
+  function visit(current, relative) {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+      const candidate = path.join(current, entry.name);
+      const nextRelative = path.join(relative, entry.name);
+      const stat = fs.lstatSync(candidate);
+      if (stat.isSymbolicLink()) throw new Error(`runtime data directory contains a symlink: ${nextRelative}`);
+      if (stat.isDirectory()) {
+        visit(candidate, nextRelative);
+      } else if (stat.isFile()) {
+        files.push(nextRelative.split(path.sep).join('/'));
+      } else {
+        throw new Error(`runtime data directory contains a non-regular entry: ${nextRelative}`);
+      }
+    }
+  }
+  visit(directory, directoryName);
+  if (files.length === 0) throw new Error(`runtime data directory is empty: ${directoryName}`);
+  return files.sort();
+}
+
+export function runtimeTreeManifest(runtimeDir, expectedFiles, { dataDirectories = [] } = {}) {
   const root = path.resolve(runtimeDir);
   const expected = new Set(expectedFiles);
+  const dataPrefixes = dataDirectories.map((directory) => `${directory.replace(/\/$/, '')}/`);
   const files = [];
   for (const name of [...expected].sort()) {
-    const candidate = path.resolve(root, name);
-    if (!candidate.startsWith(`${root}${path.sep}`)) throw new Error(`runtime file escapes staging: ${name}`);
-    const stat = fs.lstatSync(candidate);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`runtime artifact must be a regular file: ${name}`);
+    const { candidate, stat } = declaredRuntimeFile(root, name);
     if (stat.size <= 0) throw new Error(`runtime artifact is empty: ${name}`);
     if (stat.size > MAX_RUNTIME_FILE_BYTES) throw new Error(`runtime artifact exceeds ${MAX_RUNTIME_FILE_BYTES} bytes: ${name}`);
     if ((stat.mode & 0o022) !== 0) throw new Error(`runtime artifact must not be group/world writable: ${name}`);
-    if (!name.endsWith('.exe') && (stat.mode & 0o111) === 0) throw new Error(`runtime artifact is not executable: ${name}`);
+    // The self-contained runtime and sidecars execute directly. A declared
+    // native add-on is instead dlopen'd by that runtime and normally carries
+    // mode 0644 in pnpm's production deploy tree; requiring execute bits on it
+    // would reject the very reviewed artifact that macOS signs as nested code.
+    const isData = dataPrefixes.some((prefix) => name.startsWith(prefix));
+    if (!isData && !name.endsWith('.exe') && !name.endsWith('.node') && (stat.mode & 0o111) === 0) {
+      throw new Error(`runtime artifact is not executable: ${name}`);
+    }
     files.push({ path: name, bytes: stat.size, mode: stat.mode & 0o777, sha256: sha256File(candidate) });
   }
+  const expectedTopLevelFiles = [...expected].filter((name) => path.dirname(name) === '.').sort();
   const actual = fs.readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isFile() || entry.isSymbolicLink())
     .map((entry) => entry.name)
     .sort();
   // The upstream build keeps a dev-only node carrier under runtime/node. It is
   // deliberately excluded; direct files must be exactly the production set.
-  if (JSON.stringify(actual) !== JSON.stringify([...expected].sort())) {
+  if (JSON.stringify(actual) !== JSON.stringify(expectedTopLevelFiles)) {
     throw new Error('runtime directory contains unexpected or missing direct artifacts');
   }
   return { files, sha256: sha256(JSON.stringify(files)) };
@@ -423,10 +564,24 @@ function writeOctal(buffer, offset, length, value) {
   writeString(buffer, offset, length, text);
 }
 
+function splitUstarPath(name) {
+  if (!isSafeRelativePath(name)) throw new Error(`tar path is unsafe: ${name}`);
+  if (Buffer.byteLength(name) <= 100) return { name, prefix: '' };
+  const segments = name.split('/');
+  for (let index = 1; index < segments.length; index += 1) {
+    const prefix = segments.slice(0, index).join('/');
+    const leaf = segments.slice(index).join('/');
+    if (Buffer.byteLength(prefix) <= 155 && Buffer.byteLength(leaf) <= 100) {
+      return { name: leaf, prefix };
+    }
+  }
+  throw new Error(`tar path is too long for ustar: ${name}`);
+}
+
 function tarHeader(name, stat) {
-  if (!isSafeRelativePath(name) || Buffer.byteLength(name) > 100) throw new Error(`tar path is unsafe or too long: ${name}`);
+  const ustarPath = splitUstarPath(name);
   const header = Buffer.alloc(BLOCK_BYTES);
-  writeString(header, 0, 100, name);
+  writeString(header, 0, 100, ustarPath.name);
   writeOctal(header, 100, 8, stat.mode & 0o777);
   writeOctal(header, 108, 8, 0);
   writeOctal(header, 116, 8, 0);
@@ -436,6 +591,7 @@ function tarHeader(name, stat) {
   header[156] = 0x30;
   writeString(header, 257, 6, 'ustar');
   writeString(header, 263, 2, '00');
+  writeString(header, 345, 155, ustarPath.prefix);
   const checksum = header.reduce((sum, byte) => sum + byte, 0);
   writeString(header, 148, 8, `${checksum.toString(8).padStart(6, '0')}\0 `);
   return header;
@@ -446,10 +602,7 @@ export function createDeterministicTarGz(runtimeDir, files) {
   const root = path.resolve(runtimeDir);
   const chunks = [];
   for (const name of [...files].sort()) {
-    const candidate = path.resolve(root, name);
-    if (!candidate.startsWith(`${root}${path.sep}`)) throw new Error(`tar input escapes runtime directory: ${name}`);
-    const stat = fs.lstatSync(candidate);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`tar input must be a regular file: ${name}`);
+    const { candidate, stat } = declaredRuntimeFile(root, name);
     const body = fs.readFileSync(candidate);
     chunks.push(tarHeader(name, stat), body);
     const padding = (BLOCK_BYTES - (body.length % BLOCK_BYTES)) % BLOCK_BYTES;
@@ -487,12 +640,14 @@ export function inspectRuntimeArchive(archivePath) {
     const storedChecksum = readTarOctal(header, 148, 8);
     const calculated = header.reduce((sum, byte, index) => sum + (index >= 148 && index < 156 ? 0x20 : byte), 0);
     if (storedChecksum !== calculated) throw new Error('tar header checksum mismatch');
-    const name = header.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+    const leaf = header.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+    const prefix = header.subarray(345, 500).toString('utf8').replace(/\0.*$/, '');
+    const name = prefix ? `${prefix}/${leaf}` : leaf;
     if (!isSafeRelativePath(name)) throw new Error('tar contains an unsafe path');
     if (header[156] !== 0x30) throw new Error('tar contains a non-regular entry');
     if (!header.subarray(157, 257).equals(Buffer.alloc(100))
       || !header.subarray(265, 345).equals(Buffer.alloc(80))
-      || !header.subarray(329, 512).equals(Buffer.alloc(183))) {
+      || !header.subarray(500, 512).equals(Buffer.alloc(12))) {
       throw new Error('tar contains unsupported link, owner, device, or prefix metadata');
     }
     if (!header.subarray(257, 263).equals(Buffer.from('ustar\0')))
@@ -524,8 +679,10 @@ export function packageSourceRuntime({ release, sourceRoot, targetKey, outputDir
   const runtimeDir = path.resolve(sourceRoot, release.runtime.directory);
   const source = path.resolve(sourceRoot);
   if (!runtimeDir.startsWith(`${source}${path.sep}`)) throw new Error('runtime directory escapes source root');
-  const files = targetFiles(release, targetKey);
-  const tree = runtimeTreeManifest(runtimeDir, files);
+  const files = targetFiles(release, targetKey, runtimeDir);
+  const tree = runtimeTreeManifest(runtimeDir, files, {
+    dataDirectories: target.pkgNativeCache ? [target.pkgNativeCache.sourceDirectory] : [],
+  });
   const archive = createDeterministicTarGz(runtimeDir, files);
   fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
   const archiveFilename = `${release.releaseId}-${targetKey}.tar.gz`;
@@ -545,6 +702,8 @@ export function packageSourceRuntime({ release, sourceRoot, targetKey, outputDir
       seaBase: target.seaBase,
       executable: target.executable,
       requiredSidecars: [...target.sidecars].sort(),
+      requiredNativeAddons: sortedNativeAddons(target.nativeAddons),
+      requiredPkgNativeCache: target.pkgNativeCache ?? null,
       treeManifestSha256: tree.sha256,
       files: tree.files,
     },
@@ -572,12 +731,19 @@ export function verifyReleaseBundle({ manifest, archivePath }) {
   });
   if (!releaseValidation.ok) throw new Error(`release manifest input is invalid: ${releaseValidation.errors.join('; ')}`);
   if (!Array.isArray(manifest.runtime?.requiredSidecars)) throw new Error('runtime requiredSidecars must be an array');
+  if (!Array.isArray(manifest.runtime?.requiredNativeAddons)) throw new Error('runtime requiredNativeAddons must be an array');
+  if (manifest.runtime?.requiredPkgNativeCache !== null && manifest.runtime?.requiredPkgNativeCache !== undefined
+    && !isPlainObject(manifest.runtime.requiredPkgNativeCache)) {
+    throw new Error('runtime requiredPkgNativeCache must be an object or null');
+  }
   const declaredTarget = manifest.targets?.[manifest.target];
   if (!declaredTarget
     || declaredTarget.buildTarget !== manifest.runtime?.buildTarget
     || JSON.stringify(declaredTarget.seaBase) !== JSON.stringify(manifest.runtime?.seaBase)
     || declaredTarget.executable !== manifest.runtime?.executable
-    || JSON.stringify([...declaredTarget.sidecars].sort()) !== JSON.stringify(manifest.runtime?.requiredSidecars)) {
+    || JSON.stringify([...declaredTarget.sidecars].sort()) !== JSON.stringify(manifest.runtime?.requiredSidecars)
+    || JSON.stringify(sortedNativeAddons(declaredTarget.nativeAddons)) !== JSON.stringify(manifest.runtime?.requiredNativeAddons)
+    || JSON.stringify(declaredTarget.pkgNativeCache ?? null) !== JSON.stringify(manifest.runtime?.requiredPkgNativeCache ?? null)) {
     throw new Error('runtime declaration does not match its source-release target');
   }
   if (!isPlainObject(manifest.artifact) || path.basename(archivePath) !== manifest.artifact.filename) {
@@ -614,7 +780,9 @@ export function extractVerifiedRuntimeBundle({ manifest, archivePath, outputDir 
   while (cursor + BLOCK_BYTES <= archive.length) {
     const header = archive.subarray(cursor, cursor + BLOCK_BYTES);
     if (header.equals(ZERO_BLOCK)) break;
-    const name = header.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+    const leaf = header.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+    const prefix = header.subarray(345, 500).toString('utf8').replace(/\0.*$/, '');
+    const name = prefix ? `${prefix}/${leaf}` : leaf;
     const entry = expected.get(name);
     if (!entry) throw new Error('verified runtime archive changed during extraction');
     const size = readTarOctal(header, 124, 12);
@@ -627,6 +795,7 @@ export function extractVerifiedRuntimeBundle({ manifest, archivePath, outputDir 
     }
     const candidate = path.resolve(destination, name);
     if (!candidate.startsWith(`${destination}${path.sep}`)) throw new Error('runtime extraction path escapes destination');
+    fs.mkdirSync(path.dirname(candidate), { recursive: true, mode: 0o700 });
     fs.writeFileSync(candidate, body, { flag: 'wx', mode: entry.mode & 0o777 });
     fs.chmodSync(candidate, entry.mode & 0o777);
     expected.delete(name);

@@ -2,8 +2,9 @@
  * Desktop Main implementation of the DSH ACP transport.
  *
  * This module is deliberately below the Cindy bridge and above the runtime: callers must supply
- * a provisioned binary, a managed DSH_HOME, and a non-project launcher cwd. It never accepts a
- * Renderer-provided command, cwd, Home, or environment. ACP framing is handled in maker-core.
+ * a provisioned binary, a non-project launcher cwd, and either a managed DSH_HOME or the single
+ * private implicit-bookmark descriptor form. It never accepts a Renderer-provided command, cwd,
+ * Home, bookmark, or environment. ACP framing is handled in maker-core.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -12,6 +13,11 @@ import { isAbsolute } from 'node:path';
 import type { DshAcpTransport } from '@cindy/maker-core';
 
 import { desktopMakerLogger } from './logger-adapter.js';
+import {
+  DSH_IMPLICIT_BOOKMARK_DESCRIPTOR_FD,
+  encodeDshImplicitBookmarkHandoff,
+  type DshImplicitBookmarkHandoff,
+} from '../dsh-host/implicit-bookmark-handoff.js';
 
 const FORCE_KILL_GRACE_MS = 3_000;
 /**
@@ -232,8 +238,14 @@ export interface DshAcpStdioLaunchOptions {
   binaryPath: string;
   /** Empty, Cindy-managed runtime launcher directory; never the user worktree. */
   launcherCwd: string;
-  /** Environment constructed by Main; it must contain the absolute managed DSH_HOME. */
+  /** Environment constructed by Main; managed Home launches contain an absolute DSH_HOME. */
   env: NodeJS.ProcessEnv;
+  /**
+   * Existing-Home launch only: a Main-produced, one-shot implicit bookmark.
+   * It crosses only fd 3; neither the persistent source bookmark nor a raw
+   * Home pathname is accepted here.
+   */
+  implicitHomeBookmark?: DshImplicitBookmarkHandoff;
   /** Test-only shortening of the graceful EOF interval. */
   forceKillGraceMs?: number;
 }
@@ -242,6 +254,13 @@ export function assertDshAcpStdioLaunchOptions(options: DshAcpStdioLaunchOptions
   if (!isAbsolute(options.binaryPath)) throw new Error('DSH ACP binaryPath must be absolute');
   if (!isAbsolute(options.launcherCwd)) throw new Error('DSH ACP launcherCwd must be absolute');
   const home = options.env.DSH_HOME;
+  if (options.implicitHomeBookmark) {
+    if (home !== undefined) {
+      throw new Error('DSH existing Home bookmark launch must not carry DSH_HOME in its environment');
+    }
+    encodeDshImplicitBookmarkHandoff(options.implicitHomeBookmark);
+    return;
+  }
   if (typeof home !== 'string' || !isAbsolute(home)) {
     throw new Error('DSH ACP requires an absolute Main-managed DSH_HOME');
   }
@@ -271,14 +290,21 @@ export function createDshAcpStdioTransport(options: DshAcpStdioLaunchOptions): D
     // orphan-capable runtime until the Windows containment work is delivered.
     throw new Error('DSH ACP transport is unavailable on Windows until identity-bound process-tree containment is implemented');
   }
-  const child: ChildProcessWithoutNullStreams = spawn(options.binaryPath, ['--profile', 'acp'], {
+  const implicitBookmarkFrame = options.implicitHomeBookmark
+    ? encodeDshImplicitBookmarkHandoff(options.implicitHomeBookmark)
+    : null;
+  const child = spawn(options.binaryPath, ['--profile', 'acp'], {
     cwd: options.launcherCwd,
     env: options.env,
     shell: false,
     windowsHide: true,
-    stdio: ['pipe', 'pipe', 'pipe'],
+    // The Helper reads fd 3 once before it launches the fixed ACP runtime.
+    // Managed launches use `ignore`, which becomes no open fd at the native
+    // boundary; no ambient descriptor can opt a launch into existing-Home.
+    stdio: implicitBookmarkFrame ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe', 'ignore'],
     detached: true,
   });
+  const stdioChild = child as ChildProcessWithoutNullStreams;
   const lineHandlers = new Set<(line: string) => void>();
   const closeHandlers = new Set<(info: { reason: string }) => void>();
   let closed = false;
@@ -305,7 +331,7 @@ export function createDshAcpStdioTransport(options: DshAcpStdioLaunchOptions): D
     // physical process under the same bounded EOF -> TERM -> KILL obligation
     // and record a failure if it cannot be confirmed, rather than allowing a
     // direct-child close to be mistaken for cleanup.
-    closeAttempt = closeDshAcpChild(child, options.forceKillGraceMs ?? FORCE_KILL_GRACE_MS);
+    closeAttempt = closeDshAcpChild(stdioChild, options.forceKillGraceMs ?? FORCE_KILL_GRACE_MS);
     void closeAttempt.then(
       () => undefined,
       (error: unknown) => {
@@ -317,6 +343,26 @@ export function createDshAcpStdioTransport(options: DshAcpStdioLaunchOptions): D
     );
   };
 
+  if (implicitBookmarkFrame) {
+    const descriptor = child.stdio[DSH_IMPLICIT_BOOKMARK_DESCRIPTOR_FD] as NodeJS.WritableStream | null;
+    if (!descriptor || typeof descriptor.end !== 'function') {
+      finish('DSH existing Home private descriptor was not created');
+      ensurePhysicalTermination('existing Home private descriptor was unavailable after spawn');
+    } else {
+      let handoffFailed = false;
+      const failHandoff = (): void => {
+        if (handoffFailed) return;
+        handoffFailed = true;
+        finish('DSH existing Home private descriptor transfer failed');
+        ensurePhysicalTermination('existing Home private descriptor transfer failed');
+      };
+      descriptor.once('error', failHandoff);
+      descriptor.end(implicitBookmarkFrame, (error?: Error | null) => {
+        if (error) failHandoff();
+      });
+    }
+  }
+
   const stdout = createDshAcpStdoutFrameDecoder({
     onLine: (line) => {
       for (const handler of lineHandlers) handler(line);
@@ -325,18 +371,18 @@ export function createDshAcpStdioTransport(options: DshAcpStdioLaunchOptions): D
       // Treat a size violation as a protocol violation, not just a bad message. The Main-owned
       // carrier must not keep an untrusted runtime alive after it exceeds its resource contract.
       finish(`DSH ACP stdout line exceeds ${DSH_ACP_MAX_STDOUT_LINE_BYTES} bytes (observed at least ${observedBytes})`);
-      child.stdout.destroy();
+      stdioChild.stdout.destroy();
       ensurePhysicalTermination('protocol violation: stdout line exceeded limit');
     },
     onInvalidUtf8: (observedBytes) => {
       finish(`DSH ACP stdout contained invalid UTF-8 (${observedBytes} bytes)`);
-      child.stdout.destroy();
+      stdioChild.stdout.destroy();
       ensurePhysicalTermination('protocol violation: stdout contained invalid UTF-8');
     },
   });
-  child.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); });
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk: string) => {
+  stdioChild.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); });
+  stdioChild.stderr.setEncoding('utf8');
+  stdioChild.stderr.on('data', (chunk: string) => {
     // Runtime stderr can contain provider diagnostics. Do not retain or expose it across the
     // bridge; an opaque occurrence/count is enough to correlate a process failure safely.
     if (!chunk.trim()) return;
@@ -370,7 +416,7 @@ export function createDshAcpStdioTransport(options: DshAcpStdioLaunchOptions): D
         return Promise.reject(error);
       }
       return new Promise((resolve, reject) => {
-        child.stdin.write(`${line}\n`, (error) => (error ? reject(error) : resolve()));
+        stdioChild.stdin.write(`${line}\n`, (error) => (error ? reject(error) : resolve()));
       });
     },
     onLine(handler): () => void {
@@ -393,7 +439,7 @@ export function createDshAcpStdioTransport(options: DshAcpStdioLaunchOptions): D
       // ACP teardown is normally EOF after Cindy has sent session/close. The
       // bounded signal path is only a fallback, and final non-exit is an error
       // rather than proof that Main may release its process ownership.
-      closeAttempt = closeDshAcpChild(child, options.forceKillGraceMs ?? FORCE_KILL_GRACE_MS);
+      closeAttempt = closeDshAcpChild(stdioChild, options.forceKillGraceMs ?? FORCE_KILL_GRACE_MS);
       void closeAttempt.then(
         () => finish(reason),
         (error: unknown) => finish(`DSH ACP termination was not confirmed: ${error instanceof Error ? error.message : 'unknown error'}`),

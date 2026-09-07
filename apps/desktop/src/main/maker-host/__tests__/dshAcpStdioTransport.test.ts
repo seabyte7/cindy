@@ -31,7 +31,70 @@ describe('DSH ACP stdio launch boundary', () => {
     expect(() => assertDshAcpStdioLaunchOptions({ ...valid, launcherCwd: 'project' })).toThrow('launcherCwd');
     expect(() => assertDshAcpStdioLaunchOptions({ ...valid, env: {} })).toThrow('DSH_HOME');
     expect(() => assertDshAcpStdioLaunchOptions({ ...valid, env: { DSH_HOME: 'relative-home' } })).toThrow('DSH_HOME');
+    expect(() => assertDshAcpStdioLaunchOptions({
+      ...valid,
+      env: {},
+      implicitHomeBookmark: {
+        kind: 'dsh-existing-home-implicit-bookmark',
+        bookmark: Buffer.from('implicit-bookmark-fixture').toString('base64'),
+      },
+    })).not.toThrow();
+    expect(() => assertDshAcpStdioLaunchOptions({
+      ...valid,
+      implicitHomeBookmark: {
+        kind: 'dsh-existing-home-implicit-bookmark',
+        bookmark: Buffer.from('implicit-bookmark-fixture').toString('base64'),
+      },
+    })).toThrow('must not carry DSH_HOME');
   });
+
+  it.runIf(process.platform !== 'win32')('passes an implicit bookmark once only through fd 3 and keeps DSH_HOME out of that environment', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cindy-dsh-stdio-bookmark-test-'));
+    temporaryRoots.push(root);
+    const descriptorReader = join(root, 'descriptor-reader');
+    const bookmark = Buffer.from('implicit-bookmark-fixture', 'utf8').toString('base64');
+    writeFileSync(descriptorReader, [
+      `#!${process.execPath}`,
+      "'use strict';",
+      "const fs = require('node:fs');",
+      "const chunks = [];",
+      "fs.createReadStream(null, { fd: 3, autoClose: true })",
+      "  .on('data', (chunk) => chunks.push(chunk))",
+      "  .on('end', () => {",
+      "    const frame = Buffer.concat(chunks);",
+      "    const length = frame.length >= 4 ? frame.readUInt32BE(0) : -1;",
+      "    const payload = frame.subarray(4).toString('ascii');",
+      "    process.stdout.write(JSON.stringify({ length, payload, frameBytes: frame.length, hasDshHome: Object.hasOwn(process.env, 'DSH_HOME') }) + '\\n');",
+      "  });",
+      "process.stdin.resume();",
+      '',
+    ].join('\n'), { mode: 0o700 });
+    chmodSync(descriptorReader, 0o700);
+
+    const transport = createDshAcpStdioTransport({
+      binaryPath: descriptorReader,
+      launcherCwd: root,
+      env: { HOME: root, PATH: process.env.PATH },
+      implicitHomeBookmark: { kind: 'dsh-existing-home-implicit-bookmark', bookmark },
+      forceKillGraceMs: 10,
+    });
+    const lines: string[] = [];
+    transport.onLine((line) => lines.push(line));
+    // This test starts a real Node child and waits for its fd-3 EOF reader.
+    // Vitest's default waitFor budget is only 1s; under the normal parallel
+    // Desktop suite it can expire before the child receives a CPU slice even
+    // though the enclosing test has a 5s contract. Keep the wait bounded
+    // below that test timeout rather than treating scheduler contention as a
+    // bookmark-handoff regression.
+    await vi.waitFor(() => expect(lines).toHaveLength(1), { timeout: 4_000 });
+    expect(JSON.parse(lines[0]!)).toEqual({
+      length: Buffer.byteLength(bookmark, 'ascii'),
+      payload: bookmark,
+      frameBytes: 4 + Buffer.byteLength(bookmark, 'ascii'),
+      hasDshHome: false,
+    });
+    await expect(transport.close('implicit bookmark descriptor test')).resolves.toBeUndefined();
+  }, 5_000);
 
   it.runIf(process.platform === 'win32')('refuses Windows launch until identity-bound process-tree containment exists', () => {
     expect(() => createDshAcpStdioTransport(valid)).toThrow('identity-bound process-tree containment');
@@ -169,7 +232,13 @@ describe('DSH ACP stdio launch boundary', () => {
     const lines: string[] = [];
     transport.onLine((line) => lines.push(line));
     transport.onClose(closed);
-    await vi.waitFor(() => expect(lines).toEqual(['ready']));
+    // This fixture intentionally keeps a CPU-bound shell alive until the
+    // transport proves its EOF -> TERM -> KILL cleanup. Under the normal
+    // parallel Desktop suite, its first stdout callback can arrive after
+    // Vitest's default 1s wait budget even though the test itself allows 5s.
+    // Keep the readiness observation bounded within that contract instead of
+    // turning scheduler contention into a false transport failure.
+    await vi.waitFor(() => expect(lines).toEqual(['ready']), { timeout: 4_000 });
 
     await expect(transport.close('test bounded termination')).resolves.toBeUndefined();
     expect(closed).toHaveBeenCalledTimes(1);

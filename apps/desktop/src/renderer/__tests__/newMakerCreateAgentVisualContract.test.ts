@@ -36,10 +36,15 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     // 没有任何换引擎入口。两条降级路径(device-link 老被控端 capabilities-only、形态停在
     // 'original')都由 active 一并表达。
     expect(source).not.toContain('<VendorSegmentedSwitcher');
-    expect(source).toContain('unifiedModelPanelActive ? undefined : (');
-    expect(source).toMatch(/middleToolbarSlot=\{\s*\n\s*unifiedModelPanelActive \? undefined : \(/);
+    // DSH is a fixed managed runtime rather than a generic model catalog
+    // consumer, so it keeps AgentSelect visible even when the unified panel is
+    // active for the other engines.
+    expect(source).toContain('unifiedModelPanelActive && !isDshDraft ? undefined : (');
     expect(source).toMatch(
-      /compactMiddleToolbarSlot=\{\s*\n\s*unifiedModelPanelActive \? undefined : \(/,
+      /middleToolbarSlot=\{\s*\n\s*unifiedModelPanelActive && !isDshDraft \? undefined : \(/,
+    );
+    expect(source).toMatch(
+      /compactMiddleToolbarSlot=\{\s*\n\s*unifiedModelPanelActive && !isDshDraft \? undefined : \(/,
     );
     // active 必须真的把形态偏好叠进去(只改名不改语义就白修了)。
     expect(source).toMatch(/unifiedModelPanelEnabled && modelPickerLayoutPref !== 'original'/);
@@ -130,11 +135,8 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
       // ExtraDirsButton 据此不渲染引用目录段。原因是它开的是控制端原生目录对话框,选出的本机
       // 路径发到对端会被 validateExtraDirs 静默丢掉、或撞上对端同名的无关目录 —— chip 显示的
       // 并非真实授予的上下文。本机草稿行为不变;把 picker 路由到对端后恢复,见 issue #1012。
-      'onExtraDirsChange={isDeviceLinkDraft ? undefined : handleExtraDirsChange}',
-      'onNewGoal={(text) =>',
-      'rememberedEffortByModel={isDeviceLinkDraft ? undefined : draft.effortByModel}',
+      'isDeviceLinkDraft || isDshDraft ? undefined : handleExtraDirsChange',
       'onRememberedEffortChange={',
-      'isDeviceLinkDraft ? undefined : handleRememberedEffortChange',
       "placeholder={t('newChat.chatInput.createAgentPlaceholder')}",
       // 统一模型选择器(M5):新会话的选中直通 + 收藏锚点选中态。撤掉 AgentSelect 后,
       // 「换引擎」这件事只剩这一条路径 —— 掉了它草稿就再也换不了引擎。
@@ -143,6 +145,17 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     ]) {
       expect(chatInputBlock).toContain(invariant);
     }
+    // DSH activity is limited to its Cindy-owned plan/todo panel. It must not
+    // expose the generic New Goal flow that creates ordinary Maker goals.
+    expect(chatInputBlock).toMatch(
+      /onNewGoal=\{\s*isDshDraft\s*\? undefined\s*:\s*\(text\) => \{/,
+    );
+    expect(chatInputBlock).toMatch(
+      /rememberedEffortByModel=\{\s*isDeviceLinkDraft \|\| isDshDraft \? undefined : draft\.effortByModel\s*\}/,
+    );
+    expect(chatInputBlock).toMatch(
+      /onRememberedEffortChange=\{\s*isDeviceLinkDraft \|\| isDshDraft \? undefined : handleRememberedEffortChange\s*\}/,
+    );
   });
 
   it('uses the R2 quick-start icon mapping and avoids page-level shadows', () => {

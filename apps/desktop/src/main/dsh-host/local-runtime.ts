@@ -51,7 +51,7 @@ export interface DshLocalRuntimePin {
 export interface DshLocalRuntimeBundleManifest {
   schemaVersion: 1;
   releaseId: string;
-  target: string;
+  target: typeof DSH_LOCAL_RUNTIME_TARGET;
   runtime: {
     expectedVersion: string;
     executable: string;
@@ -103,7 +103,9 @@ function assertSafeRelativeFile(value: unknown, label: string): asserts value is
 }
 
 function assertPositiveSafeInteger(value: unknown, label: string): asserts value is number {
-  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive safe integer`);
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive safe integer`);
+  }
 }
 
 function sha256(value: Buffer | string): string {
@@ -231,7 +233,9 @@ export function readDshLocalRuntimePin(pinPath: string): DshLocalRuntimePin {
   return parseDshLocalRuntimePin(JSON.parse(fs.readFileSync(pinPath, 'utf8')) as unknown);
 }
 
-function pinsMatch(left: DshLocalRuntimePin, right: DshLocalRuntimePin): boolean {
+type DshRuntimePinLike = Pick<DshLocalRuntimePin, 'schemaVersion' | 'releaseId' | 'target' | 'runtime' | 'artifact'>;
+
+function pinsMatch(left: DshRuntimePinLike, right: DshRuntimePinLike): boolean {
   // The F0 evidence manifest intentionally does not carry the local-only
   // installer scope. Compare every artifact-bearing field after strict
   // parsing instead of depending on JSON property order or that local marker.
@@ -242,7 +246,10 @@ function pinsMatch(left: DshLocalRuntimePin, right: DshLocalRuntimePin): boolean
     && JSON.stringify(left.artifact) === JSON.stringify(right.artifact);
 }
 
-function assertLocalPlatform(platform = process.platform, arch = process.arch): void {
+function assertLocalPlatform(
+  platform: NodeJS.Platform = process.platform,
+  arch: NodeJS.Architecture = process.arch,
+): void {
   if (platform !== 'darwin' || arch !== 'arm64') {
     throw new Error(`DSH local runtime is unavailable on ${platform}-${arch}; only darwin-arm64 is admitted`);
   }
@@ -313,8 +320,8 @@ export function inspectDshLocalRuntimeArchive(input: {
   archivePath: string;
   bundleManifestPath: string;
   pin: DshLocalRuntimePin;
-  platform?: string;
-  arch?: string;
+  platform?: NodeJS.Platform;
+  arch?: NodeJS.Architecture;
 }): ParsedArchiveFile[] {
   assertLocalPlatform(input.platform, input.arch);
   const pin = parseDshLocalRuntimePin(input.pin);
@@ -354,8 +361,8 @@ function listFiles(root: string, current = root): string[] {
 export function verifyInstalledDshLocalRuntime(input: {
   installDirectory: string;
   pin: DshLocalRuntimePin;
-  platform?: string;
-  arch?: string;
+  platform?: NodeJS.Platform;
+  arch?: NodeJS.Architecture;
 }): VerifiedDshRuntime {
   assertLocalPlatform(input.platform, input.arch);
   const pin = parseDshLocalRuntimePin(input.pin);
@@ -408,8 +415,8 @@ export function installDshLocalRuntime(input: {
   bundleManifestPath: string;
   pin: DshLocalRuntimePin;
   installRoot: string;
-  platform?: string;
-  arch?: string;
+  platform?: NodeJS.Platform;
+  arch?: NodeJS.Architecture;
 }): VerifiedDshRuntime {
   const pin = parseDshLocalRuntimePin(input.pin);
   const files = inspectDshLocalRuntimeArchive({ ...input, pin });

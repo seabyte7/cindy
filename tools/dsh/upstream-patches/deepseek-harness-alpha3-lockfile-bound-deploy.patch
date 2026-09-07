@@ -1,0 +1,15 @@
+diff --git a/scripts/build-exe-for-python-sdk.ts b/scripts/build-exe-for-python-sdk.ts
+--- a/scripts/build-exe-for-python-sdk.ts
++++ b/scripts/build-exe-for-python-sdk.ts
+@@ -296,10 +296,9 @@ class SingleExeBuild {
+       '--filter',
+       DEPLOY_ROOT_PACKAGE,
+       'deploy',
+-      '--legacy',
++      '--config.inject-workspace-packages=true',
+       '--prod',
+       '--config.node-linker=hoisted',
+-      '--config.auto-install-peers=false',
+       '--config.link-workspace-packages=true',
+       this.staging,
+     ])

@@ -213,7 +213,11 @@ Cindy AI 个人账号的免费会员身份标签。只在服务端明确下发 a
 
 ### DeepSeek Harness
 
-Cindy 中 DSH agent 的用户可见专有名称。F1 仅用于身份投影和不可用状态，不表示已开放创建、模型选择或执行能力。
+Cindy 中 DSH agent 的用户可见专有名称。当前开放本机受管、文本专用的创建与同一任务的受限恢复、只对后续消息生效且不持久化的模型／推理强度候选设置，以及由 Cindy 本地保存的计划和待办；后者不表示 DSH 原生 UI 或原生 plan/todo API。模型／推理强度入口也不表示不同模型已在真实 provider 生效；仍不表示已开放远程/跨设备、完整 history 或审批能力。
+
+### DeepSeek Harness home
+
+由 DeepSeek Harness 使用的本地目录。五语统一保留英文 home 小写，避免把 Cindy 受管目录与用户已有目录误译为不同概念；设置页只展示受控状态，绝不显示目录位置、security-scoped bookmark 或其引用。选择已有 home 只保存 Cindy 私有的加密授权材料；重启后 Cindy 会通过一次性书签把该选择交给本地 Helper，因此该 home 的原生 profile 与 extension 可能运行。切回 Cindy 受管 home 可恢复隔离。
 
 ### Release
 

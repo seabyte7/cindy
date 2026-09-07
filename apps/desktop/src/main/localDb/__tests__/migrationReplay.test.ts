@@ -150,6 +150,30 @@ describeMigrationReplay('migration replay', () => {
       expect(tableExists(db, 'wechat_outbox')).toBe(true);
       expect(tableExists(db, 'wechat_file_attachments')).toBe(true);
       expect(tableExists(db, 'schedule_session_latest_runs')).toBe(true);
+      expect(tableExists(db, 'dsh_session_bindings')).toBe(true);
+      expect(tableExists(db, 'dsh_projection_events')).toBe(true);
+      expect(tableExists(db, 'dsh_prompt_receipts')).toBe(true);
+      expect(tableExists(db, 'dsh_activity_snapshots')).toBe(true);
+      expect(columnNames(db, 'dsh_session_bindings')).toEqual(
+        expect.arrayContaining([
+          'cindy_session_id',
+          'runtime_session_id',
+          'host_scope_id',
+          'runtime_release_id',
+          'runtime_version',
+          'controller_api_version',
+          'capability_fingerprint',
+          'home_mode',
+          'lifecycle_state',
+          'last_projected_sequence',
+          'revision',
+        ]),
+      );
+      expect(indexExists(db, 'uniq_dsh_bindings_scope_runtime')).toBe(true);
+      expect(indexExists(db, 'idx_dsh_bindings_scope_lifecycle')).toBe(true);
+      expect(indexExists(db, 'idx_dsh_projection_events_session_sequence')).toBe(true);
+      expect(indexExists(db, 'idx_dsh_prompt_receipts_session_state_created')).toBe(true);
+      expect(indexExists(db, 'idx_dsh_activity_snapshots_scope_sequence')).toBe(true);
       expect(indexExists(db, 'idx_messages_active_error_tail')).toBe(true);
       expect(indexExists(db, 'idx_schedule_runs_running_schedule')).toBe(true);
       expect(indexExists(db, 'idx_schedule_runs_running_heartbeat')).toBe(true);
@@ -159,8 +183,26 @@ describeMigrationReplay('migration replay', () => {
       expect(triggerExists(db, 'schedule_session_latest_run_insert')).toBe(true);
       expect(triggerExists(db, 'schedule_session_latest_run_delete')).toBe(true);
       expect(triggerExists(db, 'schedule_session_latest_run_update')).toBe(true);
-      expect(unreadRunPlan.some((row) => row.detail.includes('idx_schedule_runs_unread_terminal')))
-        .toBe(true);
+      expect(
+        unreadRunPlan.some((row) => row.detail.includes('idx_schedule_runs_unread_terminal')),
+      ).toBe(true);
+
+      const now = Date.now();
+      for (const agentKind of ['cc', 'codex', 'pi'] as const) {
+        db.prepare(
+          'INSERT INTO sessions (id, agent_kind, created_at, updated_at) VALUES (?, ?, ?, ?)',
+        ).run(`legacy-${agentKind}`, agentKind, now, now);
+      }
+      expect(
+        db
+          .prepare("SELECT id, agent_kind FROM sessions WHERE id LIKE 'legacy-%' ORDER BY id")
+          .all(),
+      ).toEqual([
+        { id: 'legacy-cc', agent_kind: 'cc' },
+        { id: 'legacy-codex', agent_kind: 'codex' },
+        { id: 'legacy-pi', agent_kind: 'pi' },
+      ]);
+      expect(db.prepare('SELECT count(*) FROM dsh_session_bindings').pluck().get()).toBe(0);
     } finally {
       cleanup();
     }
@@ -205,6 +247,7 @@ describeMigrationReplay('migration replay', () => {
 
   it('converts legacy permission_mode=plan sessions into plan_mode_enabled via 0060', () => {
     const { db, cleanup } = createTempDb();
+    const { db: replayDb, cleanup: cleanupReplayDb } = createTempDb();
     // 复刻 0060 之前的库:拷贝 drizzle 目录并剔除 0060,重放到 0059 后再 seed。
     const stagedDir = mkdtempSync(path.join(tmpdir(), 'xdmaker-drizzle-pre0060-'));
     try {
@@ -235,16 +278,31 @@ describeMigrationReplay('migration replay', () => {
       expect(result.applied.map((migration) => migration.seq)).toContain(60);
       expect(columnNames(db, 'sessions')).toContain('plan_mode_enabled');
       const rows = db
-        .prepare(
-          `SELECT id, permission_mode, plan_mode_enabled FROM sessions ORDER BY id`,
-        )
+        .prepare(`SELECT id, permission_mode, plan_mode_enabled FROM sessions ORDER BY id`)
         .all();
       expect(rows).toEqual([
         { id: 'legacy-plan-session', permission_mode: 'ask', plan_mode_enabled: 1 },
         { id: 'plain-session', permission_mode: 'acceptEdits', plan_mode_enabled: 0 },
       ]);
 
-      const replayResult = runMigrationReplay(db, {
+      // Rebuild a separate v59 database rather than lying about the version
+      // of an already-upgraded database. A migration is append-only, so its
+      // CREATE TABLE statement is not supposed to be safely replayed against
+      // the exact same physical schema after its history row was removed.
+      runMigrationReplay(replayDb, { drizzleDir: stagedDir });
+      replayDb
+        .prepare(
+          `INSERT INTO sessions (id, permission_mode, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`,
+        )
+        .run('legacy-plan-session', 'plan', now, now);
+      replayDb
+        .prepare(
+          `INSERT INTO sessions (id, permission_mode, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`,
+        )
+        .run('plain-session', 'acceptEdits', now, now);
+      const replayResult = runMigrationReplay(replayDb, {
         drizzleDir: drizzleDir(),
         currentVersion: 59,
       });
@@ -253,14 +311,13 @@ describeMigrationReplay('migration replay', () => {
         .filter((migration) => migration.seq > 59)
         .map((migration) => migration.seq);
       expect(replayResult.applied.map((migration) => migration.seq)).toEqual(expectedReplaySeqs);
-      const replayRows = db
-        .prepare(
-          `SELECT id, permission_mode, plan_mode_enabled FROM sessions ORDER BY id`,
-        )
+      const replayRows = replayDb
+        .prepare(`SELECT id, permission_mode, plan_mode_enabled FROM sessions ORDER BY id`)
         .all();
       expect(replayRows).toEqual(rows);
     } finally {
       rmSync(stagedDir, { recursive: true, force: true });
+      cleanupReplayDb();
       cleanup();
     }
   });
@@ -301,7 +358,9 @@ describeMigrationReplay('migration replay', () => {
       });
 
       expect(result.applied.map((migration) => migration.seq)).toEqual(
-        listMigrations(drizzleDir()).filter((migration) => migration.seq > 73).map((migration) => migration.seq),
+        listMigrations(drizzleDir())
+          .filter((migration) => migration.seq > 73)
+          .map((migration) => migration.seq),
       );
       expect(
         db
@@ -369,11 +428,16 @@ describeMigrationReplay('migration replay', () => {
       runMigrationReplay(db, { drizzleDir: stagedDir });
       const now = Date.now();
       for (const id of ['lead', 'worker-1', 'worker-2', 'worker-3', 'worker-4']) {
-        db.prepare('INSERT INTO sessions (id, created_at, updated_at) VALUES (?, ?, ?)').run(id, now, now);
+        db.prepare('INSERT INTO sessions (id, created_at, updated_at) VALUES (?, ?, ?)').run(
+          id,
+          now,
+          now,
+        );
       }
-      db.prepare(`INSERT INTO orca_teams
-        (id, lead_session_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`)
-        .run('team-1', 'lead', 'active', now, now);
+      db.prepare(
+        `INSERT INTO orca_teams
+        (id, lead_session_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+      ).run('team-1', 'lead', 'active', now, now);
       const insertWorker = db.prepare(`INSERT INTO orca_workers
         (id, team_id, session_id, status, label, role, focused, created_at, updated_at)
         VALUES (?, 'team-1', ?, 'idle', ?, 'tester', 0, ?, ?)`);
@@ -383,11 +447,9 @@ describeMigrationReplay('migration replay', () => {
 
       runMigrationReplay(db, { drizzleDir: drizzleDir() });
 
-      expect(db.prepare('SELECT label FROM orca_workers ORDER BY created_at').pluck().all()).toEqual([
-        'tester',
-        'tester-3',
-        'tester-2',
-      ]);
+      expect(
+        db.prepare('SELECT label FROM orca_workers ORDER BY created_at').pluck().all(),
+      ).toEqual(['tester', 'tester-3', 'tester-2']);
       expect(tableExists(db, 'orca_worker_creation_reservations')).toBe(true);
       expect(indexExists(db, 'uniq_orca_workers_team_label')).toBe(true);
       expect(() => insertWorker.run('worker-row-4', 'worker-4', 'TESTER', 4, 4)).toThrow();

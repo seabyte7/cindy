@@ -16,6 +16,8 @@ The user supersedes every contrary CI, remote-publication and multi-platform ass
   integrity, public ACP probe and Desktop Main real-binary E2E.
 - Do not build Linux, Windows or another macOS architecture; do not run GitHub Actions, upload artifacts, issue an
   attestation, distribute a runtime, or make a release claim.
+- The pinned source must already be locally present. Missing tag/commit/tree evidence is a hard stop, not permission
+  to fetch, clone, or contact the source repository.
 - Do not push, open a PR, create or update an issue in `upstream`. Code may be pushed only to the user's `origin`
   fork. The previously published `makecindy/cindy` issues are historical planning references and must not change.
 - F8–F11 and any Mobile/SSH/release implementation remain deferred design, not current acceptance. A later user
@@ -31,14 +33,46 @@ Codex、Pi 的行为退化。
 ## Current State
 
 - 设计正本是 docs/dev-rules/dsh-harness.md；Cindy 自主控制面已裁决，alpha.3 基础制品已取证，
-  F0 已有未注册的 ACP client、Desktop Main stdio transport 和 DshControlPlane 核心生命周期；
-  F1 已在本机 Desktop 完成 dsh 身份闭合（严格 DB/IPC/renderer 保留与未知值拒绝）；受管分发、
-  持久 binding、事件、可执行 UI 与跨端能力尚未实施。
-- maker-core 的 AgentKind 现在包含 claude-code、codex、pi、dsh，但 DSH adapter 故意不注册；
-  DSH creation、模型路由、scheduler、MCP worker、Orca worker 和通用 bootstrap 都显式不可用，
-  不能因类型存在而执行或回退到其它 Agent。Mobile 新建任务与 device-link 契约未改动，仍属 F9。
-- 运行时分发目前已有 tools/pi 的整目录、hash 与 manifest 参考实现；仓库尚无 tools/dsh、
-  DSH managed runtime、Host supervisor、DSH agent、session binding 或 DSH 专用 UI。
+  F0 已有 ACP client、Desktop Main stdio transport 和 DshControlPlane 核心生命周期；F1 已在本机
+  Desktop 完成 dsh 身份闭合（严格 DB/IPC/renderer 保留与未知值拒绝）。F2 本机受管 runtime
+  foundation、F3 durable binding / projection journal / prompt receipt 和 F4 有限事件 translator
+  均只完成局部 Main-only 证据。F5a 已在唯一当前 owner、固定 Helper 和已复核的 DSH provider/key
+  同时成立时动态注册 agent，并接入通用本地 create transaction。F5b 仅在 Main roster 确认该
+  registration 后，于本机 New Maker 显示受管 DSH 入口；创建后的同一任务 composer 继续保持这个
+  文本边界。它没有可选模型、来源、权限或附件输入，且 Main 仍拒绝伪造模型标记与
+  renderer-selected provider。F5c 已让 fresh Main bridge 仅在 same-scope binding、ACP `session/list` 与
+  settled receipt ledger 一致时恢复同一 Cindy task；adapter 只提交 task 的 opaque handle，Main 才解析 native
+  id 并重新验证 cwd。history synchronization、recovery UI 或跨端能力尚未实施。
+- F6 已在本机交付 Cindy-owned plan/todo 的 Main-only durable foundation；F7 已交付 existing-Home
+  的 protected selection/settings foundation，且新增一个没有默认 endpoint 的 Main-only internal-MCP
+  lease factory。它在 native `new` / `resume` 前向测试注入固定 loopback MCP declaration，token 仅在
+  内存中，经 create/resume failure、session close 或 carrier shutdown 收口。真实本地 signed-Helper
+  package E2E 已观察同一 Cindy binding 的 authenticated MCP `initialize` / `tools/list`、close 后端点撤销、
+  fresh-lease resume 后第二次 `initialize` / `tools/list` 与第二次撤销。这不是用户可配置 MCP、
+  existing Home execution、extension/profile lifecycle、SSH、Mobile 或产品 capability 开放；这些能力
+  继续以 `not-implemented` fail closed。
+- maker-core 的 AgentKind 现在包含 claude-code、codex、pi、dsh，并 export 一个仅能由 Main
+  受限 bridge 注入的 DSH adapter；F5a registrar 才能在启动前后 owner/provider/key snapshot 都一致时
+  注册它。它只接受 Main 注入的 local bridge、已提交 projection 与 durable receipt ledger admission，
+  只处理文本 turn，bridge contract 只传 Cindy session、scope 与 Main 生成的 ephemeral capability key，
+  并用 Cindy-owned opaque handle 隐藏 native session id。除受 Main roster 门控的本机 New Maker
+  文本入口外，DSH selector、模型路由、scheduler、MCP worker、Orca worker 和通用 bootstrap 以外的
+  产品入口仍显式不可用，不能因类型或 adapter 存在而执行或回退到其它 Agent。Mobile 新建任务与
+  device-link 契约未改动，仍属 F9。
+- `tools/dsh` 现有本机 `darwin-arm64` F0 admission pin，以及独立 build.4 signed-App source-runtime
+  foundation：受监督 runtime、唯一 bootstrap addon cache、native supervisor 与 fixed Helper.app Main factory
+  已在临时签名 App 的 credential-free ACP lifecycle 中验证；其 Helper-container managed scope 拒绝
+  pre-existing symlink 并在 spawn 前 canonical recheck。Main-owned provider route/profile 与 Helper outbound
+  network entitlement 已加入；Main canonicalizes the adapter base without a terminal slash and the unchanged strict
+  signed-Helper E2E now proves two exact loopback `/chat/completions` requests, committed projection, cancellation
+  and durable receipts. It remains a local containment witness, not product availability. 它尚未进入 Cindy
+  正式包；F5a Main registration 已接入 bootstrap 与 provider 变更后的重试，F5b 只交付受管本机
+  New Maker 文本入口及其创建后同一任务的文本边界。F5c signed-Helper E2E 证明同一受管 Home 下的两代
+  Main bridge 可用 settled binding 继续同一 Cindy task 的第二轮，且 native id/fixture key 不进入 Maker handle
+  或事件；history synchronization、活动时间线与 DSH 专用控制 UI 仍未实施。
+- build.9 的 archive-bound `@yao-pkg/pkg` native-cache 已用本地已核验 Node/pnpm 输入产出受控
+  `darwin-arm64` archive/manifest；当前 Cindy App 已本机重打包、验签并通过 7/7 loopback packaged-App E2E。
+  这不是 dynamic-native 工具运行、真实 user-selected Home 验收或发布证据，capability floor 继续有效。
 - GitHub 于 2026-09-02 查询不存在标题或正文含 DSH 的现有 issue。
 
 ## Expected Outcome

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { DSH_MANAGED_RUNTIME_MODEL_ID } from '../../../shared/dshSession';
 import { readCreateSessionOpts, withCreateSessionStderr } from '../sessionRequest';
 
 describe('session IPC request parsing', () => {
@@ -54,6 +55,32 @@ describe('session IPC request parsing', () => {
         workspaceKind: 'scratch',
       }),
     ).toThrow('[INVALID_PARAMS]');
+  });
+
+  it('only accepts the managed DSH runtime marker and no renderer-selected provider', () => {
+    expect(
+      readCreateSessionOpts({
+        agentKind: 'dsh',
+        workingDir: '/repo',
+        model: DSH_MANAGED_RUNTIME_MODEL_ID,
+      }).model,
+    ).toBe(DSH_MANAGED_RUNTIME_MODEL_ID);
+
+    expect(() =>
+      readCreateSessionOpts({
+        agentKind: 'dsh',
+        workingDir: '/repo',
+        model: 'deepseek-chat',
+      }),
+    ).toThrow('DSH requires the Cindy-managed runtime model marker');
+    expect(() =>
+      readCreateSessionOpts({
+        agentKind: 'dsh',
+        workingDir: '/repo',
+        model: DSH_MANAGED_RUNTIME_MODEL_ID,
+        providerId: 'renderer-route',
+      }),
+    ).toThrow('DSH does not accept a renderer-selected provider');
   });
 
   it('allocates a controlled-side cwd for folderless dialogue sessions when wired by the host', () => {

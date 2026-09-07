@@ -1508,6 +1508,16 @@
           "addHeader": "新增請求頭",
           "removeRow": "刪除該行"
         },
+        "dsh": {
+          "label": "DeepSeek Harness",
+          "description": "選用。為 DeepSeek Harness 設定一個獨立的 HTTPS 端點和 API 金鑰；絕不會重複使用其他 runtime 的憑證。",
+          "endpoint": "DSH 端點",
+          "endpointPlaceholder": "https://adapter.example.com/v1",
+          "apiKey": "DSH API 金鑰",
+          "apiKeyPlaceholder": "DSH API 金鑰",
+          "apiKeyHelp": "端點未變時可留白並保留本機已儲存的金鑰；變更端點必須重新輸入金鑰。",
+          "authRequired": "DeepSeek Harness 需要 API 金鑰驗證。"
+        },
         "wireProtocol": {
           "responses": "OpenAI Responses（原生）",
           "chat": "Chat Completions（Cindy 橋接）",
@@ -1547,7 +1557,10 @@
           "contextWindowInvalid": "上下文視窗必須是合法的正整數（數字組之間可用分隔符）",
           "requestPathInvalid": "精確請求路徑需以單個 / 開頭，不含片段標識或 .、.. 路徑段；空格和不安全字元請使用百分號編碼",
           "modelRequired": "請至少新增一個模型",
-          "oauthInvalid": "OAuth 配置不完整：所有欄位均必填，且兩個端點必須是安全的 https 地址"
+          "oauthInvalid": "OAuth 配置不完整：所有欄位均必填，且兩個端點必須是安全的 https 地址",
+          "dshEndpointInvalid": "DeepSeek Harness 僅接受不含憑證、查詢參數或片段的 HTTPS 端點",
+          "dshApiKeyRequired": "請為此 DeepSeek Harness 端點輸入 API 金鑰",
+          "dshAuthApiKeyRequired": "DeepSeek Harness 需要 API 金鑰驗證"
         },
         "toast": {
           "created": "已新增供應商",
@@ -2951,6 +2964,26 @@
         "update": "Pi 擴充功能已更新。執行中的本機 Pi 任務已停止；新建 Pi 任務即可使用新版本。",
         "set-enabled": "Pi 擴充功能啟用狀態已儲存。執行中的本機 Pi 任務已停止；新建 Pi 任務即可使用新狀態。"
       }
+    },
+    "dshExistingHome": {
+      "title": "DeepSeek Harness home",
+      "description": "預設使用 Cindy 受管的 home。你可以安全地選擇既有的 DeepSeek Harness home，設定中不會顯示其位置。",
+      "status": {
+        "cindyManaged": "正在使用 Cindy 受管的 home",
+        "configured": "已選擇既有的 DeepSeek Harness home",
+        "unavailable": "既有的 DeepSeek Harness home 無法使用"
+      },
+      "managedHomeHint": "Cindy 會將 Harness 資料保留在自己的受管位置。",
+      "existingHomeHint": "Cindy 只儲存使用所選 home 所需的本機授權，不會在這裡顯示其位置。",
+      "choose": "選擇既有 home",
+      "choosing": "正在選擇…",
+      "useManaged": "使用 Cindy 受管的 home",
+      "restoring": "正在恢復…",
+      "executionGate": "重啟 Cindy 後會使用所選 home。它的原生設定與擴充功能可能會執行；切回 Cindy 受管 home 可恢復隔離。",
+      "selectionSaved": "已選擇既有的 DeepSeek Harness home。重啟 Cindy 後生效。",
+      "saveFailed": "儲存 DeepSeek Harness home 失敗，請重試。",
+      "restored": "已恢復 Cindy 受管的 home。重啟 Cindy 後生效。",
+      "restoreFailed": "恢復 Cindy 受管的 home 失敗，請重試。"
     },
     "computerUse": {
       "title": "自動操作",
@@ -6768,6 +6801,11 @@
     }
   },
   "newChat": {
+    "dsh": {
+      "managedRuntime": "受管 DSH 執行環境",
+      "managedRuntimeDetails": "在本機受管 DSH 執行環境中執行。僅支援文字；重新啟動後，只有已驗證的本機繫結可用時，才能繼續同一個任務。",
+      "textOnlyInput": "DSH 目前僅支援文字輸入。"
+    },
     "noProvider": {
       "title": "當前模型沒有可用來源",
       "description": "當前模型還沒有已連線的來源，請先在設定裡連線一個再傳送。",
@@ -8352,6 +8390,48 @@
       "moreActions": "更多操作",
       "newSession": "新建任務",
       "loading": "載入中…"
+    },
+    "dshActivity": {
+      "ariaLabel": "DSH 本機計畫與待辦",
+      "title": "本機計畫與待辦",
+      "localOnly": "由 Cindy 在本機儲存，不會傳送給 DSH 執行階段。",
+      "refresh": "重新整理本機計畫與待辦",
+      "unavailable": "本機計畫狀態暫時無法使用。請重新整理後再試。",
+      "loading": "正在讀取本機計畫…",
+      "notReady": "DSH 任務正在準備本機活動狀態。",
+      "readOnlyUntilResumed": "DSH 已中斷連線。Main 驗證任務已恢復後，才能繼續編輯本機計畫。",
+      "planPlaceholder": "新增本機計畫",
+      "addPlan": "新增計畫",
+      "empty": "尚未建立本機計畫。",
+      "unnamedPlan": "未命名計畫",
+      "todoPlaceholder": "新增待辦",
+      "addTodo": "新增待辦",
+      "unnamedTodo": "未命名待辦",
+      "complete": "標記完成",
+      "cancel": "取消",
+      "status": {
+        "pending": "尚未開始",
+        "running": "進行中",
+        "waiting-for-input": "等待輸入",
+        "waiting-for-decision": "等待決定",
+        "completed": "已完成",
+        "failed": "失敗",
+        "cancelled": "已取消",
+        "disconnected": "已中斷連線",
+        "unavailable": "無法使用"
+      }
+    },
+    "dshRuntimeConfiguration": {
+      "ariaLabel": "DSH 執行階段設定",
+      "title": "執行階段設定",
+      "nextMessageOnly": "只對此任務後續傳送的訊息生效，不會儲存為供應商設定。",
+      "refresh": "重新整理 DSH 執行階段設定",
+      "unavailable": "執行階段設定暫時無法使用。請重新啟動此任務後再試。",
+      "noSelection": "未選擇",
+      "control": {
+        "model": "模型",
+        "reasoning_effort": "推理強度"
+      }
     },
     "time": {
       "yesterday": "昨天",

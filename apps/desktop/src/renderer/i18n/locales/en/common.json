@@ -1508,6 +1508,16 @@
           "addHeader": "Add header",
           "removeRow": "Remove row"
         },
+        "dsh": {
+          "label": "DeepSeek Harness",
+          "description": "Optional. Configure one dedicated HTTPS endpoint and API key for DeepSeek Harness. It never reuses credentials from the other runtimes.",
+          "endpoint": "DSH endpoint",
+          "endpointPlaceholder": "https://adapter.example.com/v1",
+          "apiKey": "DSH API key",
+          "apiKeyPlaceholder": "DSH API key",
+          "apiKeyHelp": "For an unchanged endpoint, leave this blank to retain its locally stored key. Changing the endpoint requires a new key.",
+          "authRequired": "DeepSeek Harness requires API key authentication."
+        },
         "wireProtocol": {
           "responses": "OpenAI Responses (native)",
           "chat": "Chat Completions (Cindy bridge)",
@@ -1547,7 +1557,10 @@
           "contextWindowInvalid": "Context window must be a valid positive integer (separators allowed between digit groups)",
           "requestPathInvalid": "Begin the exact request path with a single /. Do not use fragments or . and .. path segments; percent-encode spaces and unsafe characters.",
           "modelRequired": "Add at least one model",
-          "oauthInvalid": "Incomplete OAuth config: all fields are required and both endpoints must be secure https URLs"
+          "oauthInvalid": "Incomplete OAuth config: all fields are required and both endpoints must be secure https URLs",
+          "dshEndpointInvalid": "DeepSeek Harness requires an HTTPS endpoint without credentials, query parameters, or fragments",
+          "dshApiKeyRequired": "Enter a DeepSeek Harness API key for this endpoint",
+          "dshAuthApiKeyRequired": "DeepSeek Harness requires API key authentication"
         },
         "toast": {
           "created": "Provider added",
@@ -2960,6 +2973,26 @@
         "update": "Pi extension updated. Active local Pi tasks were stopped; start a Pi task to use the update.",
         "set-enabled": "Pi extension state saved. Active local Pi tasks were stopped; start a Pi task to use the new state."
       }
+    },
+    "dshExistingHome": {
+      "title": "DeepSeek Harness home",
+      "description": "Cindy uses its managed home by default. You can securely select an existing DeepSeek Harness home without exposing its location in Settings.",
+      "status": {
+        "cindyManaged": "Using Cindy-managed home",
+        "configured": "Existing DeepSeek Harness home selected",
+        "unavailable": "Existing DeepSeek Harness home unavailable"
+      },
+      "managedHomeHint": "Cindy keeps harness data in its own managed location.",
+      "existingHomeHint": "Cindy stores only the local authorization needed to use the selected home. Its location is not shown here.",
+      "choose": "Choose existing home",
+      "choosing": "Choosing…",
+      "useManaged": "Use Cindy-managed home",
+      "restoring": "Restoring…",
+      "executionGate": "The selected home is used after Cindy restarts. Its native profiles and extensions may run; switch back to a Cindy-managed home to restore isolation.",
+      "selectionSaved": "Existing DeepSeek Harness home selected. Restart Cindy to use it.",
+      "saveFailed": "Failed to save the DeepSeek Harness home. Try again.",
+      "restored": "Cindy-managed home restored. Restart Cindy to use it.",
+      "restoreFailed": "Failed to restore Cindy-managed home. Try again."
     },
     "computerUse": {
       "title": "Automation",
@@ -6784,6 +6817,11 @@
     }
   },
   "newChat": {
+    "dsh": {
+      "managedRuntime": "Managed DSH runtime",
+      "managedRuntimeDetails": "Runs locally in a managed DSH runtime. Text only; after a restart, only this same task may continue when its verified local binding is available.",
+      "textOnlyInput": "DSH currently supports text-only input."
+    },
     "noProvider": {
       "title": "No connected source for this model",
       "description": "The current model has no connected source. Connect one in Settings to start sending.",
@@ -8381,6 +8419,48 @@
       "moreActions": "More actions",
       "newSession": "New session",
       "loading": "Loading…"
+    },
+    "dshActivity": {
+      "ariaLabel": "Local DSH plans and todos",
+      "title": "Local plans and todos",
+      "localOnly": "Saved by Cindy locally; never sent to the DSH runtime.",
+      "refresh": "Refresh local plans and todos",
+      "unavailable": "The local plan state is unavailable. Refresh and try again.",
+      "loading": "Reading local plans…",
+      "notReady": "The DSH task is preparing its local activity state.",
+      "readOnlyUntilResumed": "DSH is disconnected. Local plans are read-only until Main verifies that this task has resumed.",
+      "planPlaceholder": "Add a local plan",
+      "addPlan": "Add plan",
+      "empty": "No local plans yet.",
+      "unnamedPlan": "Untitled plan",
+      "todoPlaceholder": "Add a todo",
+      "addTodo": "Add todo",
+      "unnamedTodo": "Untitled todo",
+      "complete": "Mark complete",
+      "cancel": "Cancel",
+      "status": {
+        "pending": "Not started",
+        "running": "In progress",
+        "waiting-for-input": "Waiting for input",
+        "waiting-for-decision": "Waiting for a decision",
+        "completed": "Completed",
+        "failed": "Failed",
+        "cancelled": "Cancelled",
+        "disconnected": "Disconnected",
+        "unavailable": "Unavailable"
+      }
+    },
+    "dshRuntimeConfiguration": {
+      "ariaLabel": "DSH runtime settings",
+      "title": "Runtime settings",
+      "nextMessageOnly": "Applies only to later messages in this task and is not saved as a provider setting.",
+      "refresh": "Refresh DSH runtime settings",
+      "unavailable": "Runtime settings are temporarily unavailable. Restart this task and try again.",
+      "noSelection": "No selection",
+      "control": {
+        "model": "Model",
+        "reasoning_effort": "Reasoning effort"
+      }
     },
     "time": {
       "yesterday": "Yesterday",

@@ -1508,6 +1508,16 @@
           "addHeader": "添加请求头",
           "removeRow": "删除该行"
         },
+        "dsh": {
+          "label": "DeepSeek Harness",
+          "description": "可选。为 DeepSeek Harness 配置一个独立的 HTTPS 端点和 API 密钥；绝不会复用其他 runtime 的凭证。",
+          "endpoint": "DSH 端点",
+          "endpointPlaceholder": "https://adapter.example.com/v1",
+          "apiKey": "DSH API 密钥",
+          "apiKeyPlaceholder": "DSH API 密钥",
+          "apiKeyHelp": "端点未变时可留空，保留本机已存密钥；更换端点必须重新输入密钥。",
+          "authRequired": "DeepSeek Harness 需要 API 密钥鉴权。"
+        },
         "wireProtocol": {
           "responses": "OpenAI Responses（原生）",
           "chat": "Chat Completions（Cindy 桥接）",
@@ -1547,7 +1557,10 @@
           "contextWindowInvalid": "上下文窗口必须是合法的正整数（数字组之间可用分隔符）",
           "requestPathInvalid": "精确请求路径需以单个 / 开头，不含片段标识或 .、.. 路径段；空格和不安全字符请使用百分号编码",
           "modelRequired": "请至少添加一个模型",
-          "oauthInvalid": "OAuth 配置不完整：所有字段均必填，且两个端点必须是安全的 https 地址"
+          "oauthInvalid": "OAuth 配置不完整：所有字段均必填，且两个端点必须是安全的 https 地址",
+          "dshEndpointInvalid": "DeepSeek Harness 仅接受不含凭证、查询参数或片段的 HTTPS 端点",
+          "dshApiKeyRequired": "请为该 DeepSeek Harness 端点输入 API 密钥",
+          "dshAuthApiKeyRequired": "DeepSeek Harness 需要 API 密钥鉴权"
         },
         "toast": {
           "created": "已添加供应商",
@@ -2951,6 +2964,26 @@
         "update": "Pi 扩展已更新。正在运行的本机 Pi 任务已停止；新建 Pi 任务即可使用新版本。",
         "set-enabled": "Pi 扩展启用状态已保存。正在运行的本机 Pi 任务已停止；新建 Pi 任务即可使用新状态。"
       }
+    },
+    "dshExistingHome": {
+      "title": "DeepSeek Harness home",
+      "description": "默认使用 Cindy 受管的 home。你可以安全地选择已有的 DeepSeek Harness home，设置中不会显示其位置。",
+      "status": {
+        "cindyManaged": "正在使用 Cindy 受管的 home",
+        "configured": "已选择已有的 DeepSeek Harness home",
+        "unavailable": "已有的 DeepSeek Harness home 不可用"
+      },
+      "managedHomeHint": "Cindy 会将 Harness 数据保留在自己的受管位置。",
+      "existingHomeHint": "Cindy 只保存使用所选 home 所需的本地授权，不会在这里显示其位置。",
+      "choose": "选择已有 home",
+      "choosing": "正在选择…",
+      "useManaged": "使用 Cindy 受管的 home",
+      "restoring": "正在恢复…",
+      "executionGate": "重启 Cindy 后将使用所选 home。它的原生配置与扩展可能会运行；切回 Cindy 受管 home 可恢复隔离。",
+      "selectionSaved": "已选择已有的 DeepSeek Harness home。重启 Cindy 后生效。",
+      "saveFailed": "保存 DeepSeek Harness home 失败，请重试。",
+      "restored": "已恢复 Cindy 受管的 home。重启 Cindy 后生效。",
+      "restoreFailed": "恢复 Cindy 受管的 home 失败，请重试。"
     },
     "computerUse": {
       "title": "自动操作",
@@ -6768,6 +6801,11 @@
     }
   },
   "newChat": {
+    "dsh": {
+      "managedRuntime": "受管 DSH 运行时",
+      "managedRuntimeDetails": "在本机受管 DSH 运行时中执行。仅支持文本；重启后，只有在已验证本机绑定可用时，才能继续同一个任务。",
+      "textOnlyInput": "DSH 当前仅支持文本输入。"
+    },
     "noProvider": {
       "title": "当前模型没有可用来源",
       "description": "当前模型还没有已连接的来源，请先在设置里连接一个再发送。",
@@ -8352,6 +8390,48 @@
       "moreActions": "更多操作",
       "newSession": "新建任务",
       "loading": "加载中…"
+    },
+    "dshActivity": {
+      "ariaLabel": "DSH 本地计划与待办",
+      "title": "本地计划与待办",
+      "localOnly": "由 Cindy 本地保存，不会发送给 DSH 运行时。",
+      "refresh": "刷新本地计划与待办",
+      "unavailable": "本地计划状态暂不可用。请刷新后重试。",
+      "loading": "正在读取本地计划…",
+      "notReady": "DSH 任务正在准备本地活动状态。",
+      "readOnlyUntilResumed": "DSH 已断开连接。Main 验证任务已恢复后，才能继续编辑本地计划。",
+      "planPlaceholder": "添加本地计划",
+      "addPlan": "添加计划",
+      "empty": "尚未创建本地计划。",
+      "unnamedPlan": "未命名计划",
+      "todoPlaceholder": "添加待办",
+      "addTodo": "添加待办",
+      "unnamedTodo": "未命名待办",
+      "complete": "标记完成",
+      "cancel": "取消",
+      "status": {
+        "pending": "未开始",
+        "running": "进行中",
+        "waiting-for-input": "等待输入",
+        "waiting-for-decision": "等待决定",
+        "completed": "已完成",
+        "failed": "失败",
+        "cancelled": "已取消",
+        "disconnected": "已断开",
+        "unavailable": "不可用"
+      }
+    },
+    "dshRuntimeConfiguration": {
+      "ariaLabel": "DSH 运行时设置",
+      "title": "运行时设置",
+      "nextMessageOnly": "仅对该任务后续发送的消息生效，不会保存为供应商设置。",
+      "refresh": "刷新 DSH 运行时设置",
+      "unavailable": "运行时设置暂不可用。请重启此任务后重试。",
+      "noSelection": "未选择",
+      "control": {
+        "model": "模型",
+        "reasoning_effort": "推理强度"
+      }
     },
     "time": {
       "yesterday": "昨天",

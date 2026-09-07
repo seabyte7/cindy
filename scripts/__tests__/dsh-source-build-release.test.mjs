@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,10 +20,12 @@ import {
   verifyAppliedReleaseAdaptations,
   verifySeaBaseArchive,
   verifyPinnedBuildToolchain,
+  verifySourceInput,
 } from '../dsh-source-build-release.mjs';
 
 const repoRoot = path.resolve(import.meta.dirname, '../..');
 const releasePath = path.join(repoRoot, 'tools/dsh/source-release.json');
+const supervisedReleasePath = path.join(repoRoot, 'tools/dsh/macos-supervised-source-release.json');
 const temporaryRoots = [];
 
 function temporaryRoot() {
@@ -41,8 +44,10 @@ function writeRuntime(root, release, targetKey = 'darwin-arm64') {
   const runtime = path.join(root, release.runtime.directory);
   fs.mkdirSync(runtime, { recursive: true });
   const target = release.targets[targetKey];
-  for (const [index, filename] of [target.executable, ...target.sidecars].entries()) {
+  const nativeAddonSources = (target.nativeAddons ?? []).map((addon) => addon.sourcePath);
+  for (const [index, filename] of [target.executable, ...target.sidecars, ...nativeAddonSources].entries()) {
     const file = path.join(runtime, filename);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, `fixture-${index}\n`);
     fs.chmodSync(file, 0o755);
   }
@@ -66,6 +71,31 @@ test('checked-in source release schema is valid and declares the user-approved i
   assert.deepEqual(Object.keys(release.targets).sort(), ['darwin-arm64']);
 });
 
+test('macOS supervised source release seals bootstrap and pkg native-cache inputs', () => {
+  const release = readSourceRelease(supervisedReleasePath);
+  assert.equal(release.releaseId, 'cindy-dsh-0.1.2-alpha.3-build.9-macos-supervised');
+  assert.equal(release.source.adaptations.length, 6);
+  assert.equal(release.source.adaptations[1].files[0].afterSha256, '24f669441b20804bd77c604199726309abd38de9507b55ee7ab5fdcca65d2f8b');
+  assert.equal(release.source.adaptations[2].files[0].afterSha256, 'd642e64042b88820baf4a510299a8c4d3362fdf52a9d4616c29f8ba0bade2526');
+  assert.equal(release.source.adaptations[3].files[0].afterSha256, '3887a86b4a153cab3c839cb9b35cd360f3d61a9c6216e5bf6e11bf8f10d3603c');
+  assert.deepEqual(
+    release.source.adaptations[4].files.map((file) => [file.path, file.afterSha256]),
+    [['scripts/build-exe-for-python-sdk.ts', '12c35d322a35bc2742479ab1973afb60702bf0fefc2fbe2bedec7e21e5f6f8e9']],
+  );
+  assert.equal(release.source.adaptations[5].files[0].path, 'packages/bundle/acp-app/cordis.patch.yml');
+  assert.equal(release.source.adaptations[5].files[0].afterSha256, '30beac85e1da985ccc3ed3ce8543ec3291ee3a09060ae3b67243554380831e6a');
+  assert.deepEqual(release.targets['darwin-arm64'].nativeAddons, [
+    {
+      sourcePath: 'node/node_modules/node-addon-require-builtin-darwin-arm64/prebuilt/darwin-arm64-napi-v9.node',
+      cachePath: 'node-addon-require-builtin-darwin-arm64/0.1.5/darwin-arm64/darwin-arm64-napi-v9.node',
+    },
+  ]);
+  assert.deepEqual(release.targets['darwin-arm64'].pkgNativeCache, {
+    sourceDirectory: 'pkg-native-cache',
+    cacheDirectory: 'pkg',
+  });
+});
+
 test('checked-in pkg build-tool closure is digest-bound and declares the pinned package integrity', () => {
   const release = readSourceRelease(releasePath);
   const verified = verifyPinnedBuildToolchain({ release, repoRoot });
@@ -75,6 +105,36 @@ test('checked-in pkg build-tool closure is digest-bound and declares the pinned 
     fs.readFileSync(path.join(repoRoot, release.builder.toolchain.workspace.path), 'utf8'),
     /^\s*esbuild:\s*true\s*$/m,
   );
+  assert.equal(verified.wrapper, path.join(repoRoot, 'tools/dsh/pnpm-dsh-build-wrapper.mjs'));
+});
+
+test('source input verification is fully local and rejects a checkout without its pinned tag', () => {
+  const release = fixtureRelease();
+  const root = temporaryRoot();
+  const sourceRoot = path.join(root, 'source');
+  fs.mkdirSync(path.join(sourceRoot, 'scripts'), { recursive: true });
+  fs.writeFileSync(path.join(sourceRoot, 'pnpm-lock.yaml'), 'lockfile fixture\n');
+  fs.writeFileSync(path.join(sourceRoot, 'scripts', 'build-exe-for-python-sdk.ts'), 'build fixture\n');
+  fs.writeFileSync(path.join(sourceRoot, 'package.json'), '{"name":"fixture"}\n');
+  execFileSync('git', ['init', '--quiet'], { cwd: sourceRoot });
+  execFileSync('git', ['config', 'user.email', 'dsh-test@example.invalid'], { cwd: sourceRoot });
+  execFileSync('git', ['config', 'user.name', 'DSH local test'], { cwd: sourceRoot });
+  execFileSync('git', ['add', '.'], { cwd: sourceRoot });
+  execFileSync('git', ['commit', '--quiet', '-m', 'fixture'], { cwd: sourceRoot });
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: sourceRoot, encoding: 'utf8' }).trim();
+  const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: sourceRoot, encoding: 'utf8' }).trim();
+  release.source.tag = 'local-only-fixture';
+  release.source.commit = commit;
+  release.source.tree = tree;
+  release.source.lockfile.sha256 = createHash('sha256').update('lockfile fixture\n').digest('hex');
+  release.source.buildScript.sha256 = createHash('sha256').update('build fixture\n').digest('hex');
+  release.source.packageManifest.sha256 = createHash('sha256').update('{"name":"fixture"}\n').digest('hex');
+
+  // There is deliberately no `origin`. The old fetch-on-verify behavior would
+  // fail here; the local tag is the whole source proof for this task.
+  assert.throws(() => verifySourceInput({ release, sourceRoot }), /must already contain/);
+  execFileSync('git', ['tag', release.source.tag], { cwd: sourceRoot });
+  assert.deepEqual(verifySourceInput({ release, sourceRoot }), { head: commit, tagCommit: commit, tree });
 });
 
 test('pnpm bootstrap tarball must match the release-bound npm integrity before execution', () => {
@@ -124,6 +184,22 @@ test('reviewed source adaptation has one declared file and exact pre/postimage b
   fs.appendFileSync(targetPath, 'unexpected mutation');
   assert.throws(() => verifyAppliedReleaseAdaptations({ release, repoRoot, sourceRoot }), /postimage/);
   assert.throws(() => applyReleaseAdaptations({ release, repoRoot, sourceRoot }), /preimage/);
+});
+
+test('post-install adaptation verification uses the final reviewed postimage for a sequentially patched source file', () => {
+  const release = fixtureRelease();
+  const root = temporaryRoot();
+  const sourceRoot = path.join(root, 'source');
+  const targetPath = path.join(sourceRoot, 'scripts', 'build-exe-for-python-sdk.ts');
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+  const first = structuredClone(release.source.adaptations[0]);
+  const second = structuredClone(release.source.adaptations[0]);
+  first.files[0].afterSha256 = sha256('first reviewed postimage');
+  second.files[0].afterSha256 = sha256('final reviewed postimage');
+  release.source.adaptations = [first, second];
+  fs.writeFileSync(targetPath, 'final reviewed postimage');
+  assert.doesNotThrow(() => verifyAppliedReleaseAdaptations({ release, repoRoot, sourceRoot }));
 });
 
 test('a lightweight source tag cannot be represented as a signed tag', () => {
@@ -184,6 +260,76 @@ test('runtime manifest rejects a group/world writable runtime artifact', () => {
   assert.throws(
     () => runtimeTreeManifest(runtime, [release.targets['darwin-arm64'].executable, ...release.targets['darwin-arm64'].sidecars]),
     /group\/world writable/,
+  );
+});
+
+test('declared nested native add-ons are archive-bound and cannot traverse a symlinked runtime parent', () => {
+  const release = fixtureRelease();
+  const addon = 'node/node_modules/fixture-native/prebuilt/darwin-arm64-napi-v9.node';
+  const cachePath = 'fixture-native/0.0.1/darwin-arm64/darwin-arm64-napi-v9.node';
+  release.targets['darwin-arm64'].nativeAddons = [{ sourcePath: addon, cachePath }];
+  const root = temporaryRoot();
+  const runtime = writeRuntime(root, release);
+  fs.chmodSync(path.join(runtime, addon), 0o644);
+  const output = packageSourceRuntime({
+    release,
+    sourceRoot: root,
+    targetKey: 'darwin-arm64',
+    outputDir: path.join(root, 'out'),
+  });
+  const manifest = JSON.parse(fs.readFileSync(output.manifestPath, 'utf8'));
+  assert.deepEqual(manifest.runtime.requiredNativeAddons, [{ sourcePath: addon, cachePath }]);
+  assert.deepEqual(inspectRuntimeArchive(output.archivePath).map((entry) => entry.path), [
+    release.targets['darwin-arm64'].executable,
+    ...release.targets['darwin-arm64'].sidecars,
+    addon,
+  ].sort());
+  const extracted = path.join(root, 'extracted');
+  assert.doesNotThrow(() => extractVerifiedRuntimeBundle({ manifest, archivePath: output.archivePath, outputDir: extracted }));
+  assert.equal(fs.readFileSync(path.join(extracted, addon), 'utf8'), 'fixture-3\n');
+
+  const safeDirectory = path.join(root, 'safe-directory');
+  fs.mkdirSync(safeDirectory);
+  fs.writeFileSync(path.join(safeDirectory, 'darwin-arm64-napi-v9.node'), 'fixture');
+  const firstParent = path.join(runtime, 'node');
+  fs.rmSync(firstParent, { recursive: true, force: true });
+  fs.symlinkSync(safeDirectory, firstParent);
+  assert.throws(
+    () => runtimeTreeManifest(runtime, [release.targets['darwin-arm64'].executable, ...release.targets['darwin-arm64'].sidecars, addon]),
+    /symlink parent/,
+  );
+});
+
+test('declared pkg native-cache trees are archive-bound as data and reject symlinks', () => {
+  const release = fixtureRelease();
+  release.targets['darwin-arm64'].pkgNativeCache = {
+    sourceDirectory: 'pkg-native-cache',
+    cacheDirectory: 'pkg',
+  };
+  const root = temporaryRoot();
+  const runtime = writeRuntime(root, release);
+  const cacheFile = path.join(runtime, 'pkg-native-cache', 'pkg', 'fixture-hash', '@scope', 'addon', 'native.node');
+  fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+  fs.writeFileSync(cacheFile, 'fixture sealed native cache');
+  fs.chmodSync(cacheFile, 0o644);
+  const output = packageSourceRuntime({
+    release,
+    sourceRoot: root,
+    targetKey: 'darwin-arm64',
+    outputDir: path.join(root, 'out'),
+  });
+  const manifest = JSON.parse(fs.readFileSync(output.manifestPath, 'utf8'));
+  assert.deepEqual(manifest.runtime.requiredPkgNativeCache, release.targets['darwin-arm64'].pkgNativeCache);
+  assert.ok(inspectRuntimeArchive(output.archivePath).some((entry) => entry.path.endsWith('/native.node')));
+  const extracted = path.join(root, 'extracted');
+  extractVerifiedRuntimeBundle({ manifest, archivePath: output.archivePath, outputDir: extracted });
+  assert.equal(fs.readFileSync(path.join(extracted, 'pkg-native-cache', 'pkg', 'fixture-hash', '@scope', 'addon', 'native.node'), 'utf8'), 'fixture sealed native cache');
+
+  const linked = path.join(runtime, 'pkg-native-cache', 'pkg', 'linked.node');
+  fs.symlinkSync(cacheFile, linked);
+  assert.throws(
+    () => packageSourceRuntime({ release, sourceRoot: root, targetKey: 'darwin-arm64', outputDir: path.join(root, 'out-link') }),
+    /contains a symlink/,
   );
 });
 

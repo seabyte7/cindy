@@ -88,8 +88,80 @@ describe('DshAcpClient', () => {
     const creating = client.createSession({ cwd: '/safe/project' });
     const create = sent(transport);
     expect(create).toMatchObject({ method: 'session/new', params: { cwd: '/safe/project', mcpServers: [] } });
-    reply(transport, create, { sessionId: 'runtime-session-1' });
-    await expect(creating).resolves.toEqual({ sessionId: 'runtime-session-1' });
+    reply(transport, create, {
+      sessionId: 'runtime-session-1',
+      configOptions: [{
+        id: 'model',
+        type: 'select',
+        currentValue: '["fixture","model-a"]',
+        options: [{
+          group: 'fixture',
+          name: 'Fixture',
+          options: [{ value: '["fixture","model-a"]', name: 'Model A' }],
+        }],
+      }],
+    });
+    await expect(creating).resolves.toEqual({
+      sessionId: 'runtime-session-1',
+      configOptions: [{
+        id: 'model',
+        type: 'select',
+        currentValue: '["fixture","model-a"]',
+        options: [{
+          group: 'fixture',
+          name: 'Fixture',
+          options: [{ value: '["fixture","model-a"]', name: 'Model A' }],
+        }],
+      }],
+    });
+
+    const selecting = client.setSessionConfigOption({
+      sessionId: 'runtime-session-1',
+      configId: 'model',
+      value: '["fixture","model-b"]',
+    });
+    const select = sent(transport);
+    expect(select).toMatchObject({
+      method: 'session/set_config_option',
+      params: {
+        sessionId: 'runtime-session-1',
+        configId: 'model',
+        value: '["fixture","model-b"]',
+      },
+    });
+    reply(transport, select, {
+      configOptions: [{
+        id: 'model',
+        type: 'select',
+        currentValue: '["fixture","model-b"]',
+        options: [{
+          group: 'fixture',
+          name: 'Fixture',
+          options: [{ value: '["fixture","model-b"]', name: 'Model B' }],
+        }],
+      }],
+    });
+    await expect(selecting).resolves.toEqual({
+      configOptions: [{
+        id: 'model',
+        type: 'select',
+        currentValue: '["fixture","model-b"]',
+        options: [{
+          group: 'fixture',
+          name: 'Fixture',
+          options: [{ value: '["fixture","model-b"]', name: 'Model B' }],
+        }],
+      }],
+    });
+
+    const resuming = client.resumeSession({ sessionId: 'runtime-session-1', cwd: '/safe/project' });
+    const resume = sent(transport);
+    expect(resume).toMatchObject({
+      method: 'session/resume',
+      params: { sessionId: 'runtime-session-1', cwd: '/safe/project' },
+    });
+    reply(transport, resume, { configOptions: [] });
+    await expect(resuming).resolves.toEqual({ configOptions: [] });
 
     const closing = client.closeSession('runtime-session-1');
     const close = sent(transport);
@@ -99,6 +171,21 @@ describe('DshAcpClient', () => {
 
     await client.cancel('runtime-session-1');
     expect(sent(transport)).toMatchObject({ method: 'session/cancel', params: { sessionId: 'runtime-session-1' } });
+  });
+
+  it('fails closed when a configuration response is not an ACP result object', async () => {
+    const transport = new FakeDshAcpTransport();
+    const client = new DshAcpClient({ createTransport: () => transport, logger });
+    client.start();
+
+    const selecting = client.setSessionConfigOption({
+      sessionId: 'runtime-session-1',
+      configId: 'reasoning_effort',
+      value: 'low',
+    });
+    reply(transport, sent(transport), 'not-an-object');
+    await expect(selecting).rejects.toThrow('session/set_config_option returned an invalid response');
+    await expect(client.listSessions()).rejects.toThrow('transport is unavailable');
   });
 
   it('answers an ACP permission request through the registered interaction boundary', async () => {

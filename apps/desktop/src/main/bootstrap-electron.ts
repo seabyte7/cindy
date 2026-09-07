@@ -44,6 +44,7 @@ import {
   shouldRequestSingleInstanceLock,
   resolveSingleInstanceLockUserDataDir,
 } from './devCliFlags.js';
+import { parseDshExistingHomePackagedE2eMode } from './dsh-host/existing-home-packaged-e2e-mode.js';
 import {
   recordDesktopDevAuthStartupResult,
   markDesktopDevStartupFailed,
@@ -539,6 +540,7 @@ import {
   setProviderAccessRuntimeRefreshListener,
   restartCodexAfterAuthModeChange,
   waitForInitialCustomMcpRefresh,
+  registerDshAgentIfAvailable,
   registerPiAgentIfAvailable,
 } from './maker-host/index.js';
 import { createPiRuntimeRecovery } from './agent-binaries/pi-runtime-recovery.js';
@@ -5595,6 +5597,10 @@ const registerIpcHandlers = () => {
       // await 确保第一个会话的 mcpProviders 数组已填入已保存的自定义 MCP（P2 冷启动竞态修复）。
       getMakerCore();
       await waitForInitialCustomMcpRefresh();
+      // DSH registration is optional and fully Main-gated. It has no default
+      // provider or runtime fallback; a missing/invalid local configuration
+      // simply leaves the agent absent while the rest of Desktop starts.
+      void registerDshAgentIfAvailable();
       // IPC handlers live for the whole process, while the concrete Maker is
       // replaced at every data-owner boundary. The facade resolves it lazily.
       const ipcMaker = createDynamicMaker(() => {
@@ -7760,6 +7766,90 @@ function parseSmokeArgs(): {
   };
 }
 
+function isDshExistingHomePackagedE2eEnabled(
+  mode: ReturnType<typeof parseDshExistingHomePackagedE2eMode>,
+): mode is 'full' | 'select' | 'resume-reset' {
+  // This local evidence mode is deliberately double-gated: a packaged app
+  // must receive both the explicit argv and an opt-in environment value. It
+  // is not a product path, does not receive a Renderer request, and exits
+  // before normal endpoint/auth/window initialization.
+  return (
+    app.isPackaged &&
+    mode !== null &&
+    process.env.CINDY_DSH_EXISTING_HOME_PACKAGED_E2E === '1'
+  );
+}
+
+async function runDshExistingHomePackagedE2e(
+  mode: 'full' | 'select' | 'resume-reset',
+): Promise<void> {
+  const userDataPath = app.getPath('userData');
+  try {
+    const {
+      runDshExistingHomePackagedE2e: runEvidence,
+      writeDshExistingHomePackagedE2eVerdict,
+    } = await import(
+      './dsh-host/existing-home-packaged-e2e.js'
+    );
+    const result = await runEvidence({
+      picker: {
+        showOpenDialog: (options) =>
+          dialog.showOpenDialog({
+            title: options.title,
+            buttonLabel: options.buttonLabel,
+            properties: options.properties.filter(
+              (property): property is 'openDirectory' => property === 'openDirectory',
+            ),
+            securityScopedBookmarks: options.properties.includes('securityScopedBookmarks'),
+          }),
+      },
+      safeStorage,
+      userDataPath,
+      resourcesPath: process.resourcesPath,
+      homePath: app.getPath('home'),
+      mode,
+    });
+    writeDshExistingHomePackagedE2eVerdict({ userDataPath, result });
+    process.stdout.write(`${JSON.stringify({ kind: 'dsh-existing-home-packaged-e2e', ...result })}\n`);
+    app.quit();
+  } catch (error) {
+    // Do not write a selected path, bookmark, native error, or child stderr to
+    // stdout. The caller only needs a stable fail-closed verdict.
+    const result = {
+      ok: false as const,
+      errorCode: 'DSH_EXISTING_HOME_PACKAGED_E2E_FAILED' as const,
+      failedPhase: 'picker' as const,
+    };
+    try {
+      const {
+        dshExistingHomePackagedE2eFailurePhase,
+        writeDshExistingHomePackagedE2eVerdict,
+      } = await import(
+        './dsh-host/existing-home-packaged-e2e.js'
+      );
+      const failedResult = {
+        ...result,
+        failedPhase: dshExistingHomePackagedE2eFailurePhase(
+          error,
+          mode === 'resume-reset' ? 'main-implicit' : 'picker',
+        ),
+      };
+      writeDshExistingHomePackagedE2eVerdict({
+        userDataPath,
+        result: failedResult,
+      });
+      process.stderr.write(`${JSON.stringify({ kind: 'dsh-existing-home-packaged-e2e', ...failedResult })}\n`);
+      app.exit(1);
+      return;
+    } catch {
+      // A malformed test userData must not turn a fail-closed E2E verdict
+      // into arbitrary filesystem output.
+    }
+    process.stderr.write(`${JSON.stringify({ kind: 'dsh-existing-home-packaged-e2e', ...result })}\n`);
+    app.exit(1);
+  }
+}
+
 async function runSmokeTest(
   userId: string,
   pluginStorage: boolean,
@@ -7944,6 +8034,12 @@ app.on('ready', async () => {
   const smoke = parseSmokeArgs();
   if (smoke.enabled) {
     await runSmokeTest(smoke.userId, smoke.pluginStorage, smoke.resultFile);
+    return;
+  }
+
+  const dshExistingHomePackagedE2e = parseDshExistingHomePackagedE2eMode(process.argv);
+  if (isDshExistingHomePackagedE2eEnabled(dshExistingHomePackagedE2e)) {
+    await runDshExistingHomePackagedE2e(dshExistingHomePackagedE2e);
     return;
   }
 
@@ -8425,6 +8521,13 @@ app.on('ready', async () => {
               const catalogMayWrite = () =>
                 handle.isLive() && accountProviderReadinessBarrier.isCurrentAdoptable();
               await refreshCustomProvidersIntoCatalog(catalogMayWrite);
+              if (catalogMayWrite()) {
+                // A newly committed owner receives a new Maker instance.
+                // Re-run only the optional DSH admission gate; it will reject
+                // a stale owner/configuration and never falls back to another
+                // account's route or credential.
+                void registerDshAgentIfAvailable();
+              }
               // A new start() is already a new incarnation (same-owner rollover adopts
               // instead). Bind reset/discovery/Pi teardown to this entry so a later
               // generation bump cannot skip A→B cleanup, and a replaced entry cannot

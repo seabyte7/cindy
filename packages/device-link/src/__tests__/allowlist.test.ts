@@ -295,6 +295,12 @@ describe('REMOTE_INVOKE_ALLOWLIST', () => {
       'local-db:messages:create',
       'maker:execute-desktop-command',
       'maker:open-session-in-new-window',
+      // Existing DSH Home selection opens a macOS security-scoped directory
+      // picker and persists a Main-only bookmark. It is deliberately local:
+      // remote/mobile must never initiate, observe, reset, or receive it.
+      'maker:dsh-existing-home:get',
+      'maker:dsh-existing-home:select',
+      'maker:dsh-existing-home:reset',
       'show-open-directory-dialog',
       'window-minimize',
       'page-zoom:in',

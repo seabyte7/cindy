@@ -66,6 +66,10 @@
         "path": "tools/dsh/pkg-toolchain/pnpm-workspace.yaml",
         "sha256": "f81c228426e6c70ebd551802c9559dafc6c566651b27dc28ca58d23e61b894b3"
       },
+      "wrapper": {
+        "path": "tools/dsh/pnpm-dsh-build-wrapper.mjs",
+        "sha256": "9c8545b909b40525776bd602e75f126d43c19645e9e9f0a21fbcd3eca923291c"
+      },
       "packageName": "@yao-pkg/pkg",
       "version": "6.21.0",
       "integrity": "sha512-dZl2C7rdwwEI4tv7WW+Cvnl+2K8OqHKUXfNQRq3mZCTC4degoFx1jA4d5wOn9d8lHrUy58xuEt1eJD0pTddW5w=="

@@ -12,7 +12,8 @@ Active delivery is local macOS arm64 Desktop work only. It may verify the pinned
 remote runner or GitHub Actions, upload/attest/distribute a runtime, or write to `upstream`. Any code push goes
 only to the user's `origin` fork. The F8–F11 branches below are deferred architecture; do not start them, or any
 SSH/Mobile/release work, without a new explicit user authorization. Existing GitHub issue numbers remain a
-historical local index and must not be updated.
+historical local index and must not be updated. A local source checkout lacking the pinned tag/commit/tree is an
+unavailable input; source verification must never fetch, clone or otherwise contact a remote.
 
 ## Delivery Model
 
@@ -83,8 +84,8 @@ Scope:
   保留既有 binding 并禁止重发；真实 transport 只由该 port 使用。
 - 把 child 回收当作整棵运行时树而非 direct child：F0 的本机 macOS POSIX launch 创建独立进程组且
   TERM/KILL 作用于整组，并覆盖 root 先退出的同组后代；这不能阻止 `setsid` / double-fork，也不构成
-  产品 containment 或其它 OS 证据。F2 的任何产品 launch/supervisor 设计均 deferred，未经新授权不得
-  以 process-group best-effort 宣称完成。
+  产品 containment 或其它 OS 证据。F2 后续以签名 App Sandbox native supervisor 做本机基础验证，
+  但在接入 Cindy 正式包和 Main factory 前，仍不得以 process-group 或测试 App 冒充产品 launch。
 - 保存正例和负例：错误 hash、缺 sidecar、未知 API version、无 controller、无认证、stdout
   杂讯、乱序/重复 event、cancel/reconnect。
 
@@ -154,7 +155,7 @@ Rollback:
 
 ## Phase 2: Managed Runtime and Host Supervisor
 
-Status: **in progress — local admission and Main-only scope foundation delivered; no product registration.**
+Status: **local package evidence delivered — local admission, Main-only scope, signed-App `darwin-arm64` native-supervisor, fixed-topology Main factory, and Cindy's own local App-bundle E2E are verified. F2 remains deliberately local-only, not a release/distribution claim.**
 
 Goal: 在 Desktop Main 建立可验证、可隔离、失败不影响其他 Agent 的 DSH runtime 与 Host scope。
 
@@ -176,20 +177,68 @@ Delivered local foundation:
   by realpath/mode/digest before a future spawn.
 - `dsh-host/scope.ts` and `host-manager.ts` own hashed account/release/home-mode scope identity, managed Home,
   isolated launcher cwd, allowlisted memory-only secret injection, single-flight handshake and bounded cleanup
-  ownership. `DshHostManager` has no default child launcher: an unproven process group cannot satisfy containment.
+  ownership. Managed scope path components are created as direct real directories and refuse pre-existing symlinks.
+  `DshHostManager` has no default child launcher: an unproven process group cannot satisfy containment.
+- The authorized macOS network slice is Main-owned and fail-closed: the Helper.app alone carries client-network
+  entitlement; a production route must match a Main allowlisted HTTPS origin, test traffic must be literal
+  `127.0.0.1:<port>`, and there is no default endpoint. The fixed managed ACP Home-level patch persists only two
+  environment variable *names*, never an endpoint or credential. Main reads the one API key only after route/patch admission;
+  the native supervisor repeats the exact environment contract. Its signed entitlement is checked during staging.
 - The opt-in real-binary integration test installs the fresh F0 archive and runs Desktop Main ACP
   initialize/create/close from that installed path. It remains a local evidence test, not product registration.
+- `macos-supervised-source-release.json` now defines a separate local build.9 source-release path. It pins five reviewed
+  adaptations, including sealed bootstrap and archive-bound `@yao-pkg/pkg` native-cache paths plus an ACP-MVP
+  capability floor; only `darwin-arm64` is produced. The cache is assembled from the freshly deployed closure,
+  never a user cache, and Helper-only lookup fails closed for a missing or symlinked entry.
+  `macos-dsh-sandbox-supervisor.c` accepts only `--version` and `--profile acp`,
+  derives resources from its own bundle, constrains the child environment and drains its ordinary process group.
+- A fresh local ad-hoc-signed App Sandbox bundle signed the supervisor, runtime/sidecars and bootstrap addon cache
+  with their respective entitlements. Its own container passed version plus the credential-free public ACP
+  `initialize → new → idle cancel notification → close → list → resume → close` smoke. Dynamic native tools,
+  model prompts, network and product registration were not exercised.
+- The local Forge post-package hook now stages the runtime as a separately signed `Cindy DSH Supervisor.app` under
+  `Contents/Helpers`, not as an extra executable in Cindy's main `Contents/MacOS`. The helper's own Resources hold
+  runtime/sidecars/cache, so a final parent-App signature preserves the runtime inherit entitlement. A nested-helper
+  probe passed strict deep signature verification and the credential-free lifecycle using the helper container.
+- `dsh-host/macos-supervised-runtime.ts` now accepts only that fixed Helper.app topology and the matching
+  signed descriptor/bundle identities. It verifies runtime/sidecar/sealed-addon topology again, launches only the
+  native supervisor, maps cindy-managed paths to the Helper container rather than parent `userData`, and binds the
+  requested release to the just-verified runtime. It re-resolves every scope/Home/launcher/temp path before spawn
+  and rejects a symlinked lexical Helper-container escape. An opt-in local E2E passed `DshHostManager → DshAcpClient →
+  supervisor → initialize → stop` and asserted only the generated Helper-container scope was cleaned. This module
+  never self-registers a product agent; the separate F5a Main registrar may call it only after its own owner,
+  provider, binding/receipt/journal and CWD admissions have all passed.
+- `pnpm --filter desktop package:dsh:local-macos --archive <local-build.9.tar.gz> --manifest <local-build.9.json>`
+  is the sole prospective local package-evidence command. It accepts only direct local regular inputs, requires an
+  already verified local `darwin-arm64` ripgrep runtime, invokes Forge package directly with a fixed
+  `darwin-arm64` target, and explicitly skips remote-agent bundles plus iOS preparation. Once an independently
+  verified build.9 archive/manifest exists, it will stage the exact build.9 Helper topology into Cindy's own
+  `Cindy.app`, re-sign ordinary Electron code inside-out while retaining the DSH Helper's separate
+  sandbox/network entitlement, validate the complete App signature, then run the signed-Helper E2E. The exact
+  build.9 Node and pnpm inputs have now been locally verified; the controlled archive/manifest and a re-signed local
+  `darwin-arm64` Cindy App exist, and the package suite passed 7/7 loopback E2Es. This does not cover a
+  dynamic-native tool or actual user-selected existing-Home acceptance, so historical and current package evidence
+  must not be presented as product or release admission.
+- `pnpm build:dsh:local-macos -- --release <checked-in-release.json> --repo-root <Cindy-root> --source-root
+  <already-local-clean-checkout> --node-archive <verified-node-v24.20.0-darwin-arm64.tar.gz> --pnpm-tarball
+  <verified-pnpm-11.7.0.tgz> --output-dir <new-local-output>` is the only build entrypoint. It verifies all
+  immutable local inputs before adapting the disposable source checkout, seeds pkg only through a temporary private
+  cache, and invokes the upstream build via the digest-bound Cindy pnpm shim. It neither fetches nor builds another
+  target; it rejects a pre-existing output directory and a missing input is a fail-closed preflight result.
 
 Remaining F2 exit blockers:
 
-- Implement and run an identity-bound macOS native containment launcher against the installed DSH runtime. The
-  no-network Seatbelt experiment is a negative result, not a fallback: shell → `sandbox-exec` → DSH `--version`
-  succeeded, but the same installed runtime launched through Node/Desktop Main `spawn()` exited `SIGABRT` before
-  ACP initialize, with both detached and attached variants. A native C parent with its own POSIX session and child
-  process group also failed in dyld. The experiments were removed; no Seatbelt adapter ships. A future launcher
-  must prove ACP initialize/create/close and real process-tree teardown from the Desktop process.
-- Wire an optional local asset/status into Desktop bootstrap only after that containment evidence exists. Do not
-  add a remote distribution path as a substitute.
+- Do not infer a general release path from this evidence command. Normal Forge/release composition remains DSH-free;
+  Developer ID signing, notarization, installers, distribution, upload/attestation and every non-`darwin-arm64`
+  target are outside the active authorization and remain unproved.
+- F5a's local registration is already available only after the fixed-Helper topology, current owner, one valid DSH
+  provider, binding/receipt/journal admission and exact CWD reservation all revalidate in Main. It must retain that
+  fail-closed gate and must not introduce a renderer path/argv/env, CDN/download or other-platform fallback.
+- The signed-Helper route mismatch is resolved locally: Main removes a terminal slash from the injected adapter
+  base, and the historical strict build.4 loopback E2E passed its two `/chat/completions` requests, committed
+  projection, public cancel and durable receipts. Retain the exact fixture and Main-only origin admission; a future
+  production-origin owner must still prove an unapproved origin is rejected before any credential is read. This local
+  witness is not a fallback to an ambient provider, a product availability decision or a release claim.
 
 Changes:
 - 对 archive 与解包做双重 hash + tree manifest 验证，并拒绝 traversal、symlink、special file、
@@ -222,21 +271,36 @@ Rollback:
 
 ## Phase 3: Cindy Bridge and Durable Binding
 
+Status: **local partial — durable owner binding, cursor-bound safe follow projection, a no-replay prompt receipt ledger and an unregistered Main-bridge `DshAgent` adapter are implemented and locally verified. F5c additionally proves a fresh fixed-Helper bridge can continue the same Cindy task only after same-scope `session/list` rehydrate and a settled receipt ledger; history reconciliation and recovery UI remain unavailable.** Evidence: [`dsh-f3-projection-journal-foundation-report.md`](../../dsh-release-evidence/dsh-f3-projection-journal-foundation-report.md).
+
 Goal: 创建和恢复 ACP DSH session，同时建立可靠的 DSH-to-Cindy identity 与 projection cursor。
 
 Scope:
 - 在 maker-core 新增 DshAgent、DshBridgePort、typed command/receipt/envelope contracts；Desktop Main
-  实现 owned stdio/SSH-forward bridge client。
+  实现 owned stdio/SSH-forward bridge client。当前只交付了不注册、由 Main 注入既有 bridge 的本地文本
+  adapter；它不能 spawn runtime，adapter contract 只接受 Cindy session、scope 和 Main 生成的 ephemeral
+  capability key，不能向 Agent events、handle 或 bridge receipt 暴露 native runtime id。
 - 新增 append-only dsh_session_bindings schema、migration、mapper/repository 和 projection service。
 - 实现 create/resume/follow/history/close；每个 request 有 Cindy request id、scope、ACP capability
   fingerprint 与 opaque runtime session id。
 - 只在 bridge create receipt 成功后写 binding；会话不因 renderer/mobile disconnect 被删除。
 
 Changes:
-- binding 列及 indexes 遵循 technical spec；runtime id、token、endpoint/profile/raw log 的存储
+- binding 列及 indexes 遵循 technical spec；唯一允许的 runtime id 是 Main 用于 owner-scoped
+  reconciliation 的 opaque session id；token、完整 endpoint、profile、Home 路径和 raw log 的存储
   均不允许。
 - projection 顺序为 follow then paged history then dedupe by sequence；gap/unknown receipt 进入
   needs-reconcile，禁止 blind retry。
+- 已交付的 local slice 仅允许 Main 将有限 translator 的 safe event/ignored record 与 cursor
+  原子提交；rejected raw update 只进入 reconcile。配置 durable receipt store 的 bridge 在 ACP prompt
+  前记录 Cindy-generated pending receipt，reply 后才确认，timeout/EOF/error 保持 uncertain 并关闭
+  carrier。它不从 receipt 重发 prompt，也不把 prompt/raw error 写入数据库。
+- `DshAgent` 启动前必须由 Main 提供 `committedFollowProjection` 和 `promptReceiptLedger` admission；
+  缺失任一项即在 bridge create 前失败。它只接受 local text session，拒绝 remote、resume、attachment、
+  model/effort/MCP；其 Cindy-owned opaque handle 不能作为 native resume identity。
+- 重启时即使 fresh ACP `session/list` 仍列出 binding，任何 `pending` / `uncertain` prompt receipt 都必须
+  先把它标为 `needs_reconcile`，不得 rehydrate 或 resume；receipt ledger 无法读取时关闭 carrier。该 guard
+  不执行 history replay，也不把跨进程恢复宣称为已交付。
 - delete/fork/resume 行为仅当 F0 ACP/Cindy bridge capability 已证实；未证实即明确拒绝。
 
 Required rules:
@@ -259,6 +323,16 @@ Rollback:
   than rewriting legacy data.
 
 ## Phase 4: Event and Interaction Contract
+
+Status: **local partial — a pure maker-core translator is delivered and Desktop Main uses it for live durable follow projection. The unregistered DshAgent consumes only the resulting safe bridge events and a capability-bound, one-shot generic interaction resolver; neither is connected to a product surface. The signed macOS capability floor still disables tools and permission requests.** Evidence: [`dsh-f4-event-translator-foundation-report.md`](../../dsh-release-evidence/dsh-f4-event-translator-foundation-report.md).
+
+Delivered local foundation:
+
+- `translateDshFollowEvent` accepts only contract-v1, positive-sequence, owner-scoped bridge envelopes and has no file, process, network, IPC or persistence access.
+- It maps only locally evidenced `agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update` and `usage_update` records to existing finite `AgentEvent` kinds. Unknown, malformed and incomplete records do not emit partial events, `done`, an error terminal or an approval.
+- Native ids, text, JSON depth/item count and tool-result blocks are bounded. JSON prototype-pollution keys are rejected. Native message/tool ids are converted to scope-bound opaque event ids; all native display text is redacted with the repository-wide redactor, and sensitive structured field values are replaced before they become an event.
+- `DshControlPlane` binds a resolver only through the same Main-issued adapter capability and only for a previously translated, active-session `tool_call`. The native id stays Main-private and is consumed before awaiting; unknown/duplicate/expired/timeout/EOF/close/unsupported-option paths respond `cancelled`. The adapter maps generic `allow` / all other outcomes to `allow-once` / `reject-once` and does not accept persistent permission updates.
+- This is a Main-only real event-stream ordering/persistence foundation, not interaction or product acceptance. It changes no product capability state and does not register `DshAgent` in `makerAgents.dsh`.
 
 Goal: 将真实 ACP event 与一次性 interaction 无损映射为安全、有限的 Cindy contracts。
 
@@ -337,6 +411,29 @@ Rollback:
 
 ## Phase 6: Cindy DSH Activity Control Plane
 
+Status: **the local F6 session-lifecycle and Cindy-owned plan/todo slice are delivered; Phase 6 is not complete.** The repository now has a
+closed, versioned `cindy-dsh` activity reducer and a Main-only, scope-bound durable snapshot store. Each snapshot
+has a canonical JSON representation, SHA-256 digest, per-snapshot sequence and per-object revision; it rejects
+foreign scope/session ownership, stale writes, unknown fields and raw payloads. Its one currently sourced object
+is a Cindy-owned `session` root: Main creates it only after the durable ACP create receipt, transitions it after
+acknowledged close or verified resume, and marks it observe-only after fresh-bridge restoration or carrier EOF.
+It never infers a native terminal outcome. F6-2 adds a Cindy-authored local plan/todo subtree and a Renderer panel:
+only read, create-plan, create-todo, complete and cancel are admitted through closed trusted-renderer IPC schemas.
+Main re-proves active `dsh` session ownership, an active binding, a `running` session root and current-Main write
+admission for every mutation; carrier EOF revokes that admission synchronously before its durable disconnect
+projection awaits SQLite. When any condition is absent, it projects every local child observe-only and explains
+that a verified resume is required. It returns no runtime/host identity and does not route those channels through
+device-link. A plan cannot close while it has an open todo. Evidence:
+[`dsh-f6-activity-foundation-report.md`](../../dsh-release-evidence/dsh-f6-activity-foundation-report.md).
+The signed local Helper E2E also executes the actual Main activity controller against a newly bound task: it creates,
+completes and cancels local plan/todo trees, confirms the persisted/view projection has no native runtime id, and proves
+that a public bridge close revokes all subsequent local writes. It is not a browser-driven panel E2E.
+
+This slice intentionally exposes **no native** plan/todo source/action, terminal input/signal, approval UI,
+command/elicitation/job/workflow/schedule creator, remote/device-link route, or fabricated control action. The
+active local DSH release has no admitted native contract for those features; F6 may only add each after a
+Cindy-owned action source, Main-side authorization and end-to-end evidence exist.
+
 Goal: 提供 Cindy-owned DSH plan/todo、commands/elicitation、terminal、tasks/jobs/workflows/schedules 的结构化控制面。
 
 Scope:
@@ -373,10 +470,65 @@ Goal: 保留显式 DSH 原生扩展能力，同时安全分离 Cindy internal MC
 Scope:
 - Add Home-mode setting/projection, user-visible origin/source state and recoverable mode switching.
 - Build Main-only internal MCP factory with URL/transport allowlist, loopback exception rules, per-session token,
-  lease, generation, account cleanup and remote forwarding policy.
+  lease, generation and explicit teardown policy; it must not introduce remote forwarding.
 - Surface profile/skill/plugin/extension discovery and explicit install/update/enable/disable/self-repair only
   through a tested runtime or Cindy-owned operation; no silent permanent disable and no fabricated native API.
 - Document state preservation and failed-operation rollback for managed and existing homes.
+
+F7 authorization and containment gate (foundation authorized; execution still blocked):
+- The user explicitly authorized the narrow macOS user-selected-directory and persistent security-scoped-bookmark
+  foundation on 2026-09-05. `existing-dsh-home` nevertheless remains execution-blocked: this authorization is not
+  permission to accept an arbitrary Renderer path, enable a generic command, or execute an unverified native
+  extension/profile.
+- `existing-home-settings.ts` now provides a Main-owned, per-account protected override store. Its JSON index holds
+  only an account hash, mode and random encrypted-bookmark reference; the bookmark bytes are separately encrypted
+  with Electron safeStorage. Default reads create no files and do not probe secure storage. Its picker adapter asks
+  only for one native `openDirectory` + `securityScopedBookmarks` result and neither returns nor persists the path.
+  The generic `DshHostScopeInput` no longer accepts the legacy `existingDshHome` pathname at all, and scope creation
+  rejects it even from an untyped caller. Reset deletes only Cindy-owned encrypted references and never opens, copies,
+  deletes or rewrites the selected DSH Home, profiles, plugins, skills or credentials. It is now exposed only to the
+  local macOS General Settings card through three fixed-purpose, trusted-renderer IPC routes: read projection, invoke
+  the Main-owned picker, and restore the Cindy-managed default. They accept no account id, path or bookmark and return
+  only `default` / `configured` / `unavailable`; the picker rechecks the captured Main account generation before it
+  commits. The routes are intentionally absent from device-link and Mobile allowlists. This UI changes no launch gate.
+- A macOS sandbox child does not inherit a parent's dynamic user-selection grant. Nor may Cindy pass its persisted
+  **app-scoped** bookmark straight to the separately signed Helper: Apple binds that bookmark to its creator's code
+  signing identity, while the Helper has a distinct bundle identity. The planned execution handoff therefore has two
+  bounded stages: a Main-process native bridge, running under Cindy's identity, resolves the persistent app-scoped
+  bookmark and creates a fresh, non-persistent *implicit* URL bookmark; Main sends that one opaque transfer value
+  once to the fixed signed Helper over a dedicated private descriptor. It never uses argv, environment, ordinary
+  IPC or persistence. The Helper resolves the implicit bookmark, explicitly balances the access lifetime around its
+  fixed child, and does not receive Cindy's persisted app-scoped bookmark. Stale, revoked, unresolved or
+  account-mismatched selections fail closed. Both stages and a signed package run against a real user-selected
+  fixture are required before the block can be removed.
+- The private primitive is implemented but not product-wired: the signed Main resource
+  `cindy-dsh-main-bookmark-bridge.node` exposes only persistent→implicit conversion under Cindy Main's identity;
+  the signed fixed Helper accepts only a length-bounded, EOF-terminated implicit-bookmark record on fd 3, then
+  explicitly releases access after the fixed child exits. `createDshAcpStdioTransport` omits `DSH_HOME` for that
+  mode and rejects any attempt to supply both it and the descriptor. Its current tests prove canonical framing,
+  no descriptor reuse/trailing bytes and no `DSH_HOME` leak, but no production caller yet loads the protected
+  selection or enables `existing-dsh-home` execution.
+- The Helper keeps App Sandbox and only the entitlement strictly required by its fixed ACP runtime. User-selected and
+  app-scoped bookmark entitlements belong to Cindy Main's selection/persistent-bookmark identity, not to a
+  different-identity Helper. The signed local macOS package must prove the resulting minimal Helper entitlement set,
+  the distinct identities, and the one-time descriptor contract. It grants neither a global filesystem root nor a
+  generic child command interface. Current Helper admission remains only the fixed ACP profile.
+- Current Helper admission accepts only the fixed ACP profile. Extension discovery or mutation may be added only
+  after a real DSH runtime or Cindy-owned operation contract has been implemented and tested. Until then its state
+  is explicitly unavailable; no simulated native plugin/profile API, silent disable, or command passthrough is
+  permitted.
+- The internal-MCP foundation is now implemented but intentionally unconfigured: `internal-mcp-lease.ts` accepts
+  only static Main factories, validates exact loopback HTTP or exact static HTTPS endpoint policy, creates
+  memory-only per-endpoint bearer tokens and registers before native `session/new` / `session/resume`. Its lease is
+  released on close and failed start; carrier shutdown calls factory-wide revocation before durable cleanup. The
+  direct control-plane suite verifies that a fresh session-instance id is mandatory when this factory is enabled and
+  that create and same-task resume receive separate declarations. The signed `darwin-arm64` package E2E mounts a
+  test-only Main-owned loopback MCP, observes runtime `initialize` plus `tools/list`, closes and confirms no
+  endpoint remains, then resumes the same Cindy binding with a fresh lease and observes a second `initialize` plus
+  `tools/list` before its second close. Endpoint-policy and bearer-token negative cases remain factory-unit proof,
+  not a claim about synthetic malformed traffic in that package E2E. There is no default endpoint, product configuration,
+  user-native MCP mutation, account-switch/reset owner or remote/device-link handoff yet; those omissions are
+  deliberate F7 gates, not a fallback path.
 
 Required rules:
 - dsh-harness.md、plugin-security-and-authoring.md、plugin-library-storage.md when persistent Library is
@@ -388,6 +540,18 @@ Tests:
 - cindy-managed/existing-dsh-home isolation and override reset; no credential copying.
 - internal versus native MCP source separation, allowlist/lease/token/account-switch cleanup, remote boundary.
 - native operation explicit confirmation, interrupted update, rollback/recovery, no secret/header/command leak.
+
+Current evidence and remaining gates:
+- The lease unit suite covers exact URL/prefix/origin enforcement, one active reservation per session instance,
+  token non-projection, reverse rollback and idempotent stale release / factory revocation. The control-plane suite
+  covers acquisition before native create/resume and release after close/carrier shutdown. The local signed-package
+  E2E covers one fixed loopback endpoint's authenticated runtime discovery and close. These prove only the
+  Main-injected test endpoint path.
+- Before any endpoint becomes product-configurable, add the production owner, account-switch and reset teardown
+  wiring; test abort, all failed lifecycle paths, concurrent scopes/accounts and that no URL/header/token is stored
+  or projected. Before F8/F9, add an explicit no-forwarding test rather than assuming the local-only factory is a
+  remote policy. Native configuration, profile/plugin recovery and existing-Home execution retain their separate
+  signed user-selected-directory acceptance gates.
 
 Acceptance:
 - users can recover explicit DSH profile/plugin state without reinstall/re-auth/data loss; Cindy internal MCP never gains runtime

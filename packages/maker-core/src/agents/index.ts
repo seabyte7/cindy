@@ -18,26 +18,51 @@ export {
 // finalizeCodexCitationText = 剥截断残尾 + 归一化(与流式 completed 完全同口径)。
 export { finalizeCodexCitationText, normalizeCodexFileCitations } from './codex/translator.js';
 export { PiAgent } from './pi/index.js';
-// DSH is a product AgentKind as of F1, but its runtime adapter is intentionally not registered
-// until the managed host and durable binding phases are complete. These narrow F0 contracts let
-// Desktop Main build the Cindy-owned bridge without granting process, credential, or Renderer
-// privileges through maker-core. An attempted DSH session therefore fails explicitly rather than
-// falling back to another agent.
+// DSH is a product AgentKind as of F1. Its adapter is exportable for Main-owned
+// bridge integration tests, but remains unregistered until the managed host and
+// durable recovery admission gates are complete. An attempted product DSH
+// session must therefore fail explicitly rather than falling back to another agent.
+export { DshAgent, type DshAgentOptions } from './dsh/index.js';
 export {
   DSH_BRIDGE_CONTRACT_VERSION,
-  DSH_BRIDGE_OPERATIONS,
-  DSH_BRIDGE_RECEIPT_OPERATIONS,
-  type DshBridgeFollowEvent,
-  type DshBridgeFollowHandler,
-  type DshBridgeOperation,
+  type DshBridgeAgentReceipt,
+  type DshBridgeAgentResumeReceipt,
+  type DshBridgeAgentSessionReceipt,
+  type DshBridgeAgentSessionRef,
+  type DshBridgeCommittedFollowEvent,
+  type DshBridgeCommittedFollowHandler,
+  type DshBridgePermissionDecision,
+  type DshBridgePermissionRequest,
+  type DshBridgePermissionResolver,
   type DshBridgePort,
   type DshBridgePromptReceipt,
   type DshBridgePromptStopReason,
-  type DshBridgeReceipt,
   type DshBridgeReceiptId,
-  type DshBridgeReceiptOperation,
-  type DshBridgeSessionRef,
 } from './dsh/bridge-port.js';
+export {
+  translateDshFollowEvent,
+  type DshFollowTranslation,
+} from './dsh/translator.js';
+export {
+  DSH_ACTIVITY_CONTRACT_VERSION,
+  DSH_ACTIVITY_ORIGIN,
+  createEmptyDshActivitySnapshot,
+  isDshActivitySnapshot,
+  reduceDshActivity,
+  type DshActivityAction,
+  type DshActivityCreateInput,
+  type DshActivityKind,
+  type DshActivityMutation,
+  type DshActivityObject,
+  type DshActivityReconnectInput,
+  type DshActivityReduceResult,
+  type DshActivityRejectionReason,
+  type DshActivitySnapshot,
+  type DshActivityStatus,
+  type DshActivitySummaryCode,
+  type DshActivityTransitionInput,
+  type DshActivityUnavailableReason,
+} from './dsh/activity.js';
 export {
   DshAcpClient,
   DshAcpRequestError,

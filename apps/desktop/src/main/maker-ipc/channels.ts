@@ -116,6 +116,30 @@ export const MAKER_INVOKE = {
   GET_WORKFLOW_PROGRESS: 'maker:get-workflow-progress',
   GET_CAPABILITIES: 'maker:get-capabilities',
   /**
+   * Cindy-owned DSH activity read model and named local plan/todo actions.
+   * These never expose a generic reducer, ACP object, runtime id, or command.
+   * They are intentionally local-only and excluded from device-link routing.
+   */
+  DSH_ACTIVITY_READ: 'maker:dsh-activity:read',
+  DSH_PLAN_CREATE: 'maker:dsh-plan:create',
+  DSH_TODO_CREATE: 'maker:dsh-todo:create',
+  DSH_ACTIVITY_COMPLETE: 'maker:dsh-activity:complete',
+  DSH_ACTIVITY_CANCEL: 'maker:dsh-activity:cancel',
+  /**
+   * Display-safe, live DSH configuration. Values are Main-issued opaque
+   * choice capabilities, never raw ACP values or provider routing.
+   */
+  DSH_RUNTIME_CONFIGURATION_GET: 'maker:dsh-runtime-configuration:get',
+  DSH_RUNTIME_CONFIGURATION_SET: 'maker:dsh-runtime-configuration:set',
+  /**
+   * Display-safe, Main-owned existing DSH Home selection. These handlers never
+   * accept or return a pathname, bookmark, account id, or generic filesystem
+   * capability; the native picker is opened only by the Main process.
+   */
+  DSH_EXISTING_HOME_GET: 'maker:dsh-existing-home:get',
+  DSH_EXISTING_HOME_SELECT: 'maker:dsh-existing-home:select',
+  DSH_EXISTING_HOME_RESET: 'maker:dsh-existing-home:reset',
+  /**
    * device-link 远程草稿镜像:控制端为被控设备新建项目草稿时,经隧道读被控端**当前
    * New Maker 草稿**在某 vendor 的完整选择(model/effort/fast/permission/source/是否显式
    * 选过模型),1:1 seed 控制端草稿(绝不取控制端本地)。只读、无 sender 依赖、语义在被控端执行 → 进 device-link

@@ -17,6 +17,13 @@ F2's local runtime-admission and Main-only Host-scope foundation is documented i
 offline local archive import/install/reverification and the installed-path Desktop Main ACP lifecycle. It does
 not register a product DSH agent: the macOS launch-time containment adapter remains an explicit F2 exit gate.
 
+F7's limited internal-MCP lease evidence is in
+[`dsh-f7-internal-mcp-foundation-report.md`](dsh-f7-internal-mcp-foundation-report.md). It proves a Main-owned,
+fixed-endpoint lease can be mounted and released through the local signed `darwin-arm64` Helper path. The production
+bridge also contains a narrow existing-Home fd-3 bookmark handoff with no raw path or `DSH_HOME`; real
+user-selected signed-package acceptance remains unproved. Neither branch opens user-native MCP configuration,
+remote/Mobile forwarding or a product MCP capability.
+
 The local controlled build reads [`tools/dsh/source-release.json`](../../tools/dsh/source-release.json), verifies
 the upstream tag→commit→tree tuple, then applies its SHA-256-bound, preimage/postimage-checked minimal build
 adaptation that permits the exact Node SEA target the alpha.3 parser otherwise rejects. It downloads the
@@ -69,3 +76,12 @@ fixture also proves that a workspace-write `session/request_permission` is retur
 write; it does not prove an allow path, Desktop UI, other platforms, remote, Mobile, durable binding persistence,
 process-restart recovery, or a release. The source review
 is in [`deepseek-harness-alpha3-source-controller-audit.md`](deepseek-harness-alpha3-source-controller-audit.md).
+
+The later F4 local foundation adds a Main capability-bound permission bridge, but does not expand the released
+surface: an unsealed local `darwin-arm64` fixture in explicit read-only permission mode emitted one ACP request,
+received `reject-once` through Cindy's generic interaction resolver, and left its temporary write target absent.
+The historical signed build.4 package still disabled tools and permission requests. A controlled build.9
+`darwin-arm64` archive/manifest and a locally re-packaged signed `Cindy.app` now exist; the packaged-app suite passes
+7/7 against loopback fixtures. This proves the sealed `@yao-pkg/pkg` cache packaging path only. The capability floor
+therefore remains enabled: this is local rejection-path and build-chain evidence, not a user-visible approval flow,
+existing-Home acceptance or release claim.

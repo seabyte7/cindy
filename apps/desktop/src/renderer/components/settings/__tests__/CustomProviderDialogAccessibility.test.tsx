@@ -42,9 +42,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 async function waitForInitialDialogFocus(): Promise<void> {
-  const nameInput = screen.getByPlaceholderText(
-    'settings.providers.custom.fields.namePlaceholder',
-  );
+  const nameInput = screen.getByPlaceholderText('settings.providers.custom.fields.namePlaceholder');
   await waitFor(() => expect(document.activeElement).toBe(nameInput));
 }
 
@@ -191,6 +189,45 @@ describe('CustomProviderDialog accessibility', () => {
     expect(customProviderMocks.updateCustomProvider.mock.calls[0]?.[1]).toEqual({});
   });
 
+  it('keeps DSH configuration out of model tabs and requires a replacement key when its endpoint changes', async () => {
+    const initial: CustomProviderConfig = {
+      id: 'dsh-provider',
+      name: 'DSH provider',
+      auth: { method: 'apiKey' },
+      runtimes: {
+        dsh: { baseUrl: 'https://old.adapter.example.test/v1', models: [] },
+      },
+    };
+    customProviderMocks.readCustomProviderKey.mockResolvedValue(null);
+
+    const user = userEvent.setup();
+    render(<CustomProviderDialog initial={initial} onSaved={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByText('settings.providers.custom.dsh.label')).not.toBeNull();
+    expect(screen.queryByText('settings.providers.custom.protocol.dsh')).toBeNull();
+
+    const endpoint = screen.getByPlaceholderText(
+      'settings.providers.custom.dsh.endpointPlaceholder',
+    );
+    const key = screen.getByPlaceholderText('settings.providers.custom.dsh.apiKeyPlaceholder');
+    await waitForInitialDialogFocus();
+    await user.clear(endpoint);
+    await user.type(endpoint, 'https://new.adapter.example.test/v1');
+    await user.type(key, 'replacement-dsh-key');
+    await user.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
+
+    await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
+    expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledWith(
+      {
+        id: 'dsh-provider',
+        name: 'DSH provider',
+        runtimes: {
+          dsh: { baseUrl: 'https://new.adapter.example.test/v1', models: [] },
+        },
+      },
+      { dsh: 'replacement-dsh-key' },
+    );
+  });
+
   it('keeps model-level routes when saving an existing provider', async () => {
     const initial = modelRoutedCodexProvider();
     customProviderMocks.readCustomProviderKey.mockResolvedValue(null);
@@ -200,7 +237,9 @@ describe('CustomProviderDialog accessibility', () => {
     await user.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
 
     await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
-    expect(customProviderMocks.updateCustomProvider.mock.calls[0]?.[0].runtimes.codex?.models).toEqual([
+    expect(
+      customProviderMocks.updateCustomProvider.mock.calls[0]?.[0].runtimes.codex?.models,
+    ).toEqual([
       {
         id: 'glm-5.3',
         name: 'GLM-5.3',
@@ -505,7 +544,9 @@ describe('CustomProviderDialog accessibility', () => {
     await waitFor(() => expect(configuredBadge()).not.toBeNull());
 
     // 切到无鉴权：none 模式剥凭证头，已存头不再有效，徽标隐藏。
-    await user.click(screen.getByRole('button', { name: 'settings.providers.custom.authMode.none' }));
+    await user.click(
+      screen.getByRole('button', { name: 'settings.providers.custom.authMode.none' }),
+    );
     await waitFor(() => expect(configuredBadge()).toBeNull());
     expect(document.body.textContent).not.toContain('configured-header-secret');
   });

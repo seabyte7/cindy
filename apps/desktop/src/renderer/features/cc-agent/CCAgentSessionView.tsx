@@ -55,6 +55,8 @@ import { shortSessionId } from '@/lib/sessionId';
 import { ChatInput } from '@/components/new-chat/ChatInput';
 import { GoalIndicator } from '@/components/new-chat/GoalIndicator';
 import { PinnedPlanPanel } from '@/components/new-chat/PinnedPlanPanel';
+import { DshActivityPanel } from './DshActivityPanel';
+import { DshRuntimeConfigurationPanel } from './DshRuntimeConfigurationPanel';
 import { sessionsStore } from '@/lib/sessionsStore';
 import { useStopOrcaCollab } from './hooks/useStopOrcaCollab';
 import { useWorkerProjection, useWorkerProjectionOwner } from './hooks/workerProjectionStore';
@@ -1802,6 +1804,7 @@ export function CCAgentSessionView({
   // 真实会话 agentKind(pending switch intent 不影响)——压缩分流必须用它,
   // 否则 intent 乐观切到 pi 但真实会话仍在跑 claude-code 时会错调 compact-session(#1933 review)。
   const realAgentKind = dbToMakerAgentKind(session?.agentKind);
+  const isDshSession = realAgentKind === 'dsh';
   const isCodex = displayAgentKind === 'codex';
   // 手动压缩通道判定(#1927/#1933 review):真实 Claude Code → maker:input:compact;
   // 其余 agent 声明 manualCompact.supported(当前仅 pi)→ maker:compact-session;其余无入口。
@@ -3381,7 +3384,7 @@ export function CCAgentSessionView({
       // 的认证弹窗/导航闭包塞进 outbox：弱网时先建立稳定 clientId 的本地乐观消息，
       // 重连后由被控端 enqueue / steer 路径做权威校验。这样离开任务后旧 outbox 也不会
       // 再弹出旧页面的认证对话框或导航回旧路由。
-      if (!remoteDeviceId) {
+      if (!remoteDeviceId && !isDshSession) {
         const authVendor = displayAgentKind === 'pi' ? 'pi' : isCodex ? 'codex' : 'cc';
         const { proceed } = await vendorAuthGate.checkAndConfirm(authVendor, {
           // 已建会话:suspended 来源计入(停用不打断运行中会话,门禁只看凭证连接态,
@@ -3524,6 +3527,7 @@ export function CCAgentSessionView({
       t,
       vendorAuthGate,
       remoteDeviceId,
+      isDshSession,
       sessionHandoffPreparing,
     ],
   );
@@ -3691,9 +3695,10 @@ export function CCAgentSessionView({
   ]);
 
   const handleBeforeVoiceInputStart = useCallback(async () => {
+    if (isDshSession) return true;
     const { proceed } = await vendorAuthGate.checkAndConfirm('codex', { purpose: 'voice-input' });
     return proceed;
-  }, [vendorAuthGate]);
+  }, [isDshSession, vendorAuthGate]);
 
   // M32: Retry — ErrorBanner 的 retryText 现在只是兼容展示值。真正的
   // recovery target 由 main coordinator 持有，避免把已发出的文本重新走普通
@@ -4797,6 +4802,13 @@ export function CCAgentSessionView({
               style={{ width: inputWidth }}
               data-chat-composer-stack
             >
+              {isDshSession && !remoteDeviceId && (
+                <DshRuntimeConfigurationPanel
+                  sessionId={sessionId ?? null}
+                  disabled={isStreaming || agentStatus.isRunning}
+                />
+              )}
+              {isDshSession && <DshActivityPanel sessionId={sessionId ?? null} />}
               {/* FP-7 / F-PERM-2 / F7.4: mutually exclusive prompts.
                  Plan review takes precedence — the SDK won't interleave it with
                  other tool calls, but explicit priority guards against layout
@@ -4941,10 +4953,10 @@ export function CCAgentSessionView({
                   initialProviderId={session?.providerId ?? null}
                   initialEffort={session?.effort}
                   initialPermissionMode={session?.permissionMode}
-                  planModeEnabled={planModeEnabled}
-                  onPlanModeChange={setPlanMode}
-                  fastMode={fastMode}
-                  onFastModeChange={setFastMode}
+                  planModeEnabled={isDshSession ? false : planModeEnabled}
+                  onPlanModeChange={isDshSession ? undefined : setPlanMode}
+                  fastMode={isDshSession ? false : fastMode}
+                  onFastModeChange={isDshSession ? undefined : setFastMode}
                   onWorkingDirChange={handleWorkingDirChange}
                   isStreaming={isStreaming}
                   isAgentBusy={isAgentBusy}
@@ -4975,21 +4987,27 @@ export function CCAgentSessionView({
                   externalDragOver={isDragOver}
                   onComposerDropHandled={resetFullAreaDragState}
                   vendorKey={
-                    displayAgentKind === 'claude-code'
+                    isDshSession
+                      ? 'dsh'
+                      : displayAgentKind === 'claude-code'
                       ? 'cc'
                       : displayAgentKind === 'codex' || displayAgentKind === 'pi'
                         ? displayAgentKind
                         : undefined
                   }
                   extraDirs={session?.extraDirs ?? []}
-                  onExtraDirsChange={handleExtraDirsChange}
+                  onExtraDirsChange={isDshSession ? undefined : handleExtraDirsChange}
                   writableDirs={session?.writableDirs ?? []}
                   writableGrantScope={sessionId}
                   onWritableDirsChange={
-                    writableDirsChangeSupported ? handleWritableDirsChange : undefined
+                    !isDshSession && writableDirsChangeSupported
+                      ? handleWritableDirsChange
+                      : undefined
                   }
                   onWritableDirRemove={
-                    writableDirsChangeSupported ? handleWritableDirRemove : undefined
+                    !isDshSession && writableDirsChangeSupported
+                      ? handleWritableDirRemove
+                      : undefined
                   }
                   compactToolbar={compactToolbar}
                   // doc rail (isCompactRail) 宽度受限 + 拖宽上限,工具行需要把字号/控件压一档。
@@ -5005,7 +5023,7 @@ export function CCAgentSessionView({
                   // orcaMode 路由下也保留显示 — ON 态菜单项本身就是
                   // 关闭按钮 (点击触发 onChange({enabled:false}),走 requestStopCollab)。
                   collaboration={
-                    allowCollabToggle || (orcaMode && collabEnabled)
+                    !isDshSession && (allowCollabToggle || (orcaMode && collabEnabled))
                       ? {
                           enabled: collabEnabled,
                           worker: collabWorker,
@@ -5154,7 +5172,7 @@ export function CCAgentSessionView({
                       />
                     </Tip>
                   )}
-                  {displayAgentKind !== 'dsh' && (
+                  {!isDshSession && (
                     <TodaySpendChip
                       vendorKey={
                         displayAgentKind === 'claude-code'
@@ -5177,13 +5195,14 @@ export function CCAgentSessionView({
                       deviceLinkDeviceId={remoteDeviceId ?? null}
                     />
                   )}
-                  <ContextCapacityRing
-                    contextTokens={agentStatus.contextTokens}
-                    model={agentSwitchIntent?.model ?? session?.model ?? ''}
-                    vendorKey={normalizeDbAgentKind(displayAgentKind)}
-                    sdkContextWindow={agentStatus.contextWindow}
-                    deviceId={remoteDeviceId}
-                    onCompact={
+                  {!isDshSession && (
+                    <ContextCapacityRing
+                      contextTokens={agentStatus.contextTokens}
+                      model={agentSwitchIntent?.model ?? session?.model ?? ''}
+                      vendorKey={normalizeDbAgentKind(displayAgentKind)}
+                      sdkContextWindow={agentStatus.contextWindow}
+                      deviceId={remoteDeviceId}
+                      onCompact={
                       // 按 agent 能力分流(#1927/#1933 review):claude-code 走 inputCoordinator,
                       // 其余声明 manualCompact.supported(当前仅 pi)走 compact-session 通道;
                       // codex 无手动 compact(上游自动压缩)保持纯展示。pi 的 SSH 远程会话
@@ -5199,8 +5218,9 @@ export function CCAgentSessionView({
                       !(compactChannel === 'compact-session' && agentStatus.isRunning)
                         ? handleCompactRequest
                         : undefined
-                    }
-                  />
+                      }
+                    />
+                  )}
                 </div>
               </div>
             </div>

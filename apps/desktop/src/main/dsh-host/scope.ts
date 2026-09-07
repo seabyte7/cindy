@@ -11,6 +11,13 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import {
+  assertAdmittedDshProviderRoute,
+  DSH_PROVIDER_API_KEY_ENV,
+  DSH_PROVIDER_BASE_URL_ENV,
+  type DshProviderRoute,
+} from './provider-route.js';
+
 export type DshHomeMode = 'cindy-managed' | 'existing-dsh-home';
 
 export interface DshHostScopeInput {
@@ -18,14 +25,12 @@ export interface DshHostScopeInput {
   accountId: string;
   releaseId: string;
   homeMode: DshHomeMode;
-  /** Only meaningful for the explicit existing-home mode; never persisted here. */
-  existingDshHome?: string;
 }
 
 export interface DshHostScopePaths {
   scopeId: string;
   accountScopeId: string;
-  homeMode: DshHomeMode;
+  homeMode: 'cindy-managed';
   /** Main-owned system HOME, separate from DSH_HOME and never a user worktree. */
   processHome: string;
   dshHome: string;
@@ -34,9 +39,28 @@ export interface DshHostScopePaths {
   tempRoot: string;
 }
 
+/**
+ * Existing-home launches intentionally have no `dshHome` field.  The only
+ * external Home authority is the opaque one-shot bookmark passed straight to
+ * the fixed Helper through fd 3; making a pathname available in this object
+ * would let it leak into a generic launch, environment, or diagnostic path.
+ */
+export interface DshExistingHomeLaunchPaths {
+  scopeId: string;
+  accountScopeId: string;
+  homeMode: 'existing-dsh-home';
+  /** Main-owned system HOME, separate from the user-selected DSH Home. */
+  processHome: string;
+  /** Empty task-specific launcher cwd; it is not the selected Home. */
+  launcherCwd: string;
+  tempRoot: string;
+}
+
+export type DshLaunchScopePaths = DshHostScopePaths | DshExistingHomeLaunchPaths;
+
 export interface DshChildSecret {
-  /** Only Cindy-prefixed names can enter the runtime environment. */
-  name: string;
+  /** The sole credential input accepted by the fixed managed ACP profile. */
+  name: typeof DSH_PROVIDER_API_KEY_ENV;
   value: string;
 }
 
@@ -47,40 +71,99 @@ function sha256(value: string): string {
 function assertAbsoluteDirectory(value: string, label: string): void {
   if (!path.isAbsolute(value)) throw new Error(`${label} must be absolute`);
   const stat = fs.lstatSync(value);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label} must be a real directory`);
+  if (!stat.isDirectory() || stat.isSymbolicLink())
+    throw new Error(`${label} must be a real directory`);
 }
 
 function assertSafeIdentity(value: string, label: string): void {
   if (!value || value.length > 4096 || value.includes('\0')) throw new Error(`${label} is invalid`);
 }
 
+/**
+ * F2 briefly carried an in-memory external path for a future existing-Home
+ * feature. That shape is no longer a valid Main boundary: an external Home
+ * must ultimately arrive at the fixed Helper as a one-time opaque bookmark,
+ * never as a path crossing a generic host/scope API.
+ */
+function assertNoLegacyExistingHomePath(input: DshHostScopeInput): void {
+  if (Object.prototype.hasOwnProperty.call(input, 'existingDshHome')) {
+    throw new Error('DSH host scope no longer accepts an existing Home path');
+  }
+}
+
 function assertContained(root: string, candidate: string, label: string): void {
   const relative = path.relative(root, candidate);
-  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+  if (
+    !relative ||
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
     throw new Error(`${label} escapes its Main-owned root`);
   }
 }
 
+/**
+ * Create one DSH-owned directory without ever following a pre-existing
+ * symlink. `mkdir({ recursive: true })` is deliberately not used here: a
+ * same-user local process could otherwise redirect the managed Home below a
+ * chosen symlink before the first launch recheck.
+ */
+function ensureRealManagedDirectChild(parent: string, name: string, label: string): string {
+  const realParent = fs.realpathSync(parent);
+  const candidate = path.join(realParent, name);
+  if (path.dirname(candidate) !== realParent) throw new Error(`${label} must be a direct child`);
+  try {
+    const stat = fs.lstatSync(candidate);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error(`${label} must be a real directory`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    fs.mkdirSync(candidate, { mode: 0o700 });
+    const stat = fs.lstatSync(candidate);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error(`${label} must be a real directory`);
+    }
+  }
+  const resolved = fs.realpathSync(candidate);
+  assertContained(realParent, resolved, label);
+  fs.chmodSync(resolved, 0o700);
+  return resolved;
+}
+
+function createIsolatedLauncher(tempRoot: string): string {
+  const launcherCwd = fs.mkdtempSync(path.join(tempRoot, 'cindy-dsh-launcher-'));
+  const launcherStat = fs.lstatSync(launcherCwd);
+  if (!launcherStat.isDirectory() || launcherStat.isSymbolicLink()) {
+    throw new Error('DSH launcher must be a real directory');
+  }
+  const launcher = fs.realpathSync(launcherCwd);
+  assertContained(tempRoot, launcher, 'DSH launcher path');
+  fs.chmodSync(launcher, 0o700);
+  return launcher;
+}
+
 /** Scope identity deliberately records home *mode*, never an external home pathname. */
-export function createDshHostScopeId(input: DshHostScopeInput): { scopeId: string; accountScopeId: string } {
+export function createDshHostScopeId(input: DshHostScopeInput): {
+  scopeId: string;
+  accountScopeId: string;
+} {
+  assertNoLegacyExistingHomePath(input);
   assertSafeIdentity(input.accountId, 'DSH account identity');
   assertSafeIdentity(input.releaseId, 'DSH release identity');
   if (input.homeMode !== 'cindy-managed' && input.homeMode !== 'existing-dsh-home') {
     throw new Error('DSH home mode is invalid');
   }
-  if (input.homeMode === 'existing-dsh-home' && !input.existingDshHome) {
-    throw new Error('existing-dsh-home mode requires an explicit DSH home');
-  }
-  if (input.homeMode === 'cindy-managed' && input.existingDshHome !== undefined) {
-    throw new Error('cindy-managed mode must not accept an existing DSH home');
-  }
   const accountScopeId = sha256(input.accountId).slice(0, 32);
-  const scopeId = sha256(JSON.stringify({
-    accountScopeId,
-    releaseId: input.releaseId,
-    executionLocation: 'local',
-    homeMode: input.homeMode,
-  })).slice(0, 32);
+  const scopeId = sha256(
+    JSON.stringify({
+      accountScopeId,
+      releaseId: input.releaseId,
+      executionLocation: 'local',
+      homeMode: input.homeMode,
+    }),
+  ).slice(0, 32);
   return { scopeId: `dsh-${scopeId}`, accountScopeId: `account-${accountScopeId}` };
 }
 
@@ -88,38 +171,83 @@ export function createDshHostScopeId(input: DshHostScopeInput): { scopeId: strin
  * Explicitly creates only Cindy-owned paths. The launcher directory is a
  * fresh temp child and is never a project directory or a source checkout.
  */
-export function createDshHostScopePaths(input: DshHostScopeInput & {
-  userDataPath: string;
-  tempPath: string;
-}): DshHostScopePaths {
+export function createDshHostScopePaths(
+  input: DshHostScopeInput & {
+    userDataPath: string;
+    tempPath: string;
+  },
+): DshHostScopePaths {
+  const identity = createDshHostScopeId(input);
+  if (input.homeMode !== 'cindy-managed') {
+    throw new Error(
+      'DSH existing Home paths may be resolved only by the fixed Helper bookmark handoff',
+    );
+  }
   assertAbsoluteDirectory(input.userDataPath, 'DSH userData path');
   assertAbsoluteDirectory(input.tempPath, 'DSH temp path');
   const userDataRoot = fs.realpathSync(input.userDataPath);
   const tempRoot = fs.realpathSync(input.tempPath);
-  const identity = createDshHostScopeId(input);
-  const managedRoot = path.join(userDataRoot, 'dsh-agent-home', identity.scopeId);
-  fs.mkdirSync(managedRoot, { recursive: true, mode: 0o700 });
-  fs.chmodSync(managedRoot, 0o700);
-  const processHome = path.join(managedRoot, 'process-home');
-  fs.mkdirSync(processHome, { recursive: true, mode: 0o700 });
-  fs.chmodSync(processHome, 0o700);
-  const dshHome = input.homeMode === 'cindy-managed'
-    ? path.join(managedRoot, 'dsh-home')
-    : fs.realpathSync(input.existingDshHome!);
-  if (input.homeMode === 'cindy-managed') {
-    fs.mkdirSync(dshHome, { recursive: true, mode: 0o700 });
-    fs.chmodSync(dshHome, 0o700);
-  } else {
-    assertAbsoluteDirectory(dshHome, 'explicit existing DSH home');
-  }
-  const launcherCwd = fs.mkdtempSync(path.join(tempRoot, 'cindy-dsh-launcher-'));
-  fs.chmodSync(launcherCwd, 0o700);
+  const managedBase = ensureRealManagedDirectChild(
+    userDataRoot,
+    'dsh-agent-home',
+    'DSH managed Home root',
+  );
+  const managedRoot = ensureRealManagedDirectChild(
+    managedBase,
+    identity.scopeId,
+    'DSH managed scope root',
+  );
+  const processHome = ensureRealManagedDirectChild(managedRoot, 'process-home', 'DSH process Home');
+  const dshHome = ensureRealManagedDirectChild(managedRoot, 'dsh-home', 'DSH managed Home');
+  const launcher = createIsolatedLauncher(tempRoot);
   return {
     ...identity,
-    homeMode: input.homeMode,
+    homeMode: 'cindy-managed',
     processHome,
     dshHome,
-    launcherCwd,
+    launcherCwd: launcher,
+    tempRoot,
+  };
+}
+
+/**
+ * Creates only Helper-container state for an existing-Home launch.  This
+ * function never receives, opens, resolves, or returns the selected Home.
+ */
+export function createDshExistingHomeLaunchPaths(
+  input: DshHostScopeInput & {
+    userDataPath: string;
+    tempPath: string;
+  },
+): DshExistingHomeLaunchPaths {
+  const identity = createDshHostScopeId(input);
+  if (input.homeMode !== 'existing-dsh-home') {
+    throw new Error('DSH existing Home launch paths require an existing Home mode');
+  }
+  assertAbsoluteDirectory(input.userDataPath, 'DSH userData path');
+  assertAbsoluteDirectory(input.tempPath, 'DSH temp path');
+  const userDataRoot = fs.realpathSync(input.userDataPath);
+  const tempRoot = fs.realpathSync(input.tempPath);
+  const launchBase = ensureRealManagedDirectChild(
+    userDataRoot,
+    'dsh-existing-home-launch',
+    'DSH existing Home launch root',
+  );
+  const launchRoot = ensureRealManagedDirectChild(
+    launchBase,
+    identity.scopeId,
+    'DSH existing Home launch scope root',
+  );
+  const processHome = ensureRealManagedDirectChild(
+    launchRoot,
+    'process-home',
+    'DSH existing Home process Home',
+  );
+  return {
+    ...identity,
+    homeMode: 'existing-dsh-home',
+    processHome,
+    launcherCwd: createIsolatedLauncher(tempRoot),
     tempRoot,
   };
 }
@@ -130,28 +258,41 @@ export function createDshHostScopePaths(input: DshHostScopeInput & {
  * adapter; neither this function nor its callers serialize or log them.
  */
 export function buildDshChildEnvironment(input: {
-  paths: DshHostScopePaths;
+  paths: DshLaunchScopePaths;
+  /** Omitted for no-credential lifecycle admission; never supplied by Renderer. */
+  providerRoute?: DshProviderRoute;
   secrets?: readonly DshChildSecret[];
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     PATH: '/usr/bin:/bin',
     HOME: input.paths.processHome,
     TMPDIR: input.paths.launcherCwd,
-    DSH_HOME: input.paths.dshHome,
+    // The supervised local harness never needs telemetry for task execution.
+    // Pin this deny-by-default so a packaged local bridge cannot inherit or
+    // silently re-enable an outbound telemetry setting from its parent.
+    DSH_TELEMETRY_DISABLED: '1',
   };
-  const names = new Set<string>();
-  for (const secret of input.secrets ?? []) {
-    if (!/^CINDY_DSH_[A-Z0-9_]{1,80}$/.test(secret.name) || !secret.value || names.has(secret.name)) {
-      throw new Error('DSH child credential name or value is invalid');
-    }
-    names.add(secret.name);
-    env[secret.name] = secret.value;
+  if (input.paths.homeMode === 'cindy-managed') {
+    env.DSH_HOME = input.paths.dshHome;
   }
+  const secrets = input.secrets ?? [];
+  if (!input.providerRoute) {
+    if (secrets.length > 0) {
+      throw new Error('DSH child credential requires an admitted provider route');
+    }
+    return env;
+  }
+  assertAdmittedDshProviderRoute(input.providerRoute);
+  if (secrets.length !== 1 || secrets[0]?.name !== DSH_PROVIDER_API_KEY_ENV || !secrets[0].value) {
+    throw new Error('DSH provider route requires exactly one Main-owned API key');
+  }
+  env[DSH_PROVIDER_BASE_URL_ENV] = input.providerRoute.baseUrl;
+  env[DSH_PROVIDER_API_KEY_ENV] = secrets[0].value;
   return env;
 }
 
 /** Remove only the temp launcher that this module created, never a user home. */
-export function cleanupDshHostScopePaths(paths: DshHostScopePaths): void {
+export function cleanupDshHostScopePaths(paths: DshLaunchScopePaths): void {
   const launcherStat = fs.lstatSync(paths.launcherCwd);
   if (!launcherStat.isDirectory() || launcherStat.isSymbolicLink()) {
     throw new Error('DSH launcher cleanup refuses a non-directory path');

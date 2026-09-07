@@ -18,6 +18,7 @@ import {
   type DshHostScopeInput,
   type DshHostScopePaths,
 } from './scope.js';
+import type { DshProviderRoute } from './provider-route.js';
 import type { VerifiedDshRuntime } from './local-runtime.js';
 
 export interface DshHostCapabilitySnapshot {
@@ -41,8 +42,19 @@ export interface DshHostLaunch {
 export interface DshHostManagerDependencies {
   resolveRuntime(): VerifiedDshRuntime;
   createScopePaths(input: DshHostScopeInput): DshHostScopePaths;
-  buildChildEnvironment(input: { paths: DshHostScopePaths; secrets?: readonly DshChildSecret[] }): NodeJS.ProcessEnv;
-  /** Must create a launch-time containment-proven Main-owned ACP client. */
+  buildChildEnvironment(input: {
+    paths: DshHostScopePaths;
+    providerRoute?: DshProviderRoute;
+    secrets?: readonly DshChildSecret[];
+  }): NodeJS.ProcessEnv;
+  /**
+   * Main-only route resolver. Omission intentionally keeps the host at its
+   * no-network ACP lifecycle capability; it is never inferred from process.env.
+   */
+  resolveProviderRoute?(input: DshHostScopeInput): DshProviderRoute | undefined;
+  /** Materializes the fixed, secret-free profile before the contained spawn. */
+  materializeProviderProfile?(paths: DshHostScopePaths, route: DshProviderRoute): void;
+  /** Must create an already-started, containment-proven Main-owned ACP client. */
   createContainedClient(launch: DshHostLaunch): DshAcpSessionClient;
   loadSecrets(input: DshHostScopeInput): readonly DshChildSecret[];
   cleanupPaths(paths: DshHostScopePaths): void;
@@ -69,14 +81,18 @@ function snapshotFromInitialize(input: {
   const supportedCapabilityNames = new Set(['close', 'list', 'resume']);
   for (const capability of Object.keys(capabilities)) {
     if (!supportedCapabilityNames.has(capability)) {
-      throw new Error(`DSH host initialize response advertised an unsupported session capability: ${capability}`);
+      throw new Error(
+        `DSH host initialize response advertised an unsupported session capability: ${capability}`,
+      );
     }
   }
-  const sessionCapabilities = Object.freeze(Object.fromEntries(
-    [...supportedCapabilityNames]
-      .filter((capability) => declaredCapabilities[capability] !== undefined)
-      .map((capability) => [capability, true]),
-  ));
+  const sessionCapabilities = Object.freeze(
+    Object.fromEntries(
+      [...supportedCapabilityNames]
+        .filter((capability) => declaredCapabilities[capability] !== undefined)
+        .map((capability) => [capability, true]),
+    ),
+  );
   return Object.freeze({
     scopeId: input.scopeId,
     releaseId: input.runtime.releaseId,
@@ -96,13 +112,15 @@ export class DshHostManager {
   constructor(private readonly deps: DshHostManagerDependencies) {}
 
   async start(input: DshHostScopeInput): Promise<DshHostCapabilitySnapshot> {
+    const identity = createDshHostScopeId(input);
     if (input.homeMode === 'existing-dsh-home') {
       // An existing Home may contain executable profile/extension state. F2
       // can retain its non-secret override shape but must not run it until F7
       // has delivered the explicit native-extension safety and recovery UX.
-      throw new Error('DSH existing home is unavailable until the F7 native-extension gate is complete');
+      throw new Error(
+        'DSH existing home is unavailable until the F7 native-extension gate is complete',
+      );
     }
-    const identity = createDshHostScopeId(input);
     const existing = this.live.get(identity.scopeId);
     if (existing) return existing.snapshot;
     const inFlight = this.starting.get(identity.scopeId);
@@ -116,18 +134,39 @@ export class DshHostManager {
     }
   }
 
-  private async startFresh(input: DshHostScopeInput, accountScopeId: string): Promise<DshHostCapabilitySnapshot> {
+  private async startFresh(
+    input: DshHostScopeInput,
+    accountScopeId: string,
+  ): Promise<DshHostCapabilitySnapshot> {
     let paths: DshHostScopePaths | null = null;
     let client: DshAcpSessionClient | null = null;
     try {
       // resolveRuntime() is the pre-spawn full tree recheck, not a cached marker lookup.
       const runtime = this.deps.resolveRuntime();
+      // The caller's release identity is part of the hashed scope boundary. Do
+      // not let a stale Renderer/Main request open a scope whose name claims
+      // one release while the launch path has admitted another.
+      if (runtime.releaseId !== input.releaseId) {
+        throw new Error('DSH host scope release identity does not match the verified runtime');
+      }
       paths = this.deps.createScopePaths(input);
       const expectedIdentity = createDshHostScopeId(input);
       if (paths.scopeId !== expectedIdentity.scopeId || paths.accountScopeId !== accountScopeId) {
         throw new Error('DSH host scope path resolver returned an identity-mismatched scope');
       }
-      const env = this.deps.buildChildEnvironment({ paths, secrets: this.deps.loadSecrets(input) });
+      const providerRoute = this.deps.resolveProviderRoute?.(input);
+      if (providerRoute && !this.deps.materializeProviderProfile) {
+        throw new Error('DSH provider route requires a Main-owned managed ACP profile');
+      }
+      if (providerRoute) this.deps.materializeProviderProfile!(paths, providerRoute);
+      const env = this.deps.buildChildEnvironment({
+        paths,
+        providerRoute,
+        // A credential must not even be read for no-network lifecycle
+        // admission. This also prevents an unavailable route from leaking a
+        // provider key into an otherwise credential-free ACP handshake.
+        secrets: providerRoute ? this.deps.loadSecrets(input) : [],
+      });
       client = this.deps.createContainedClient({ scopeId: paths.scopeId, runtime, paths, env });
       const initialize = await client.initialize();
       const snapshot = snapshotFromInitialize({ scopeId: paths.scopeId, runtime, initialize });
@@ -175,13 +214,23 @@ export class DshHostManager {
 }
 
 /** Standard Desktop Main composition; tests can inject paths without Electron. */
-export function createDshHostManager(input: Omit<DshHostManagerDependencies, 'createScopePaths' | 'buildChildEnvironment' | 'cleanupPaths'> & {
-  userDataPath: string;
-  tempPath: string;
-}): DshHostManager {
+export function createDshHostManager(
+  input: Omit<
+    DshHostManagerDependencies,
+    'createScopePaths' | 'buildChildEnvironment' | 'cleanupPaths'
+  > & {
+    userDataPath: string;
+    tempPath: string;
+  },
+): DshHostManager {
   return new DshHostManager({
     ...input,
-    createScopePaths: (scope) => createDshHostScopePaths({ ...scope, userDataPath: input.userDataPath, tempPath: input.tempPath }),
+    createScopePaths: (scope) =>
+      createDshHostScopePaths({
+        ...scope,
+        userDataPath: input.userDataPath,
+        tempPath: input.tempPath,
+      }),
     buildChildEnvironment: buildDshChildEnvironment,
     cleanupPaths: cleanupDshHostScopePaths,
   });

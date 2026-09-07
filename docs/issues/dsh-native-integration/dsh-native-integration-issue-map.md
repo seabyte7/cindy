@@ -279,11 +279,17 @@ Remote number: 3778
 
 ### F7 — DSH: preserve native MCP, skills, profiles and extension recovery
 
+Local status: **partial local foundation delivered**. The production Main bridge now has a narrow existing-Home
+fd-3 bookmark handoff with no raw path or `DSH_HOME`, but real user-selected signed-package acceptance remains
+blocked. The Main-only internal MCP lease factory is implemented and exercised only with a fixed test endpoint in
+the local signed `darwin-arm64` package; it creates no production endpoint registry or user-facing MCP capability.
+
 Purpose: expose explicit native configuration/recovery while keeping Cindy internal MCP separately authorized.
 
 Deliverables:
 - cindy-managed/existing-dsh-home mode projection and recoverable switch;
-- Main-only internal MCP factory with allowlist/token/lease/generation/account cleanup;
+- Main-only internal MCP factory with exact endpoint policy, memory-only token, session-instance lease and
+  carrier-close cleanup; account-switch/reset owners remain future wiring;
 - native profile/skill/plugin/extension action projection preserving DSH self-repair semantics.
 
 Acceptance:
@@ -293,6 +299,11 @@ Acceptance:
 Tests and audit:
 - Home isolation, MCP source/lease/secret/remote cases, interrupted update/recovery tests;
 - plugin/credential/configuration compatibility audit.
+- Current local evidence: lease-unit and control-plane lifecycle tests; signed-Helper MCP
+  `initialize` / `tools/list` / close → same-Cindy-task fresh-lease resume → second `initialize` / `tools/list` /
+  close evidence; and production existing-Home fd-3/no-`DSH_HOME` regression.
+  It does not prove real user-selected Home execution, user-native MCP editing, account-switch/reset teardown,
+  remote forwarding, extension mutation or product availability.
 
 Scope and authorization:
 - no Cindy plugin-base contract alteration and no arbitrary Renderer command/endpoint.

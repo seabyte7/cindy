@@ -30,9 +30,9 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { MorphPopover } from '@/components/ui/morph-popover';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import type { SelectableVendor } from '@/lib/agentVendors';
+import type { NewMakerSelectableVendor, SelectableVendor } from '@/lib/agentVendors';
 
-import { AGENT_OPTIONS, agentOptionOf } from './agentOptions';
+import { AGENT_OPTIONS, DSH_NEW_MAKER_AGENT_OPTION } from './agentOptions';
 
 /**
  * 面板期望高度(px): 标题行 ~28 + 每个引擎行 ~36 + 面板 padding ~16。
@@ -42,9 +42,11 @@ import { AGENT_OPTIONS, agentOptionOf } from './agentOptions';
  */
 const FIELD_PANEL_MIN_H = 28 + AGENT_OPTIONS.length * 36 + 16;
 
-interface AgentSelectProps {
-  value: SelectableVendor;
-  onChange: (next: SelectableVendor) => void;
+interface AgentSelectProps<V extends NewMakerSelectableVendor = SelectableVendor> {
+  value: V;
+  onChange: (next: V) => void;
+  /** DSH belongs only to the local New Maker entry, not generic model pickers. */
+  includeDsh?: boolean;
   /** disabled 状态(worktree 创建中等);整体降透明且不响应点击。 */
   disabled?: boolean;
   className?: string;
@@ -66,7 +68,7 @@ interface AgentSelectProps {
    * `Agent 'pi' is not registered` 的会话。当前 `value` 始终保留可见,
    * 否则触发器会显示一个列表里不存在的引擎。
    */
-  hiddenVendors?: readonly SelectableVendor[];
+  hiddenVendors?: readonly V[];
   /**
    * 面板弹出方向。工具条在底部所以默认 'top'; 设置面板里的字段在
    * 页面中部, 往下弹才不遮住自己(与 ModelSelector 的 popoverSide 同口径)。
@@ -102,9 +104,10 @@ interface AgentSelectProps {
   overlayContentClassName?: string;
 }
 
-export function AgentSelect({
+export function AgentSelect<V extends NewMakerSelectableVendor = SelectableVendor>({
   value,
   onChange,
+  includeDsh = false,
   disabled = false,
   className,
   maxLabelWidth,
@@ -118,7 +121,7 @@ export function AgentSelect({
   dense = false,
   useMorphPopover = true,
   overlayContentClassName,
-}: AgentSelectProps) {
+}: AgentSelectProps<V>) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   /** field 形态每次打开前按上下可用空间定的方向; null = 用调用方给的 side。 */
@@ -129,12 +132,15 @@ export function AgentSelect({
   const isCreateAgent = visualVariant === 'create-agent';
   const isField = triggerVariant === 'field';
   const morphEnabled = useMorphPopover;
-  const current = agentOptionOf(value);
+  const options = includeDsh ? [...AGENT_OPTIONS, DSH_NEW_MAKER_AGENT_OPTION] : AGENT_OPTIONS;
+  const current = options.find((option) => option.vendor === value) ?? AGENT_OPTIONS[0];
   // 当前值始终保留 —— 隐藏它会让触发器显示一个列表里不存在的引擎。
   const visibleOptions =
     hiddenVendors && hiddenVendors.length > 0
-      ? AGENT_OPTIONS.filter((opt) => opt.vendor === value || !hiddenVendors.includes(opt.vendor))
-      : AGENT_OPTIONS;
+      ? options.filter(
+          (opt) => opt.vendor === value || !hiddenVendors.includes(opt.vendor as V),
+        )
+      : options;
 
   // disabled 中途变 true(如 worktree 创建中)时把 open 收敛掉 —— 只靠
   // `open={open && !disabled}` 只是不渲染面板,本地 open 仍是 true,disabled
@@ -177,9 +183,9 @@ export function AgentSelect({
     return below >= rect.top ? 'bottom' : 'top';
   };
 
-  const select = (next: SelectableVendor) => {
+  const select = (next: NewMakerSelectableVendor) => {
     setOpen(false);
-    if (next !== value || reselectEmitsChange) onChange(next);
+    if (next !== value || reselectEmitsChange) onChange(next as V);
   };
 
   const handleOpenChange = (next: boolean): void => {

@@ -1,0 +1,67 @@
+diff --git a/scripts/build-exe-for-python-sdk.ts b/scripts/build-exe-for-python-sdk.ts
+index 55d4d1d..f14f7c9 100644
+--- a/scripts/build-exe-for-python-sdk.ts
++++ b/scripts/build-exe-for-python-sdk.ts
+@@ -7,6 +7,7 @@
+  */
+-
++
+ import { spawn } from 'node:child_process'
++import { createHash } from 'node:crypto'
+ import { existsSync, statSync } from 'node:fs'
+ import { chmod, copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+ import { basename, dirname, extname, join, resolve, sep } from 'node:path'
+@@ -308,9 +309,52 @@ class SingleExeBuild {
+       for (const name of DEPLOY_ONLY_DOCS) console.log(`build-exe-for-python-sdk: [dry-run] rm -f ${join(this.staging, name)}`)
+     } else {
+       await Promise.all(DEPLOY_ONLY_DOCS.map(name => rm(join(this.staging, name), { force: true })))
++      await this.sealStagedNativeAddonLoader()
+     }
+   }
+-
++
++  /**
++   * Bind the one native ACP bootstrap add-on to the signed App Sandbox cache.
++   * pnpm deploy copies packages from its content-addressable store, so changing
++   * a workspace node_modules copy before deploy would not affect the staged
++   * SEA input. The digest checks make this build-time adaptation fail closed
++   * if the reviewed loader source changes.
++   */
++  private async sealStagedNativeAddonLoader(): Promise<void> {
++    const loader = join(this.staging, 'node_modules', 'node-addon-native-custom-loader', 'lib', 'index.js')
++    const original = await readFile(loader, 'utf8')
++    const digest = createHash('sha256').update(original).digest('hex')
++    if (digest !== 'f123e237d3402700f438df1c6a41cb2076262630d800032e3c978f3fd7777445') {
++      throw new Error(`build-exe-for-python-sdk: native loader source digest differs from the reviewed input: ${digest}`)
++    }
++    const patched = original
++      .replace(
++        "function nativeCacheEnabled() {\n    return process.env.NARB_DISABLE_NATIVE_CACHE !== '1';\n}",
++        "function nativeCacheEnabled() {\n    return process.env.NARB_DISABLE_NATIVE_CACHE !== '1';\n}\nfunction sealedNativeCacheEnabled() {\n    return process.env.CINDY_DSH_SEALED_NATIVE_CACHE === '1';\n}",
++      )
++      .replace(
++        "    if (!nativeCacheEnabled())\n        return sourcePath;\n    try {",
++        "    if (!nativeCacheEnabled())\n        return sourcePath;\n    const sealedCache = sealedNativeCacheEnabled();\n    try {",
++      )
++      .replace(
++        "        if (node_fs_1.default.existsSync(destination)) {\n            // A cached file exists at the expected path.",
++        "        if (node_fs_1.default.existsSync(destination)) {\n            if (sealedCache)\n                return destination;\n            // A cached file exists at the expected path.",
++      )
++      .replace(
++        "        node_fs_1.default.mkdirSync(destinationDir, { recursive: true });",
++        "        if (sealedCache) {\n            throw new Error(`sealed native cache entry is missing: ${destination}`);\n        }\n        node_fs_1.default.mkdirSync(destinationDir, { recursive: true });",
++      )
++      .replace(
++        "    catch {\n        return sourcePath;\n    }",
++        "    catch (error) {\n        if (sealedCache)\n            throw error;\n        return sourcePath;\n    }",
++      )
++    const patchedDigest = createHash('sha256').update(patched).digest('hex')
++    if (patchedDigest !== 'ee302f3b0a4348db1844784b82e3bb76882b383bea564ac70fabd96f80b61dea') {
++      throw new Error(`build-exe-for-python-sdk: native loader patch does not produce its reviewed output: ${patchedDigest}`)
++    }
++    await writeFile(loader, patched)
++  }
++
+   /**
+    * Restore direct packages that pnpm's legacy hoister places beside the deploy
+    * source instead of in the target. The runtime manifest supplies every peer,

@@ -1,0 +1,112 @@
+diff --git a/scripts/build-exe-for-python-sdk.ts b/scripts/build-exe-for-python-sdk.ts
+index f14f7c90c..e989bb4ac 100644
+--- a/scripts/build-exe-for-python-sdk.ts
++++ b/scripts/build-exe-for-python-sdk.ts
+@@ -355,6 +355,75 @@ class SingleExeBuild {
+    await writeFile(loader, patched)
+  }
+-
++
++  /**
++   * Write the minimal Darwin-only counterpart of pkg's runtime dlopen cache
++   * beside the Python-visible executable. The SEA prelude receives only this
++   * sealed directory at launch; it cannot create or repair a Home cache.
++   */
++  private async stageSealedPkgNativeCache(): Promise<void> {
++    const sourceRoot = join(this.staging, 'node_modules')
++    const destinationRoot = join(root, PYTHON_RUNTIME_DIR, 'pkg-native-cache')
++    const files = await this.listRegularFiles(sourceRoot)
++    const one = (label: string, predicate: (candidate: string) => boolean): string => {
++      const matches = files.filter(predicate)
++      if (matches.length !== 1) {
++        throw new Error(`build-exe-for-python-sdk: expected one ${label} for the sealed pkg cache, found ${matches.length}.`)
++      }
++      return matches[0]!
++    }
++    const sharp = one('sharp darwin-arm64 addon', candidate => /\/\@img\/sharp-darwin-arm64\/lib\/sharp-darwin-arm64-[^/]+\.node$/.test(candidate))
++    const libvips = one('sharp darwin-arm64 libvips dylib', candidate => /\/\@img\/sharp-libvips-darwin-arm64\/lib\/libvips-cpp\.[^/]+\.dylib$/.test(candidate))
++    const koffi = one('koffi darwin-arm64 addon', candidate => /\/\@koromix\/koffi-darwin-arm64\/darwin_arm64\/koffi\.node$/.test(candidate))
++    const pty = one('node-pty darwin-arm64 addon', candidate => /\/node-pty\/prebuilds\/darwin-arm64\/pty\.node$/.test(candidate))
++    const selected = [
++      { native: sharp, support: [libvips] },
++      { native: koffi, support: [] },
++      { native: pty, support: [] },
++    ]
++    if (this.cli.dryRun) {
++      console.log(`build-exe-for-python-sdk: [dry-run] stage ${selected.length} sealed darwin-arm64 pkg native cache entries`)
++      return
++    }
++    await rm(destinationRoot, { recursive: true, force: true })
++    for (const entry of selected) {
++      const digest = createHash('sha256').update(await readFile(entry.native)).digest('hex')
++      for (const source of [entry.native, ...entry.support]) {
++        const relative = source.slice(sourceRoot.length + 1)
++        if (!relative || relative.startsWith('..') || !relative.includes(sep)) {
++          throw new Error(`build-exe-for-python-sdk: sealed pkg cache source is outside node_modules: ${source}`)
++        }
++        const destination = join(destinationRoot, 'pkg', digest, relative)
++        await mkdir(dirname(destination), { recursive: true })
++        await copyFile(source, destination)
++        await chmod(destination, 0o644)
++      }
++    }
++    console.log(`build-exe-for-python-sdk: staged sealed darwin-arm64 pkg native cache at ${destinationRoot}`)
++  }
++
++  /** Recursively enumerate regular staging files while rejecting links/special files. */
++  private async listRegularFiles(directory: string): Promise<string[]> {
++    const result: string[] = []
++    const visit = async (current: string): Promise<void> => {
++      for (const entry of (await readdir(current, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))) {
++        const candidate = join(current, entry.name)
++        const metadata = await lstat(candidate)
++        if (metadata.isSymbolicLink()) {
++          throw new Error(`build-exe-for-python-sdk: sealed pkg cache source contains a symlink: ${candidate}`)
++        }
++        if (metadata.isDirectory()) {
++          await visit(candidate)
++        } else if (metadata.isFile()) {
++          result.push(candidate)
++        } else {
++          throw new Error(`build-exe-for-python-sdk: sealed pkg cache source contains a non-regular file: ${candidate}`)
++        }
++      }
++    }
++    await visit(directory)
++    return result
++  }
++
+   /**
+    * Restore direct packages that pnpm's legacy hoister places beside the deploy
+    * source instead of in the target. The runtime manifest supplies every peer,
+@@ -472,7 +541,7 @@ class SingleExeBuild {
+     const product = target.platform === 'win' ? `${productBase}.exe` : productBase
+     await this.prepareNativePty(target)
+     if (!this.cli.dryRun) await mkdir(this.outDir, { recursive: true })
+-    await this.runPnpm(`pkg ${target.spec}`, [
++    await this.runSealedPkg(`pkg ${target.spec}`, [
+       'dlx',
+       PKG_SPEC,
+       this.staging,
+@@ -610,6 +679,20 @@ class SingleExeBuild {
+       await chmod(destination, statSync(path).mode & 0o777)
+       console.log(`build-exe-for-python-sdk: synced ${destination}`)
+     }
++    await this.stageSealedPkgNativeCache()
++  }
++
++  /** Mark only the SEA pkg child for the reviewed sealed-prelude adaptation. */
++  private async runSealedPkg(label: string, args: string[]): Promise<void> {
++    const name = 'CINDY_DSH_SEALED_PKG_CACHE_BUILD'
++    const previous = process.env[name]
++    process.env[name] = '1'
++    try {
++      await this.runPnpm(label, args)
++    } finally {
++      if (previous === undefined) delete process.env[name]
++      else process.env[name] = previous
++    }
+   }
+-
++
+   /**

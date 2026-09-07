@@ -129,14 +129,52 @@ AGENTS.md 的强制门禁为准：
   action availability, complete/fail/cancel/disconnect/reconnect and unsupported APIs.
 - Terminal owner/session/scope validation, input/signal/close race, stale activity and host restart limitations.
 - Persistence and broadcast tests reject arbitrary raw native payloads.
+- For each shipped local plan/todo action, the opt-in signed-Helper macOS E2E creates a real bound task, performs
+  create/complete/cancel through the Main activity controller, verifies native-id redaction in the durable/view snapshot,
+  then closes the bridge and proves later writes are rejected. This is Main/Helper evidence; the panel remains
+  separately covered by its renderer component contract. Local CDP/browser plumbing alone is insufficient: the
+  product registrar accepts only a persisted Main-owned HTTPS DSH provider, while the hermetic fixture is HTTP
+  loopback admitted only through test injection. Do not relax that route policy, add a TLS exception or expose a
+  Renderer bypass for test coverage. Browser-driven panel E2E remains unclaimed until a separately reviewed,
+  production-policy-preserving harness exists.
 
 ### F7: MCP, Skills, Profiles and Extensions
 
-- Managed/existing Home isolation, switch/reset, no credential copying and no destructive cleanup tests.
-- Separate native and Cindy-internal MCP origin/transport/allowlist/loopback/token/lease/generation/account
-  cleanup tests, including remote bridge when present.
+- The user approved the user-selected-directory and persistent-bookmark foundation on 2026-09-05. Its unit coverage
+  now proves default reads create no override files and do not probe secure storage; selection persists only a
+  safeStorage-encrypted opaque bookmark reference; account isolation and missing-reference failures are fail-closed;
+  reset leaves an external Home sentinel untouched; and the Main-owned picker adapter neither returns nor persists
+  the selected path. A scope regression also rejects the former `existingDshHome` raw-path property before launch.
+- The F7 production bridge now accepts existing Home only after Main has converted the encrypted persistent bookmark
+  to a new private fd-3 handoff; its managed path rejects that handoff, and the existing path has no `DSH_HOME` entry
+  or raw-path scope property. Regression covers the start-time selection digest and rejects new DSH operations after
+  a selection switch/reset. Selection/reset remain restart-effective and must not silently tear down unrelated live
+  Maker tasks.
+- Before claiming final acceptance, exercise cindy-managed/existing Home isolation, real select/switch/reset and
+  unresolved/revoked/account-mismatched bookmark failure through the two-stage private handoff. Assert that the
+  persistent app-scoped bookmark is resolved only in a Main-process bridge with Cindy's identity; only a fresh,
+  non-persistent implicit bookmark can reach the distinct-identity Helper once by its private descriptor. Assert no
+  credential copying, raw Home path persistence, destructive cleanup or fallback to ambient `HOME` is possible. A
+  signed local macOS package acceptance must prove the distinct identities, minimal Helper entitlements and the
+  actual Main resolve → implicit transfer → Helper resolve/start/stop lifecycle against a user-selected fixture
+  directory; a unit fake is not sufficient for that permission claim. The current primitive regression covers the
+  fd-3 frame and `DSH_HOME` exclusion, and package verification proves the Main bridge is signed/loadable and the
+  Helper has no selection/bookmark entitlements. It does **not** prove real Main resolve or Helper access yet.
+- Separate native and Cindy-internal MCP origin/transport/allowlist/exact-loopback/token/lease/generation/account
+  cleanup tests. The currently delivered Main-only factory unit suite proves rejection of `localhost`, unported or
+  non-loopback HTTP, root/foreign/query/userinfo paths and HTTPS origin drift; it proves fresh opaque tokens,
+  reverse rollback, one reservation per session instance, idempotent stale release and factory-wide revocation.
+  The control-plane suite proves acquire-before-native-create/resume, fresh instance declarations and release on
+  close/carrier shutdown. The signed local `darwin-arm64` package E2E mounts a fixed Main test endpoint through the
+  signed Helper and observes authenticated runtime `initialize` plus `tools/list`, then its exact registration
+  close with no endpoint remaining. It resumes the same Cindy binding under a fresh lease, observes a second
+  authenticated `initialize` plus `tools/list`, then confirms the second registration close. None of these tests
+  supplies a product endpoint, exposes a token or expands user-native MCP authority.
+  Add account-switch/reset, abort and concurrent-scope teardown tests when those owners are wired. Prove explicit
+  no SSH/device-link forwarding before F8/F9 implement any such route.
 - Explicit native operation tests: install/update/enable/disable/recover, interrupted state and recovery; no
-  secret, header or command reaches Renderer/Mobile/logs.
+  secret, header or command reaches Renderer/Mobile/logs. The operation must use a verified DSH/Cindy contract;
+  unknown native support is an explicit unavailable result, not a fabricated API or command passthrough.
 
 ### F8: SSH Remote
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -68,6 +68,48 @@ function withWheel(bytes, callback) {
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+}
+
+function waitForCondition(condition, description, timeoutMs = 3_000) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const check = () => {
+      try {
+        if (condition()) {
+          resolve();
+          return;
+        }
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(new Error(`timed out waiting for ${description}`));
+        return;
+      }
+      setTimeout(check, 20);
+    };
+    check();
+  });
+}
+
+function waitForChildExit(child, timeoutMs = 5_000) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('timed out waiting for the native DSH supervisor to exit'));
+    }, timeoutMs);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
+  });
 }
 
 function packet(overrides = {}) {
@@ -209,6 +251,231 @@ test('POSIX evidence cleanup reaches a descendant after its direct root exits', 
   });
   await closeEvidenceProcessTree(child, 100);
   assert.throws(() => process.kill(-child.pid, 0), { code: 'ESRCH' });
+});
+
+test('macOS DSH Helper grants network client only to the supervisor, with Main-owned policy still required', () => {
+  const supervisorEntitlements = fs.readFileSync(
+    path.resolve(process.cwd(), 'apps/desktop/native/dsh/macos-dsh-sandbox-supervisor.entitlements'),
+    'utf8',
+  );
+  const runtimeEntitlements = fs.readFileSync(
+    path.resolve(process.cwd(), 'apps/desktop/native/dsh/macos-dsh-runtime-inherit.entitlements'),
+    'utf8',
+  );
+  assert.match(supervisorEntitlements, /<key>com\.apple\.security\.app-sandbox<\/key>\s*<true\/>/);
+  assert.match(supervisorEntitlements, /<key>com\.apple\.security\.network\.client<\/key>\s*<true\/>/);
+  assert.doesNotMatch(runtimeEntitlements, /com\.apple\.security\.network\.client/);
+  assert.match(runtimeEntitlements, /<key>com\.apple\.security\.inherit<\/key>\s*<true\/>/);
+});
+
+test('macOS native DSH supervisor drains a surviving runtime process group after its root exits', { skip: process.platform !== 'darwin' }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-dsh-native-supervisor-test-'));
+  const bundle = path.join(root, 'Cindy DSH Test.app');
+  const macosDirectory = path.join(bundle, 'Contents', 'MacOS');
+  const runtimeDirectory = path.join(bundle, 'Contents', 'Resources', 'dsh-runtime');
+  const nativeAddonCache = path.join(bundle, 'Contents', 'Resources', 'dsh-native-addons');
+  const pkgNativeCache = path.join(bundle, 'Contents', 'Resources', 'dsh-pkg-native-cache');
+  const home = path.join(root, 'home');
+  const temporary = path.join(root, 'temporary');
+  const supervisor = path.join(macosDirectory, 'cindy-dsh-sandbox-supervisor');
+  const runtime = path.join(runtimeDirectory, 'fixture-dsh');
+  const descendantPidPath = path.join(home, 'descendant.pid');
+  const ambientEnvironmentResultPath = path.join(home, 'ambient-environment-result');
+  let descendantPid = null;
+
+  try {
+    fs.mkdirSync(macosDirectory, { recursive: true });
+    fs.mkdirSync(runtimeDirectory, { recursive: true });
+    fs.mkdirSync(nativeAddonCache, { recursive: true });
+    fs.mkdirSync(pkgNativeCache, { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+    fs.mkdirSync(temporary, { recursive: true });
+    const compile = spawnSync('xcrun', [
+      'clang',
+      '-std=c17',
+      '-Wall',
+      '-Wextra',
+      '-Werror',
+      '-Wpedantic',
+      '-DCINDY_DSH_RUNTIME_EXECUTABLE="fixture-dsh"',
+      path.resolve(process.cwd(), 'apps/desktop/native/dsh/macos-dsh-sandbox-supervisor.c'),
+      path.resolve(process.cwd(), 'apps/desktop/native/dsh/macos-dsh-implicit-bookmark.m'),
+      '-framework', 'Foundation',
+      '-fobjc-arc',
+      '-o',
+      supervisor,
+    ], { encoding: 'utf8' });
+    assert.equal(compile.status, 0, compile.stderr || compile.stdout);
+    fs.writeFileSync(runtime, [
+      '#!/bin/sh',
+      'if [ -n "${UNTRUSTED_ENV+x}" ] || [ -n "${CINDY_DSH_UNTRUSTED+x}" ]; then printf leaked > "$DSH_HOME/ambient-environment-result"; else printf stripped > "$DSH_HOME/ambient-environment-result"; fi',
+      `if [ "$NARB_NATIVE_CACHE_DIR" != ${JSON.stringify(fs.realpathSync(nativeAddonCache))} ]; then printf bad-cache > "$DSH_HOME/ambient-environment-result"; fi`,
+      'if [ "$CINDY_DSH_SEALED_NATIVE_CACHE" != 1 ]; then printf bad-sealed-cache > "$DSH_HOME/ambient-environment-result"; fi',
+      `if [ "$CINDY_DSH_SEALED_PKG_CACHE_DIR" != ${JSON.stringify(fs.realpathSync(pkgNativeCache))} ]; then printf bad-pkg-cache > "$DSH_HOME/ambient-environment-result"; fi`,
+      'if [ "$DSH_TELEMETRY_DISABLED" != 1 ]; then printf bad-telemetry > "$DSH_HOME/ambient-environment-result"; fi',
+      '(trap "" TERM; while :; do :; done) &',
+      'printf "%s" "$!" > "$DSH_HOME/descendant.pid"',
+      // Do not let /bin/sh's job-exit policy wait for the background fixture:
+      // replace the direct runtime root, leaving only its same-group child.
+      'exec /usr/bin/true',
+      '',
+    ].join('\n'), { mode: 0o700 });
+    fs.chmodSync(runtime, 0o700);
+
+    const launched = spawn(supervisor, ['--profile', 'acp'], {
+      cwd: root,
+      env: {
+        HOME: home,
+        DSH_HOME: home,
+        TMPDIR: temporary,
+        PATH: '/usr/bin:/bin',
+        DSH_TELEMETRY_DISABLED: '1',
+        UNTRUSTED_ENV: 'must-not-reach-the-runtime',
+        CINDY_DSH_UNTRUSTED: 'must-not-reach-the-runtime',
+        NARB_NATIVE_CACHE_DIR: path.join(root, 'untrusted-native-addon-cache'),
+        CINDY_DSH_SEALED_NATIVE_CACHE: '0',
+        CINDY_DSH_SEALED_PKG_CACHE_DIR: path.join(root, 'untrusted-pkg-native-cache'),
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    launched.stderr.setEncoding('utf8');
+    launched.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    await waitForCondition(() => fs.existsSync(descendantPidPath), 'the runtime descendant pid fixture');
+    descendantPid = Number.parseInt(fs.readFileSync(descendantPidPath, 'utf8'), 10);
+    assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
+    const exited = await waitForChildExit(launched);
+    assert.deepEqual(exited, { code: 0, signal: null }, stderr);
+    assert.equal(fs.readFileSync(ambientEnvironmentResultPath, 'utf8'), 'stripped');
+    await waitForCondition(() => {
+      try {
+        process.kill(descendantPid, 0);
+        return false;
+      } catch (error) {
+        if (error?.code === 'ESRCH') return true;
+        throw error;
+      }
+    }, 'the native supervisor to reap the runtime descendant');
+  } finally {
+    if (descendantPid !== null) {
+      try {
+        process.kill(descendantPid, 'SIGKILL');
+      } catch {
+        // The passing case has already reaped this exact local fixture pid.
+      }
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('macOS native DSH supervisor escalates an uncooperative runtime group before its own TERM exit', { skip: process.platform !== 'darwin' }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-dsh-native-supervisor-term-test-'));
+  const bundle = path.join(root, 'Cindy DSH Test.app');
+  const macosDirectory = path.join(bundle, 'Contents', 'MacOS');
+  const runtimeDirectory = path.join(bundle, 'Contents', 'Resources', 'dsh-runtime');
+  const nativeAddonCache = path.join(bundle, 'Contents', 'Resources', 'dsh-native-addons');
+  const pkgNativeCache = path.join(bundle, 'Contents', 'Resources', 'dsh-pkg-native-cache');
+  const home = path.join(root, 'home');
+  const temporary = path.join(root, 'temporary');
+  const supervisor = path.join(macosDirectory, 'cindy-dsh-sandbox-supervisor');
+  const runtime = path.join(runtimeDirectory, 'fixture-dsh');
+  const runtimeRootPidPath = path.join(home, 'runtime-root.pid');
+  const descendantPidPath = path.join(home, 'descendant.pid');
+  let launched = null;
+  let runtimeRootPid = null;
+  let descendantPid = null;
+
+  try {
+    fs.mkdirSync(macosDirectory, { recursive: true });
+    fs.mkdirSync(runtimeDirectory, { recursive: true });
+    fs.mkdirSync(nativeAddonCache, { recursive: true });
+    fs.mkdirSync(pkgNativeCache, { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+    fs.mkdirSync(temporary, { recursive: true });
+    const compile = spawnSync('xcrun', [
+      'clang',
+      '-std=c17',
+      '-Wall',
+      '-Wextra',
+      '-Werror',
+      '-Wpedantic',
+      '-DCINDY_DSH_RUNTIME_EXECUTABLE="fixture-dsh"',
+      path.resolve(process.cwd(), 'apps/desktop/native/dsh/macos-dsh-sandbox-supervisor.c'),
+      path.resolve(process.cwd(), 'apps/desktop/native/dsh/macos-dsh-implicit-bookmark.m'),
+      '-framework', 'Foundation',
+      '-fobjc-arc',
+      '-o',
+      supervisor,
+    ], { encoding: 'utf8' });
+    assert.equal(compile.status, 0, compile.stderr || compile.stdout);
+    fs.writeFileSync(runtime, [
+      '#!/bin/sh',
+      'printf "%s" "$$" > "$DSH_HOME/runtime-root.pid"',
+      '(trap "" TERM; while :; do :; done) &',
+      'printf "%s" "$!" > "$DSH_HOME/descendant.pid"',
+      'trap "" TERM',
+      'while :; do :; done',
+      '',
+    ].join('\n'), { mode: 0o700 });
+    fs.chmodSync(runtime, 0o700);
+
+    launched = spawn(supervisor, ['--profile', 'acp'], {
+      cwd: root,
+      env: {
+        HOME: home,
+        DSH_HOME: home,
+        TMPDIR: temporary,
+        PATH: '/usr/bin:/bin',
+        DSH_TELEMETRY_DISABLED: '1',
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    launched.stderr.setEncoding('utf8');
+    launched.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    await waitForCondition(
+      () => fs.existsSync(runtimeRootPidPath) && fs.existsSync(descendantPidPath),
+      'the uncooperative runtime pid fixtures',
+    );
+    runtimeRootPid = Number.parseInt(fs.readFileSync(runtimeRootPidPath, 'utf8'), 10);
+    descendantPid = Number.parseInt(fs.readFileSync(descendantPidPath, 'utf8'), 10);
+    assert.ok(Number.isSafeInteger(runtimeRootPid) && runtimeRootPid > 0);
+    assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
+
+    assert.equal(launched.kill('SIGTERM'), true);
+    const exited = await waitForChildExit(launched);
+    assert.deepEqual(exited, { code: 128 + 15, signal: null }, stderr);
+    for (const processId of [runtimeRootPid, descendantPid]) {
+      await waitForCondition(() => {
+        try {
+          process.kill(processId, 0);
+          return false;
+        } catch (error) {
+          if (error?.code === 'ESRCH') return true;
+          throw error;
+        }
+      }, `the native supervisor to reap runtime fixture ${processId}`);
+    }
+  } finally {
+    try {
+      launched?.kill('SIGKILL');
+    } catch {
+      // The passing case has already exited the supervisor.
+    }
+    for (const processId of [runtimeRootPid, descendantPid]) {
+      if (processId === null) continue;
+      try {
+        process.kill(processId, 'SIGKILL');
+      } catch {
+        // The passing case has already reaped this exact local fixture pid.
+      }
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('wheel parser accepts a regular entry and rejects traversal and symlink entries before extraction', () => {

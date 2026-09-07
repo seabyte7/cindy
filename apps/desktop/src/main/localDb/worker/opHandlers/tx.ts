@@ -1,9 +1,19 @@
 // inproc 回滚口：仅在 XDT_DB_INPROC=true 时使用。
 // 默认热路径走 file worker（dbWorker.ts + dispatcher），这里要和同名 tx handler 保持一致。
 
+import { createHash } from 'node:crypto';
+
 import type Database from 'better-sqlite3';
 
-import type { DbTxName } from '../../client/tx/types.js';
+import type {
+  DbTxName,
+  DshCommitProjectionArgs,
+  DshCommitProjectionResult,
+  DshProjectionBindingSnapshot,
+  DshProjectionRejectionReason,
+  DshRejectProjectionArgs,
+  DshRejectProjectionResult,
+} from '../../client/tx/types.js';
 import { normalizeWorkingDirForStorage } from '../../../../shared/workingDir.js';
 import { capImportedToolResultContent } from '../../../../shared/toolResultPersistCap.js';
 import {
@@ -130,11 +140,409 @@ export function tx(db: Database.Database, args: unknown): unknown {
       return wechatRefreshOutboxContexts(db, txArgs);
     case 'wechatUnbindCleanup':
       return wechatUnbindCleanup(db, txArgs);
+    case 'dsh.commitProjection':
+      return dshCommitProjection(db, txArgs);
+    case 'dsh.rejectProjection':
+      return dshRejectProjection(db, txArgs);
     case 'session.importShare':
       return sessionImportShare(db, txArgs);
     default:
       throw Object.assign(new Error(`unknown tx: ${name}`), { code: 'UNKNOWN_TX' });
   }
+}
+
+const MAX_DSH_PROJECTION_EVENT_BYTES = 512 * 1024;
+const MAX_DSH_PROJECTION_EVENT_DEPTH = 16;
+const MAX_DSH_PROJECTION_EVENT_ITEMS = 2_048;
+const DSH_PROJECTED_EVENT_TYPES = new Set([
+  'text',
+  'thinking',
+  'tool_use',
+  'tool_result',
+  'tool_result_full',
+  'status',
+]);
+const DSH_IGNORED_PROJECTION_REASONS = new Set([
+  'empty-content',
+  'unsupported-content',
+  'unsupported-update',
+]);
+const DSH_REJECTED_PROJECTION_REASONS = new Set<DshProjectionRejectionReason>([
+  'invalid-envelope',
+  'invalid-message-update',
+  'invalid-thought-update',
+  'invalid-tool-call',
+  'invalid-tool-result',
+  'invalid-usage-update',
+]);
+
+interface DshBindingDbRow {
+  cindy_session_id: string;
+  lifecycle_state: string;
+  last_projected_sequence: number;
+  revision: number;
+}
+
+/**
+ * Commit the validated display-safe projection record before making its native sequence
+ * durable.  A journal insert or CAS failure rolls back both mutations.
+ */
+function dshCommitProjection(
+  db: Database.Database,
+  args: unknown,
+): DshCommitProjectionResult {
+  const input = parseDshCommitProjectionArgs(args);
+  const selectBinding = db.prepare(
+    `SELECT cindy_session_id, lifecycle_state, last_projected_sequence, revision
+       FROM dsh_session_bindings
+      WHERE cindy_session_id = ?`,
+  );
+  const selectEvent = db.prepare(
+    `SELECT event_sha256 AS recordSha256
+       FROM dsh_projection_events
+      WHERE cindy_session_id = ? AND sequence = ?`,
+  );
+  const insertEvent = db.prepare(
+    `INSERT INTO dsh_projection_events (
+       cindy_session_id, sequence, event_json, event_sha256, created_at
+     ) VALUES (?, ?, ?, ?, ?)`,
+  );
+  const advanceBinding = db.prepare(
+    `UPDATE dsh_session_bindings
+        SET last_projected_sequence = ?, revision = ?, updated_at = ?
+      WHERE cindy_session_id = ?
+        AND lifecycle_state = 'active'
+        AND last_projected_sequence = ?
+        AND revision = ?`,
+  );
+  const markGap = db.prepare(
+    `UPDATE dsh_session_bindings
+        SET lifecycle_state = 'needs_reconcile', revision = ?, updated_at = ?
+      WHERE cindy_session_id = ?
+        AND lifecycle_state = 'active'
+        AND revision = ?`,
+  );
+
+  const transaction = db.transaction((): DshCommitProjectionResult => {
+    const row = selectBinding.get(input.cindySessionId) as DshBindingDbRow | undefined;
+    if (!row) return { kind: 'conflict', binding: null };
+    const current = dshBindingSnapshot(row);
+    if (current.revision !== input.expectedBindingRevision) {
+      return { kind: 'conflict', binding: current };
+    }
+    if (current.lifecycleState !== 'active') return { kind: 'inactive', binding: current };
+
+    if (input.sequence <= current.lastProjectedSequence) {
+      const existing = selectEvent.get(input.cindySessionId, input.sequence) as
+        | { recordSha256: string }
+        | undefined;
+      if (!existing || existing.recordSha256 !== input.recordSha256) {
+        throw invalidArgs('DSH projection sequence does not match its durable journal entry');
+      }
+      return { kind: 'duplicate', binding: current };
+    }
+
+    if (input.sequence !== current.lastProjectedSequence + 1) {
+      const update = markGap.run(
+        current.revision + 1,
+        input.createdAt,
+        input.cindySessionId,
+        current.revision,
+      );
+      if (update.changes !== 1) throw invalidArgs('DSH projection gap transition lost its binding CAS');
+      return {
+        kind: 'gap',
+        binding: {
+          ...current,
+          lifecycleState: 'needs_reconcile',
+          revision: current.revision + 1,
+        },
+      };
+    }
+
+    insertEvent.run(
+      input.cindySessionId,
+      input.sequence,
+      input.recordJson,
+      input.recordSha256,
+      input.createdAt,
+    );
+    const update = advanceBinding.run(
+      input.sequence,
+      current.revision + 1,
+      input.createdAt,
+      input.cindySessionId,
+      current.lastProjectedSequence,
+      current.revision,
+    );
+    if (update.changes !== 1) {
+      throw invalidArgs('DSH projection journal insert lost its binding CAS');
+    }
+    return {
+      kind: 'advanced',
+      binding: {
+        ...current,
+        lastProjectedSequence: input.sequence,
+        revision: current.revision + 1,
+      },
+    };
+  });
+  return transaction();
+}
+
+/**
+ * A malformed native update is intentionally not journaled as if it were a
+ * valid product fact. Persist only the safe reconciliation state, retaining
+ * the cursor so a freshly verified history can decide what sequence means.
+ */
+function dshRejectProjection(
+  db: Database.Database,
+  args: unknown,
+): DshRejectProjectionResult {
+  const input = parseDshRejectProjectionArgs(args);
+  const selectBinding = db.prepare(
+    `SELECT cindy_session_id, lifecycle_state, last_projected_sequence, revision
+       FROM dsh_session_bindings
+      WHERE cindy_session_id = ?`,
+  );
+  const markRejected = db.prepare(
+    `UPDATE dsh_session_bindings
+        SET lifecycle_state = 'needs_reconcile', revision = ?, updated_at = ?
+      WHERE cindy_session_id = ?
+        AND lifecycle_state = 'active'
+        AND revision = ?
+        AND last_projected_sequence = ?`,
+  );
+  const transaction = db.transaction((): DshRejectProjectionResult => {
+    const row = selectBinding.get(input.cindySessionId) as DshBindingDbRow | undefined;
+    if (!row) return { kind: 'conflict', binding: null };
+    const current = dshBindingSnapshot(row);
+    if (current.revision !== input.expectedBindingRevision) {
+      return { kind: 'conflict', binding: current };
+    }
+    if (current.lifecycleState !== 'active') return { kind: 'inactive', binding: current };
+    if (input.sequence !== current.lastProjectedSequence + 1) {
+      return { kind: 'conflict', binding: current };
+    }
+    const update = markRejected.run(
+      current.revision + 1,
+      input.createdAt,
+      input.cindySessionId,
+      current.revision,
+      current.lastProjectedSequence,
+    );
+    if (update.changes !== 1) throw invalidArgs('DSH projection rejection lost its binding CAS');
+    return {
+      kind: 'rejected',
+      binding: {
+        ...current,
+        lifecycleState: 'needs_reconcile',
+        revision: current.revision + 1,
+      },
+    };
+  });
+  return transaction();
+}
+
+function parseDshCommitProjectionArgs(value: unknown): DshCommitProjectionArgs {
+  const input = asRecord(value, 'dsh.commitProjection args');
+  const cindySessionId = expectDshProjectionId(input.cindySessionId, 'cindySessionId');
+  const expectedBindingRevision = expectPositiveSafeInteger(
+    input.expectedBindingRevision,
+    'expectedBindingRevision',
+  );
+  const sequence = expectPositiveSafeInteger(input.sequence, 'sequence');
+  const recordJson = expectString(input.recordJson, 'recordJson');
+  if (Buffer.byteLength(recordJson, 'utf8') > MAX_DSH_PROJECTION_EVENT_BYTES) {
+    throw invalidArgs('recordJson exceeds DSH projection byte limit');
+  }
+  const recordSha256 = expectString(input.recordSha256, 'recordSha256');
+  if (!/^[a-f0-9]{64}$/.test(recordSha256)) {
+    throw invalidArgs('recordSha256 must be a lowercase SHA-256 hex digest');
+  }
+  if (createHash('sha256').update(recordJson).digest('hex') !== recordSha256) {
+    throw invalidArgs('recordSha256 does not match recordJson');
+  }
+  const createdAt = expectNonNegativeSafeInteger(input.createdAt, 'createdAt');
+  assertDshProjectionRecordJson(recordJson, sequence);
+  return {
+    cindySessionId,
+    expectedBindingRevision,
+    sequence,
+    recordJson,
+    recordSha256,
+    createdAt,
+  };
+}
+
+function parseDshRejectProjectionArgs(value: unknown): DshRejectProjectionArgs {
+  const input = asRecord(value, 'dsh.rejectProjection args');
+  const cindySessionId = expectDshProjectionId(input.cindySessionId, 'cindySessionId');
+  const expectedBindingRevision = expectPositiveSafeInteger(
+    input.expectedBindingRevision,
+    'expectedBindingRevision',
+  );
+  const sequence = expectPositiveSafeInteger(input.sequence, 'sequence');
+  if (
+    typeof input.reason !== 'string'
+    || !DSH_REJECTED_PROJECTION_REASONS.has(input.reason as DshProjectionRejectionReason)
+  ) {
+    throw invalidArgs('reason is not a supported DSH projection rejection');
+  }
+  const createdAt = expectNonNegativeSafeInteger(input.createdAt, 'createdAt');
+  return {
+    cindySessionId,
+    expectedBindingRevision,
+    sequence,
+    reason: input.reason as DshProjectionRejectionReason,
+    createdAt,
+  };
+}
+
+function dshBindingSnapshot(row: DshBindingDbRow): DshProjectionBindingSnapshot {
+  const cindySessionId = expectDshProjectionId(row.cindy_session_id, 'stored cindySessionId');
+  if (
+    row.lifecycle_state !== 'active'
+    && row.lifecycle_state !== 'closed'
+    && row.lifecycle_state !== 'needs_reconcile'
+  ) {
+    throw invalidArgs('stored DSH binding lifecycle state is invalid');
+  }
+  return {
+    cindySessionId,
+    lifecycleState: row.lifecycle_state,
+    lastProjectedSequence: expectNonNegativeSafeInteger(
+      row.last_projected_sequence,
+      'stored lastProjectedSequence',
+    ),
+    revision: expectPositiveSafeInteger(row.revision, 'stored revision'),
+  };
+}
+
+function assertDshProjectionRecordJson(recordJson: string, sequence: number): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(recordJson) as unknown;
+  } catch {
+    throw invalidArgs('recordJson must be valid JSON');
+  }
+  if (
+    !isRecord(parsed)
+    || parsed.version !== 1
+    || (parsed.kind !== 'events' && parsed.kind !== 'ignored')
+  ) {
+    throw invalidArgs('recordJson has an unsupported DSH projection record shape');
+  }
+  if (parsed.kind === 'ignored') {
+    if (
+      Object.keys(parsed).length !== 3
+      || typeof parsed.reason !== 'string'
+      || !DSH_IGNORED_PROJECTION_REASONS.has(parsed.reason)
+    ) {
+      throw invalidArgs('recordJson ignored reason is unsupported');
+    }
+  } else {
+    if (
+      Object.keys(parsed).length !== 3
+      || !Array.isArray(parsed.events)
+      || parsed.events.length === 0
+      || parsed.events.length > 16
+    ) {
+      throw invalidArgs('recordJson events must be a bounded non-empty array');
+    }
+    for (const event of parsed.events) assertDshProjectedAgentEvent(event, sequence);
+  }
+  assertSafeProjectionJsonValue(parsed, 0, { items: 0 });
+  if (JSON.stringify(parsed) !== recordJson) {
+    throw invalidArgs('recordJson must use canonical JSON serialization');
+  }
+}
+
+function assertDshProjectedAgentEvent(value: unknown, sequence: number): void {
+  const parsed = asRecord(value, 'recordJson AgentEvent');
+  if (
+    Object.keys(parsed).length !== 4
+    || typeof parsed.type !== 'string'
+    || !DSH_PROJECTED_EVENT_TYPES.has(parsed.type)
+  ) {
+    throw invalidArgs('recordJson has an unsupported DSH AgentEvent type');
+  }
+  if (parsed.source !== 'dsh' || !Object.hasOwn(parsed, 'data')) {
+    throw invalidArgs('recordJson must contain DSH-sourced AgentEvents with data');
+  }
+  const meta = asRecord(parsed.agentMeta, 'recordJson AgentEvent.agentMeta');
+  if (Object.keys(meta).length !== 1) throw invalidArgs('recordJson agentMeta must be DSH-only');
+  const dshMeta = asRecord(meta.dsh, 'recordJson AgentEvent.agentMeta.dsh');
+  if (
+    Object.keys(dshMeta).length !== 1
+    || dshMeta.projectionSequence !== sequence
+  ) {
+    throw invalidArgs('recordJson projection sequence does not match the DSH metadata');
+  }
+}
+
+function assertSafeProjectionJsonValue(
+  value: unknown,
+  depth: number,
+  state: { items: number },
+): void {
+  if (depth > MAX_DSH_PROJECTION_EVENT_DEPTH || state.items++ >= MAX_DSH_PROJECTION_EVENT_ITEMS) {
+    throw invalidArgs('recordJson exceeds DSH projection structural limits');
+  }
+  if (value === null || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw invalidArgs('recordJson contains a non-finite number');
+    return;
+  }
+  if (typeof value === 'string') {
+    if (value.includes('\u0000')) throw invalidArgs('recordJson contains a NUL byte');
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) assertSafeProjectionJsonValue(item, depth + 1, state);
+    return;
+  }
+  if (!isRecord(value)) throw invalidArgs('recordJson contains an unsupported value');
+  for (const [key, nested] of Object.entries(value)) {
+    if (
+      key.length === 0
+      || key.length > 4 * 1024
+      || /[\u0000-\u001f\u007f]/.test(key)
+      || key === '__proto__'
+      || key === 'constructor'
+      || key === 'prototype'
+    ) {
+      throw invalidArgs('recordJson contains an unsafe object key');
+    }
+    assertSafeProjectionJsonValue(nested, depth + 1, state);
+  }
+}
+
+function expectDshProjectionId(value: unknown, label: string): string {
+  const id = expectString(value, label);
+  if (
+    id.length === 0
+    || id.length > 512
+    || id.trim() !== id
+    || /[\u0000-\u001f\u007f]/.test(id)
+  ) {
+    throw invalidArgs(`${label} is not a safe DSH opaque identifier`);
+  }
+  return id;
+}
+
+function expectPositiveSafeInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw invalidArgs(`${label} must be a positive safe integer`);
+  }
+  return value as number;
+}
+
+function expectNonNegativeSafeInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw invalidArgs(`${label} must be a non-negative safe integer`);
+  }
+  return value as number;
 }
 
 /** Remove every stale startup binding as one all-or-nothing repair. */

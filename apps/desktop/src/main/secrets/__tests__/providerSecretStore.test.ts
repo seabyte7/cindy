@@ -50,6 +50,7 @@ import {
   ghostSecretHintStorageKey,
   deriveGhostSecretTail,
   GHOST_SECRET_TAIL_MIN_VALUE_CHARS,
+  isCustomProviderRuntimeKeyStorageKey,
   isRendererAccessibleSafeStorageKey,
   PI_PROXY_DERIVATION_KEY_STORAGE_KEY,
   PROVIDER_SECRET_IDS,
@@ -90,6 +91,11 @@ describe('providerSecrets registry', () => {
     );
   });
 
+  it('keeps the DSH runtime key in the custom-provider cleanup namespace', () => {
+    expect(isCustomProviderRuntimeKeyStorageKey('provider_key_dsh-adapter_dsh')).toBe(true);
+    expect(isCustomProviderRuntimeKeyStorageKey('provider_key_dsh-adapter_unknown')).toBe(false);
+  });
+
   it('keeps the voice ASR key behind its dedicated main-only IPC boundary', () => {
     expect(isRendererAccessibleSafeStorageKey(providerSecretStorageKey('voice-asr'))).toBe(false);
     expect(isRendererAccessibleSafeStorageKey('VOICE_INPUT_ASR_API_KEY')).toBe(false);
@@ -103,7 +109,9 @@ describe('providerSecrets registry', () => {
   });
 
   it('keeps the OpenAI images API key behind its dedicated main-only IPC boundary', () => {
-    expect(isRendererAccessibleSafeStorageKey(providerSecretStorageKey('openai-images'))).toBe(false);
+    expect(isRendererAccessibleSafeStorageKey(providerSecretStorageKey('openai-images'))).toBe(
+      false,
+    );
     expect(isRendererAccessibleSafeStorageKey('PROVIDER_KEY_OPENAI_IMAGES')).toBe(false);
   });
 
@@ -121,14 +129,20 @@ describe('providerSecrets registry', () => {
 
   it('动态键名构造前校验片段字符集,路径逃逸类 id 直接抛错', () => {
     expect(providerOAuthStorageKey('acme-1')).toBe('provider_oauth_acme-1');
-    expect(customProviderSecretStorageKey('my_or', 'claude-code')).toBe('provider_key_my_or_claude-code');
+    expect(customProviderSecretStorageKey('my_or', 'claude-code')).toBe(
+      'provider_key_my_or_claude-code',
+    );
     expect(() => providerOAuthStorageKey('x/../../oauth')).toThrow(/illegal characters/);
     expect(() => providerOAuthStorageKey('a.b')).toThrow(/illegal characters/);
-    expect(() => customProviderSecretStorageKey('ok', 'claude/../code')).toThrow(/illegal characters/);
+    expect(() => customProviderSecretStorageKey('ok', 'claude/../code')).toThrow(
+      /illegal characters/,
+    );
   });
 
   it('意识凭证键名构造(ghost_secret_<ghostId>_<key>),非法片段抛错', () => {
-    expect(ghostSecretStorageKey('my-ghost', 'brave_api_key')).toBe('ghost_secret_my-ghost_brave_api_key');
+    expect(ghostSecretStorageKey('my-ghost', 'brave_api_key')).toBe(
+      'ghost_secret_my-ghost_brave_api_key',
+    );
     expect(() => ghostSecretStorageKey('x/../evil', 'k')).toThrow(/illegal characters/);
     expect(() => ghostSecretStorageKey('ok', 'k.ey')).toThrow(/illegal characters/);
   });
@@ -136,24 +150,36 @@ describe('providerSecrets registry', () => {
   it('官方别名:cindy-web-search 的凭证映射到历史 brave/tavily 存储键(老用户零迁移)', () => {
     // 与「工具密钥」时代同一 .enc 文件:老用户已填 key 对意识立即生效,
     // lizi_web_search MCP 也照读同一份。
-    expect(ghostSecretStorageKey('cindy-web-search', 'brave_api_key')).toBe(providerSecretStorageKey('brave'));
-    expect(ghostSecretStorageKey('cindy-web-search', 'tavily_api_key')).toBe(providerSecretStorageKey('tavily'));
+    expect(ghostSecretStorageKey('cindy-web-search', 'brave_api_key')).toBe(
+      providerSecretStorageKey('brave'),
+    );
+    expect(ghostSecretStorageKey('cindy-web-search', 'tavily_api_key')).toBe(
+      providerSecretStorageKey('tavily'),
+    );
     // 别名只对登记过的 (ghostId, key) 生效:同 id 其它 key、其它意识同名 key 都走缺省命名空间。
-    expect(ghostSecretStorageKey('cindy-web-search', 'other_key')).toBe('ghost_secret_cindy-web-search_other_key');
-    expect(ghostSecretStorageKey('third-party', 'brave_api_key')).toBe('ghost_secret_third-party_brave_api_key');
+    expect(ghostSecretStorageKey('cindy-web-search', 'other_key')).toBe(
+      'ghost_secret_cindy-web-search_other_key',
+    );
+    expect(ghostSecretStorageKey('third-party', 'brave_api_key')).toBe(
+      'ghost_secret_third-party_brave_api_key',
+    );
   });
 
   it('官方别名:xd-mivo 的 mivo_api_key 映射到历史 mivo 存储键(老用户零迁移)', () => {
     expect(ghostSecretStorageKey('xd-mivo', 'mivo_api_key')).toBe(providerSecretStorageKey('mivo'));
     expect(ghostSecretStorageKey('xd-mivo', 'other_key')).toBe('ghost_secret_xd-mivo_other_key');
-    expect(ghostSecretStorageKey('third-party', 'mivo_api_key')).toBe('ghost_secret_third-party_mivo_api_key');
+    expect(ghostSecretStorageKey('third-party', 'mivo_api_key')).toBe(
+      'ghost_secret_third-party_mivo_api_key',
+    );
   });
 
   it('意识凭证尾指纹:键名独立前缀(ghost_hint_)+ 短值不产指纹', () => {
     expect(ghostSecretHintStorageKey('my-ghost', 'api_key')).toBe('ghost_hint_my-ghost_api_key');
     expect(() => ghostSecretHintStorageKey('x/../evil', 'k')).toThrow(/illegal characters/);
     // 指纹永远走 ghost_hint_ 命名空间,官方别名(密文键)不牵连它。
-    expect(ghostSecretHintStorageKey('xd-mivo', 'mivo_api_key')).toBe('ghost_hint_xd-mivo_mivo_api_key');
+    expect(ghostSecretHintStorageKey('xd-mivo', 'mivo_api_key')).toBe(
+      'ghost_hint_xd-mivo_mivo_api_key',
+    );
 
     expect(deriveGhostSecretTail('mivo_abcdefgh1234')).toBe('1234');
     expect(deriveGhostSecretTail('x'.repeat(GHOST_SECRET_TAIL_MIN_VALUE_CHARS))).toBe('xxxx');
@@ -190,9 +216,7 @@ describe('providerSecrets registry', () => {
     sessionState.mode = 'cloud';
     sessionState.dataOwnerId = `missing-ghost-owner-${process.pid}`;
     try {
-      expect(
-        readGhostSecretStrict(`missing-ghost-${process.pid}`, 'oauth_accounts'),
-      ).toBeNull();
+      expect(readGhostSecretStrict(`missing-ghost-${process.pid}`, 'oauth_accounts')).toBeNull();
     } finally {
       sessionState.mode = previousMode;
       sessionState.dataOwnerId = previousOwnerId;

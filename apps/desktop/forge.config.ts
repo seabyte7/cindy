@@ -642,6 +642,43 @@ function signPackagedExes(buildPath: string): void {
 }
 
 /**
+ * Opt-in local macOS DSH staging. The archive and manifest are deliberately
+ * supplied only by the caller's local build environment: this hook never
+ * fetches, builds, downloads or selects a runtime, and a normal package has
+ * no DSH resources at all. The staging script verifies the exact checked-in
+ * checked-in supervised source release before it touches the packaged App bundle.
+ */
+function stageMacDshSupervisedRuntime(buildPath: string, platform: string, arch: string): void {
+  if (platform !== 'darwin' && platform !== 'mas') return;
+  const archive = process.env.CINDY_DSH_MACOS_SUPERVISED_ARCHIVE;
+  const manifest = process.env.CINDY_DSH_MACOS_SUPERVISED_MANIFEST;
+  if (!archive && !manifest) return;
+  if (!archive || !manifest) {
+    throw new Error('[forge:postPackage] CINDY_DSH_MACOS_SUPERVISED_ARCHIVE and CINDY_DSH_MACOS_SUPERVISED_MANIFEST must be set together');
+  }
+  if (arch !== 'arm64') {
+    throw new Error(`[forge:postPackage] local DSH supervised runtime is available only for darwin-arm64, got ${platform}-${arch}`);
+  }
+  const apps = fs.readdirSync(buildPath).filter((name) => name.endsWith('.app'));
+  if (apps.length !== 1) {
+    throw new Error(`[forge:postPackage] expected one macOS app while staging DSH runtime, found ${apps.length}`);
+  }
+  const script = path.join(__dirname, 'scripts', 'stage-dsh-macos-supervised-runtime.mjs');
+  const release = path.join(__dirname, '..', '..', 'tools', 'dsh', 'macos-supervised-source-release.json');
+  const app = path.join(buildPath, apps[0]);
+  const result = spawnSync(process.execPath, [
+    script,
+    '--app', app,
+    '--archive', archive,
+    '--manifest', manifest,
+    '--release', release,
+  ], { stdio: 'inherit' });
+  if (result.error || result.status !== 0) {
+    throw new Error(`[forge:postPackage] failed to stage local macOS DSH supervised runtime${result.status === null ? '' : ` (exit ${result.status})`}`);
+  }
+}
+
+/**
  * macOS 打包显示名(与 win32metadata 同构):packaged 后把
  * .app 的 Info.plist 里 CFBundleDisplayName 改成 Cindy——Dock 名、Cmd+Tab、
  * Finder、系统通知读的都是它(显示优先级 CFBundleDisplayName > CFBundleName)。
@@ -714,8 +751,38 @@ function requestedTargetArch(): string {
   return process.env.ELECTRON_FORGE_ARCH || readForgeTargetArg('arch') || process.arch;
 }
 
+/**
+ * A deliberately narrow local-only packaging composition for the DSH F2
+ * evidence path.  It is not a release mode: callers must supply an already
+ * verified local runtime archive and no remote-agent bundle or iOS preparation
+ * is allowed to sneak into this build.
+ */
+function isLocalDshMacPackage(): boolean {
+  return process.env.CINDY_DSH_LOCAL_MACOS_PACKAGE === '1';
+}
+
+function assertLocalDshMacPackageTarget(platform: ForgePlatform, arch: ForgeArch): void {
+  if (!isLocalDshMacPackage()) return;
+  if (process.platform !== 'darwin' || process.arch !== 'arm64' || platform !== 'darwin' || arch !== 'arm64') {
+    throw new Error(
+      `[forge] CINDY_DSH_LOCAL_MACOS_PACKAGE=1 is limited to local darwin-arm64, got host ${process.platform}-${process.arch}, target ${platform}-${arch}`,
+    );
+  }
+}
+
 function ripgrepBinaryName(targetPlatform: string): string {
   return targetPlatform === 'win32' ? 'rg.exe' : 'rg';
+}
+
+function isGitLfsPointer(file: string): boolean {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const probe = Buffer.alloc(64);
+    const bytes = fs.readSync(fd, probe, 0, probe.length, 0);
+    return probe.subarray(0, bytes).toString('utf8').startsWith('version https://git-lfs.github.com/spec/v1');
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function stageRipgrep(targetPlatform: string, targetArch: string): void {
@@ -728,13 +795,39 @@ function stageRipgrep(targetPlatform: string, targetArch: string): void {
   // ripgrep 不再进 git/LFS 且 apps/ripgrep-bin/ 现在被 gitignore、会跨 pin 升级残留在本地——
   // 因此无条件经 ensure 脚本保证目标平台是 tools/ripgrep/latest.json 的 pin 版本：标记命中则快速跳过，
   // 缺失/不匹配/仍是旧二进制或 LFS pointer 则刷新。只判 fs.existsSync 会把陈旧 rg 直接打进包。
-  const ensureScript = path.join(__dirname, '..', '..', 'scripts', 'ensure-agent-binaries.mjs');
-  console.log(`[forge:prePackage] ensuring pinned ripgrep ${key} via ${ensureScript}...`);
-  const r = spawnSync(process.execPath, [ensureScript, '--kinds=ripgrep', `--platform=${key}`], {
-    stdio: 'inherit',
-  });
-  if (r.status !== 0) {
-    throw new Error(`[forge] failed to ensure pinned ripgrep ${key}; run "pnpm update:ripgrep" before packaging`);
+  if (isLocalDshMacPackage()) {
+    // This evidence path must not download a general Desktop runtime as an
+    // incidental side effect.  The normal packaging flow remains responsible
+    // for cache reuse/download; this one accepts only an already present local
+    // macOS binary.
+    const marker = path.join(__dirname, '..', 'ripgrep-bin', key, '.version');
+    const pinned = JSON.parse(
+      fs.readFileSync(path.join(__dirname, '..', '..', 'tools', 'ripgrep', 'latest.json'), 'utf8'),
+    ) as { version?: unknown };
+    const installed = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim() : '';
+    const stat = fs.existsSync(src) ? fs.lstatSync(src) : null;
+    const lfsPointer = stat?.isFile() && !stat.isSymbolicLink() ? isGitLfsPointer(src) : false;
+    if (
+      typeof pinned.version !== 'string' ||
+      installed !== pinned.version ||
+      !stat?.isFile() ||
+      stat.isSymbolicLink() ||
+      stat.size < 1024 ||
+      lfsPointer
+    ) {
+      throw new Error(
+        `[forge] local DSH macOS package requires an already verified local ripgrep ${key} runtime; do not download during this build`,
+      );
+    }
+  } else {
+    const ensureScript = path.join(__dirname, '..', '..', 'scripts', 'ensure-agent-binaries.mjs');
+    console.log(`[forge:prePackage] ensuring pinned ripgrep ${key} via ${ensureScript}...`);
+    const r = spawnSync(process.execPath, [ensureScript, '--kinds=ripgrep', `--platform=${key}`], {
+      stdio: 'inherit',
+    });
+    if (r.status !== 0) {
+      throw new Error(`[forge] failed to ensure pinned ripgrep ${key}; run "pnpm update:ripgrep" before packaging`);
+    }
   }
   if (!fs.existsSync(src)) {
     throw new Error(`[forge] ripgrep still missing at ${src} after ensure`);
@@ -756,13 +849,8 @@ function extraResourcesForTarget(targetPlatform: string): string[] {
     'resources/icon.png',
     'resources/tools',
     'drizzle',
-    'resources/cc-manager',
-    'resources/anthropic-compat-proxy',
-    'resources/remote-file-service',
     // .cindy 发布者/审核 Ed25519 公钥信任表(私钥永不进客户端)。
     'resources/ghost-trust.json',
-    // 远端 pi manager bundle(Node 单例 daemon,SSH remote 会话的进程持有器)。
-    'resources/pi-manager',
     // 第三方开源声明,由 scripts/generate-third-party-notices.mjs 生成
     // (pnpm licenses:generate),随安装包分发以满足各开源协议的署名义务。
     'resources/THIRD-PARTY-NOTICES.txt',
@@ -770,11 +858,23 @@ function extraResourcesForTarget(targetPlatform: string): string[] {
     'resources/THIRD-PARTY-RESTRICTED.txt',
   ];
 
+  // The local DSH package is evidence for the nested native Helper only.  It
+  // intentionally excludes all SSH/remote execution bundles so packaging it
+  // cannot become an unreviewed remote build or a remote-runtime claim.
+  if (!isLocalDshMacPackage()) {
+    base.push(
+      'resources/cc-manager',
+      'resources/anthropic-compat-proxy',
+      'resources/remote-file-service',
+      'resources/pi-manager',
+    );
+  }
+
   if (targetPlatform === 'win32') {
     base.unshift(`resources/${UPDATER_EXE}`);
   }
 
-  if (targetPlatform === 'darwin' || targetPlatform === 'mas') {
+  if (!isLocalDshMacPackage() && (targetPlatform === 'darwin' || targetPlatform === 'mas')) {
     // WDA archive/manifest are runtime resources. The Host-owned Helper is
     // temporarily copied here and moved to Contents/Helpers by postPackage so
     // the signing pipeline can treat it as nested code.
@@ -1485,14 +1585,15 @@ const config: ForgeConfig = {
     prePackage: async (_forgeConfig, platform, arch) => {
       const targetPlatform = requestedTargetPlatform();
       const targetArch = requestedTargetArch();
-      ensureMacIOSSimulatorWdaArchive(platform);
+      assertLocalDshMacPackageTarget(platform, arch);
+      if (!isLocalDshMacPackage()) ensureMacIOSSimulatorWdaArchive(platform);
       if (targetPlatform === 'win32') {
         buildCindyUpdater();
       }
       stageRipgrep(targetPlatform, targetArch);
-      stageAndroidPlatformTools(targetPlatform, targetArch);
+      if (!isLocalDshMacPackage()) stageAndroidPlatformTools(targetPlatform, targetArch);
       buildWindowsVoiceInputFunctionKeyListener(targetPlatform);
-      buildMacIOSSimulatorHelper(platform, arch);
+      if (!isLocalDshMacPackage()) buildMacIOSSimulatorHelper(platform, arch);
       buildMacVoiceInputTextInsertionHelper(platform, arch);
       buildMacXboxGamepadHelper(platform, arch);
       buildMacVoiceInputModifierShortcutListener(platform, arch);
@@ -1508,7 +1609,10 @@ const config: ForgeConfig = {
         const noticeName = stagePackagedThirdPartyNotices(buildPath, opts.platform);
         console.log(`[forge:postPackage] staged ${noticeName} + restricted component disclosure`);
         signPackagedExes(buildPath);
-        stageMacIOSSimulatorHelper(buildPath, opts.platform, opts.arch);
+        if (!isLocalDshMacPackage()) {
+          stageMacIOSSimulatorHelper(buildPath, opts.platform, opts.arch);
+        }
+        stageMacDshSupervisedRuntime(buildPath, opts.platform, opts.arch);
         applyMacPackagedDisplayName(buildPath, opts.platform);
       }
     },

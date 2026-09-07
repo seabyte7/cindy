@@ -56,6 +56,13 @@ describe('newMakerDraft store', () => {
     expect(d.lastByVendor.codex.permissionMode).toBe('auto');
     expect(d.lastByVendor.codex.effort).toBe('high');
     expect(d.lastByVendor.pi.permissionMode).toBe('auto');
+    expect(d.lastByVendor.dsh).toMatchObject({
+      model: 'cindy-dsh-managed',
+      effort: 'medium',
+      permissionMode: 'auto',
+      planMode: false,
+      providerId: null,
+    });
     // 种子模型不再写死在 store 里（原先是 'gpt-5.4'，与 modelDefinitions 写死的 'gpt-5.5'
     // 漂移，且两者在目录里都是默认隐藏的模型）。现在统一从 getDefaultModelForVendor 取，
     // capabilities 未加载时它给冷启动占位 id —— 这里只锁「非空且与那个入口同源」。
@@ -687,13 +694,27 @@ describe('newMakerDraft store', () => {
     }
   });
 
-  it("sanitize:表外的引擎值(含尚未注册 host 的 DSH)回退默认", async () => {
-    for (const vendor of ['orca', 'dsh', 'unknown-engine', '', 42, null]) {
+  it('sanitize:表外的引擎值回退默认', async () => {
+    for (const vendor of ['orca', 'unknown-engine', '', 42, null]) {
       memStorage.setItem('xdt:newMakerDraft:v1', JSON.stringify({ vendor }));
       vi.resetModules();
       const { getDraft } = await loadModule();
       expect(getDraft().vendor).toBe('cc');
     }
+  });
+
+  it('DSH 草稿的运行时标记不可被本地偏好写入伪造成模型或来源', async () => {
+    const { getDraft, patchCurrentVendorPrefs, switchVendor } = await loadModule();
+    switchVendor('dsh');
+    patchCurrentVendorPrefs({ model: 'deepseek-chat', providerId: 'untrusted-provider' });
+
+    expect(getDraft().lastByVendor.dsh).toMatchObject({
+      model: 'cindy-dsh-managed',
+      providerId: null,
+      effort: 'medium',
+      permissionMode: 'auto',
+      planMode: false,
+    });
   });
 
   it('switchVendor:相同 vendor 不变(no-op,避免误覆盖)', async () => {

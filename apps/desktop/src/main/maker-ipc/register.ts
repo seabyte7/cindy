@@ -60,7 +60,15 @@ import {
   DL_SESSION_REFERENCE_CAPABILITY_CHANNEL,
 } from '@cindy/device-link';
 import { and, desc, eq, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
-import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  safeStorage,
+  shell,
+  type IpcMainInvokeEvent,
+} from 'electron';
 import {
   activeOwnerScopeKey,
   getActiveAppSession,
@@ -192,6 +200,8 @@ import {
   getDbClient,
   isDbClientNotReadyError,
 } from '../localDb/client/current.js';
+import { createDshActivitySnapshotStore } from '../localDb/dshActivitySnapshots.js';
+import { createDshSessionBindingStore } from '../localDb/dshSessionBindings.js';
 import { getMessagesForHistory } from '../localDb/chatHistoryReader.js';
 import {
   awaitAgentInputQueueSnapshotPersistence,
@@ -364,15 +374,23 @@ import {
   writeAgentResourceSetting,
 } from '../maker-host/agent-resource-settings-store.js';
 import { createAgentResourceSettingsIpc } from './agent-resource-settings-ipc.js';
+import { createDshExistingHomeIpc } from './dsh-existing-home-ipc.js';
+import {
+  createDshExistingHomeSettingsStore,
+  selectExistingDshHomeFromMain,
+  type DshExistingHomeSettingsStore,
+} from '../dsh-host/existing-home-settings.js';
 import { createGitSnapshotCoordinator } from '../maker-host/git-snapshot-host.js';
 import {
   cancelCodexAuthModeChange,
   ensureCodexMcpBridgeStartedForRemote,
   finalizeCodexAfterAuthModeChange,
   getMaker,
+  getDshRuntimeConfigurationControl,
   getMakerIfReady,
   getPluginRegistry,
   prepareCodexForAuthModeChange,
+  registerDshAgentIfAvailable,
   restartCodexAfterAuthModeChange,
   setBeforeLocalCodexSessionStartHook,
 } from '../maker-host/index.js';
@@ -621,6 +639,8 @@ import { MAKER_INVOKE, MAKER_PUSH, MAKER_SEND } from './channels.js';
 import type { CollabDispatchOutcome } from './collabSendOutcome.js';
 import { runAcceptedCallback } from './acceptedCallbackRunner.js';
 import { createElectronIpcHandlerRegistry } from './electronIpcRegistry.js';
+import { registerDshActivityHandlers } from './dshActivityHandlers.js';
+import { registerDshRuntimeConfigurationHandlers } from './dsh-runtime-configuration-ipc.js';
 import { refreshCodexMcpEnvironment } from './codexMcpRefresh.js';
 import { broadcastSchedulerChanged } from './schedule.js';
 import {
@@ -756,6 +776,8 @@ import {
 } from './orcaManualInterrupt.js';
 import { tryInjectProjectContext } from './projectContextInject.js';
 import { registerMakerSessionCreateHandler } from './sessionCreateHandler.js';
+import { createDshActivityControlService } from '../maker-host/dsh-activity-control.js';
+import { dshActivityMutationGate } from '../maker-host/dsh-session-activity.js';
 import {
   applyPendingAgentSwitchIfIdle,
   createPendingAgentSwitchRegistry,
@@ -1496,6 +1518,45 @@ const agentResourceSettingsIpc = createAgentResourceSettingsIpc({
   readState: readAgentResourceSettingsState,
   write: writeAgentResourceSetting,
   reset: resetAgentResourceSettings,
+});
+
+// The protected DSH Home bookmark store is lazy: the default managed mode
+// never creates a directory or probes secure storage. The Renderer sees only
+// its display-safe projection through the narrow handlers below.
+let dshExistingHomeSettingsStore: DshExistingHomeSettingsStore | null = null;
+function getDshExistingHomeSettingsStore(): DshExistingHomeSettingsStore {
+  if (dshExistingHomeSettingsStore) return dshExistingHomeSettingsStore;
+  dshExistingHomeSettingsStore = createDshExistingHomeSettingsStore({
+    userDataPath: app.getPath('userData'),
+    safeStorage,
+  });
+  return dshExistingHomeSettingsStore;
+}
+
+const dshExistingHomeIpc = createDshExistingHomeIpc({
+  assertTrustedSender: (event) =>
+    assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+  isSupportedPlatform: () => process.platform === 'darwin' && process.arch === 'arm64',
+  getActiveOwner: getActiveAppSession,
+  getProjection: (accountId) => getDshExistingHomeSettingsStore().getProjection(accountId),
+  selectExistingHome: (accountId, isAccountCurrent) =>
+    selectExistingDshHomeFromMain({
+      accountId,
+      picker: {
+        showOpenDialog: (options) =>
+          dialog.showOpenDialog({
+            title: options.title,
+            buttonLabel: options.buttonLabel,
+            properties: options.properties.filter(
+              (property): property is 'openDirectory' => property === 'openDirectory',
+            ),
+            securityScopedBookmarks: options.properties.includes('securityScopedBookmarks'),
+          }),
+      },
+      store: getDshExistingHomeSettingsStore(),
+      isAccountCurrent,
+    }),
+  reset: (accountId) => getDshExistingHomeSettingsStore().reset(accountId),
 });
 
 function memorySettingsWire() {
@@ -6135,6 +6196,34 @@ export function registerModelVisibilitySyncIpc(): void {
 
 export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions): void {
   log.info('registering maker:* IPC handlers');
+  // F6 local plan/todo surface: construct every controller from one current,
+  // owner-scoped database client per invoke. It is intentionally not routed
+  // through device-link and never receives a native DSH bridge or ACP payload.
+  registerDshActivityHandlers(createElectronIpcHandlerRegistry(), {
+    assertTrustedCaller: (event) =>
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+    getControl: () => {
+      const dbClient = getDbClient();
+      return createDshActivityControlService({
+        bindingStore: createDshSessionBindingStore(dbClient),
+        snapshotStore: createDshActivitySnapshotStore(dbClient),
+        isMutationAllowed: (input) => dshActivityMutationGate.isAllowed(input),
+        getSession: async (cindySessionId) => {
+          const [row] = await dbClient.drizzle
+            .select({ agentKind: sessions.agentKind, status: sessions.status })
+            .from(sessions)
+            .where(eq(sessions.id, cindySessionId))
+            .limit(1);
+          return row ?? null;
+        },
+      });
+    },
+  });
+  registerDshRuntimeConfigurationHandlers(createElectronIpcHandlerRegistry(), {
+    assertTrustedCaller: (event) =>
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+    getControl: getDshRuntimeConfigurationControl,
+  });
   const broadcastSessionRuntimeProjection = async (
     sessionId: string,
     baselineOverride?: SessionRuntimeProfile,
@@ -6836,6 +6925,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     listProviders: (opts) => getDesktopProviderService().listProviders(opts),
     getModelVisibilityOverrides: () => getModelVisibilityMirrorSnapshot(),
     refreshCatalog: () => refreshCustomProvidersIntoCatalog(),
+    onProviderConfigurationChanged: () => {
+      // DSH has no default endpoint. A successful custom-provider save is the
+      // only event that may ask its Main-owned admission gate to try the
+      // packaged local runtime; the gate itself keeps a changed live snapshot
+      // fail-closed and contains all startup errors.
+      void registerDshAgentIfAvailable();
+    },
     beginRouteMutation: (providerId) => beginProviderRouteMutation(providerId),
     broadcastChanged: () => broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {}),
     listProviderIds: () => getDesktopSelectableCatalog().providers.map((provider) => provider.id),
@@ -11209,6 +11305,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   ipcMain.handle(MAKER_INVOKE.AGENT_RESOURCE_SETTINGS_RESET, async (e) =>
     agentResourceSettingsIpc.reset(e),
   );
+
+  // ─── DSH existing Home selection ───────────────────────────────────────
+  // The adapter deliberately forwards no Renderer-controlled parameters:
+  // account identity is Main-owned, the picker creates the bookmark in Main,
+  // and the wire response is a path/bookmark-free projection only.
+  ipcMain.handle(MAKER_INVOKE.DSH_EXISTING_HOME_GET, (e) => dshExistingHomeIpc.get(e));
+  ipcMain.handle(MAKER_INVOKE.DSH_EXISTING_HOME_SELECT, (e) => dshExistingHomeIpc.select(e));
+  ipcMain.handle(MAKER_INVOKE.DSH_EXISTING_HOME_RESET, (e) => dshExistingHomeIpc.reset(e));
 
   // ─── Idle watcher ────────────────────────────────────────────────────────
   // 只扫描 active team/session，避免已归档 Worker 被终态筛选重新捞起。

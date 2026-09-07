@@ -42,6 +42,7 @@ import { HelpAssistantPanel } from './HelpAssistantPanel';
 import { AgentResourceSection } from './AgentResourceSection';
 import { PiPackagesSection } from './PiPackagesSection';
 import { CollaborationSection } from './CollaborationSection';
+import { DshExistingHomeSection } from './DshExistingHomeSection';
 import { BuiltinToolsSection } from './BuiltinToolsSection';
 import { ContactsSection } from './contacts/ContactsSection';
 import { ComputerUseSection } from './ComputerUseSection';
@@ -333,6 +334,18 @@ export function SettingsView() {
                         <ChevronRight size={18} className="shrink-0 text-[var(--text-tertiary)]" />
                       </button>
                     </section>
+
+                    {/* The existing DSH Home can only be selected by the local
+                        macOS Main process; no remote or mobile surface gets
+                        this directory-grant entry point. */}
+                    {isMac && (
+                      <section
+                        className="py-[18px]"
+                        aria-label={t('settings.dshExistingHome.title')}
+                      >
+                        <DshExistingHomeSection />
+                      </section>
+                    )}
 
                     {/* Section — Notifications (py 18) */}
                     <section

@@ -1508,6 +1508,16 @@
           "addHeader": "ヘッダーを追加",
           "removeRow": "この行を削除"
         },
+        "dsh": {
+          "label": "DeepSeek Harness",
+          "description": "任意です。DeepSeek Harness 専用の HTTPS エンドポイントと API キーを設定します。他のランタイムの認証情報を再利用することはありません。",
+          "endpoint": "DSH エンドポイント",
+          "endpointPlaceholder": "https://adapter.example.com/v1",
+          "apiKey": "DSH API キー",
+          "apiKeyPlaceholder": "DSH API キー",
+          "apiKeyHelp": "エンドポイントが未変更なら空欄のままでローカル保存済みのキーを保持します。変更時は新しいキーが必要です。",
+          "authRequired": "DeepSeek Harness には API キー認証が必要です。"
+        },
         "wireProtocol": {
           "responses": "OpenAI Responses（ネイティブ）",
           "chat": "Chat Completions（Cindy ブリッジ）",
@@ -1547,7 +1557,10 @@
           "contextWindowInvalid": "コンテキストウィンドウは有効な正の整数である必要があります（数字グループの間に区切り記号を使用できます）",
           "requestPathInvalid": "正確なリクエストパスは 1 つの / で始め、フラグメントや .、.. のパスセグメントを含めないでください。空白や安全でない文字はパーセントエンコードしてください。",
           "modelRequired": "モデルを 1 つ以上追加してください",
-          "oauthInvalid": "OAuth 設定が不完全です。すべての項目が必須で、両方のエンドポイントは安全な https URL である必要があります"
+          "oauthInvalid": "OAuth 設定が不完全です。すべての項目が必須で、両方のエンドポイントは安全な https URL である必要があります",
+          "dshEndpointInvalid": "DeepSeek Harness には認証情報、クエリ、フラグメントを含まない HTTPS エンドポイントが必要です",
+          "dshApiKeyRequired": "この DeepSeek Harness エンドポイントの API キーを入力してください",
+          "dshAuthApiKeyRequired": "DeepSeek Harness には API キー認証が必要です"
         },
         "toast": {
           "created": "プロバイダーを追加しました",
@@ -2959,6 +2972,26 @@
         "update": "Pi 拡張機能を更新しました。実行中のローカル Pi タスクを停止しました。新しい Pi タスクで更新版を利用できます。",
         "set-enabled": "Pi 拡張機能の状態を保存しました。実行中のローカル Pi タスクを停止しました。新しい Pi タスクで新しい状態が反映されます。"
       }
+    },
+    "dshExistingHome": {
+      "title": "DeepSeek Harness home",
+      "description": "デフォルトでは Cindy 管理の home を使います。設定で場所を表示せずに、既存の DeepSeek Harness home を安全に選択できます。",
+      "status": {
+        "cindyManaged": "Cindy 管理の home を使用中",
+        "configured": "既存の DeepSeek Harness home を選択済み",
+        "unavailable": "既存の DeepSeek Harness home を利用できません"
+      },
+      "managedHomeHint": "Cindy は Harness データを自身の管理場所に保持します。",
+      "existingHomeHint": "Cindy は選択した home を使うために必要なローカル認可だけを保存し、場所はここに表示しません。",
+      "choose": "既存の home を選択",
+      "choosing": "選択中…",
+      "useManaged": "Cindy 管理の home を使用",
+      "restoring": "復元中…",
+      "executionGate": "選択した home は Cindy の再起動後に使用されます。ネイティブのプロファイルと拡張機能が実行される場合があります。隔離を戻すには Cindy 管理の home に戻してください。",
+      "selectionSaved": "既存の DeepSeek Harness home を選択しました。Cindy を再起動すると有効になります。",
+      "saveFailed": "DeepSeek Harness home を保存できませんでした。もう一度お試しください。",
+      "restored": "Cindy 管理の home に戻しました。Cindy を再起動すると有効になります。",
+      "restoreFailed": "Cindy 管理の home に戻せませんでした。もう一度お試しください。"
     },
     "computerUse": {
       "title": "自動操作",
@@ -6776,6 +6809,11 @@
     }
   },
   "newChat": {
+    "dsh": {
+      "managedRuntime": "管理対象の DSH ランタイム",
+      "managedRuntimeDetails": "管理対象の DSH ランタイムでローカル実行されます。テキスト入力のみ対応しています。再起動後は、検証済みのローカル紐付けが利用できる場合に限り、この同じタスクを続行できます。",
+      "textOnlyInput": "DSH は現在テキスト入力のみをサポートしています。"
+    },
     "noProvider": {
       "title": "このモデルに利用可能なソースがありません",
       "description": "現在のモデルには接続済みのソースがありません。設定でソースを接続してから送信してください。",
@@ -8360,6 +8398,48 @@
       "moreActions": "その他の操作",
       "newSession": "新規セッション",
       "loading": "読み込み中…"
+    },
+    "dshActivity": {
+      "ariaLabel": "ローカル DSH 計画と ToDo",
+      "title": "ローカル計画と ToDo",
+      "localOnly": "Cindy がローカルに保存します。DSH ランタイムには送信されません。",
+      "refresh": "ローカル計画と ToDo を更新",
+      "unavailable": "ローカルの計画状態を利用できません。更新してもう一度試してください。",
+      "loading": "ローカル計画を読み込み中…",
+      "notReady": "DSH タスクはローカルのアクティビティ状態を準備中です。",
+      "readOnlyUntilResumed": "DSH は切断されています。Main がタスクの再開を検証するまで、ローカル計画は読み取り専用です。",
+      "planPlaceholder": "ローカル計画を追加",
+      "addPlan": "計画を追加",
+      "empty": "ローカル計画はまだありません。",
+      "unnamedPlan": "無題の計画",
+      "todoPlaceholder": "ToDo を追加",
+      "addTodo": "ToDo を追加",
+      "unnamedTodo": "無題の ToDo",
+      "complete": "完了にする",
+      "cancel": "キャンセル",
+      "status": {
+        "pending": "未開始",
+        "running": "進行中",
+        "waiting-for-input": "入力待ち",
+        "waiting-for-decision": "判断待ち",
+        "completed": "完了",
+        "failed": "失敗",
+        "cancelled": "キャンセル済み",
+        "disconnected": "切断済み",
+        "unavailable": "利用不可"
+      }
+    },
+    "dshRuntimeConfiguration": {
+      "ariaLabel": "DSH ランタイム設定",
+      "title": "ランタイム設定",
+      "nextMessageOnly": "このタスクでこれから送るメッセージにだけ適用され、プロバイダー設定としては保存されません。",
+      "refresh": "DSH ランタイム設定を更新",
+      "unavailable": "ランタイム設定を一時的に利用できません。このタスクを再起動してもう一度試してください。",
+      "noSelection": "未選択",
+      "control": {
+        "model": "モデル",
+        "reasoning_effort": "推論強度"
+      }
     },
     "time": {
       "yesterday": "昨日",

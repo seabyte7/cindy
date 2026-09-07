@@ -190,6 +190,26 @@ interface RuntimeFields extends RuntimeFillDraft {
   piCatalogProviderId?: string;
 }
 
+/**
+ * DSH has a fixed ACP adapter profile, not a selectable model runtime. Keep
+ * its narrow endpoint/key form separate from the generic model tabs so users
+ * cannot accidentally configure unsupported routing fields for it.
+ */
+interface DshRuntimeFields {
+  baseUrl: string;
+  apiKey: string;
+}
+
+function initDshRuntime(initial?: CustomProviderConfig): DshRuntimeFields {
+  return {
+    baseUrl: initial?.runtimes.dsh?.baseUrl ?? '',
+    // Existing DSH keys intentionally are not hydrated into Renderer state.
+    // An unchanged endpoint preserves its main-owned safeStorage key; changing
+    // it requires an explicit replacement to avoid cross-endpoint reuse.
+    apiKey: '',
+  };
+}
+
 /** 每个 runtime Tab 的「测试连接」状态（idle → testing → ok/fail）。 */
 interface TestState {
   status: 'idle' | 'testing' | 'ok' | 'fail';
@@ -468,6 +488,7 @@ export function CustomProviderDialog({
 
   const [name, setName] = useState(initial?.name ?? '');
   const [rt, setRt] = useState<Record<DialogAgentKind, RuntimeFields>>(() => initRuntimes(initial));
+  const [dsh, setDsh] = useState<DshRuntimeFields>(() => initDshRuntime(initial));
   const [activeTab, setActiveTab] = useState<DialogAgentKind>(
     () => (initial && VISIBLE_AGENTS.find((a) => initial.runtimes[a])) || 'claude-code',
   );
@@ -1598,6 +1619,33 @@ export function CustomProviderDialog({
         keys[a] = rf.apiKey.trim();
       }
     }
+    const dshBaseUrl = dsh.baseUrl.trim();
+    if (dshBaseUrl) {
+      if (authMode !== 'apiKey') {
+        toast.error(t('settings.providers.custom.errors.dshAuthApiKeyRequired'));
+        return;
+      }
+      let dshEndpointValid = false;
+      try {
+        const url = new URL(dshBaseUrl);
+        dshEndpointValid =
+          url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash;
+      } catch {
+        dshEndpointValid = false;
+      }
+      if (!dshEndpointValid) {
+        toast.error(t('settings.providers.custom.errors.dshEndpointInvalid'));
+        return;
+      }
+      const existingDshBaseUrl = initial?.runtimes.dsh?.baseUrl.trim() ?? '';
+      const dshEndpointChanged = dshBaseUrl !== existingDshBaseUrl;
+      if ((!editing || dshEndpointChanged) && !dsh.apiKey.trim()) {
+        toast.error(t('settings.providers.custom.errors.dshApiKeyRequired'));
+        return;
+      }
+      runtimes.dsh = { baseUrl: dshBaseUrl, models: [] };
+      if (dsh.apiKey.trim()) keys.dsh = dsh.apiKey.trim();
+    }
     if (Object.keys(runtimes).length === 0) {
       toast.error(t('settings.providers.custom.errors.runtimeRequired'));
       return;
@@ -1702,6 +1750,7 @@ export function CustomProviderDialog({
   }, [
     name,
     rt,
+    dsh,
     authMode,
     oauthFlow,
     oauthFields,
@@ -1928,6 +1977,52 @@ export function CustomProviderDialog({
             {authMode === 'none' && (
               <span className="text-12 leading-snug text-[var(--text-tertiary)]">
                 {t('settings.providers.custom.authMode.noneHelp')}
+              </span>
+            )}
+          </div>
+
+          {/* DSH is an opt-in, fixed ACP adapter profile. It uses neither a
+              generic model selection nor inherited credentials from the tabs. */}
+          <div
+            className="flex flex-col gap-3 rounded-[12px] p-4"
+            style={{
+              backgroundColor: 'var(--surface)',
+              border: '1px solid var(--settings-theme-card-border)',
+            }}
+          >
+            <div className="flex flex-col gap-1">
+              <FieldLabel>{t('settings.providers.custom.dsh.label')}</FieldLabel>
+              <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                {t('settings.providers.custom.dsh.description')}
+              </span>
+            </div>
+            <div className="flex flex-col gap-[7px]">
+              <FieldLabel>{t('settings.providers.custom.dsh.endpoint')}</FieldLabel>
+              <SettingsTextInput
+                surface="ivory"
+                value={dsh.baseUrl}
+                onChange={(baseUrl) => setDsh((current) => ({ ...current, baseUrl }))}
+                placeholder={t('settings.providers.custom.dsh.endpointPlaceholder')}
+              />
+            </div>
+            {authMode === 'apiKey' ? (
+              <div className="flex flex-col gap-[7px]">
+                <FieldLabel>{t('settings.providers.custom.dsh.apiKey')}</FieldLabel>
+                <SettingsTextInput
+                  surface="ivory"
+                  value={dsh.apiKey}
+                  onChange={(apiKey) => setDsh((current) => ({ ...current, apiKey }))}
+                  placeholder={t('settings.providers.custom.dsh.apiKeyPlaceholder')}
+                  mono
+                  secret
+                />
+                <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                  {t('settings.providers.custom.dsh.apiKeyHelp')}
+                </span>
+              </div>
+            ) : (
+              <span className="text-12 leading-snug text-[var(--error-fg)]">
+                {t('settings.providers.custom.dsh.authRequired')}
               </span>
             )}
           </div>

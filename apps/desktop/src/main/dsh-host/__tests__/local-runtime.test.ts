@@ -49,7 +49,9 @@ function tarArchive(entries: readonly { path: string; body: Buffer; mode?: numbe
     if (padding) chunks.push(Buffer.alloc(padding));
   }
   chunks.push(Buffer.alloc(TAR_BLOCK_BYTES), Buffer.alloc(TAR_BLOCK_BYTES));
-  return gzipSync(Buffer.concat(chunks), { mtime: 0 });
+  // Node's supported gzip options deliberately do not expose a mutable mtime;
+  // current Node emits deterministic test bytes without an unsupported cast.
+  return gzipSync(Buffer.concat(chunks));
 }
 
 function fixturePin(entries: readonly { path: string; body: Buffer; mode?: number }[], archive: Buffer): DshLocalRuntimePin {

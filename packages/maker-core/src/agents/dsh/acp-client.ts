@@ -55,9 +55,27 @@ export interface DshAcpClientOptions {
 export interface DshAcpSessionClient {
   start(): void;
   initialize(protocolVersion?: number): Promise<DshAcpInitializeResult>;
-  createSession(input: { cwd: string; mcpServers?: readonly unknown[] }): Promise<{ sessionId: string }>;
+  createSession(input: {
+    cwd: string;
+    mcpServers?: readonly unknown[];
+  }): Promise<{ sessionId: string; configOptions?: unknown }>;
   listSessions(): Promise<unknown>;
-  resumeSession(input: { sessionId: string; cwd: string }): Promise<unknown>;
+  resumeSession(input: {
+    sessionId: string;
+    cwd: string;
+    /** A Main-registered MCP set is fixed for this native resume request. */
+    mcpServers?: readonly unknown[];
+  }): Promise<{ configOptions?: unknown }>;
+  /**
+   * Apply only one value already advertised by this exact native session.
+   * Desktop Main owns that allowlist and keeps the opaque ACP value out of
+   * maker-core and the Renderer.
+   */
+  setSessionConfigOption(input: {
+    sessionId: string;
+    configId: 'model' | 'reasoning_effort';
+    value: string;
+  }): Promise<{ configOptions?: unknown }>;
   prompt(input: { sessionId: string; prompt: readonly unknown[] }): Promise<DshAcpPromptResult>;
   cancel(sessionId: string): Promise<void>;
   closeSession(sessionId: string): Promise<unknown>;
@@ -106,6 +124,18 @@ function isAcpMethod(value: unknown): value is string {
 
 function isUsableSessionId(value: unknown): value is string {
   return isSafeProtocolString(value, MAX_SESSION_ID_LENGTH);
+}
+
+/** ACP select values are opaque and may intentionally be the empty default value. */
+function isUsableConfigValue(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length <= 16 * 1024 &&
+    ![...value].some((character) => {
+      const code = character.codePointAt(0);
+      return code === undefined || code <= 0x1f || code === 0x7f;
+    })
+  );
 }
 
 /**
@@ -182,7 +212,10 @@ export class DshAcpClient implements DshAcpSessionClient {
     };
   }
 
-  async createSession(input: { cwd: string; mcpServers?: readonly unknown[] }): Promise<{ sessionId: string }> {
+  async createSession(input: {
+    cwd: string;
+    mcpServers?: readonly unknown[];
+  }): Promise<{ sessionId: string; configOptions?: unknown }> {
     const result = await this.request<unknown>('session/new', {
       cwd: input.cwd,
       mcpServers: input.mcpServers ?? [],
@@ -190,15 +223,53 @@ export class DshAcpClient implements DshAcpSessionClient {
     if (!isRecord(result) || !isUsableSessionId(result.sessionId)) {
       this.protocolViolation('DSH ACP session/new omitted a usable sessionId');
     }
-    return { sessionId: result.sessionId };
+    return {
+      sessionId: result.sessionId,
+      ...(Object.hasOwn(result, 'configOptions') ? { configOptions: result.configOptions } : {}),
+    };
   }
 
   listSessions(): Promise<unknown> {
     return this.request('session/list', {});
   }
 
-  resumeSession(input: { sessionId: string; cwd: string }): Promise<unknown> {
-    return this.request('session/resume', input);
+  async resumeSession(input: {
+    sessionId: string;
+    cwd: string;
+    mcpServers?: readonly unknown[];
+  }): Promise<{ configOptions?: unknown }> {
+    const { sessionId, cwd, mcpServers } = input;
+    // Retain the pre-MCP wire shape when Main did not register any endpoint.
+    // The DSH runtime fixes MCP configuration at session/new or session/resume.
+    const result = await this.request<unknown>(
+      'session/resume',
+      mcpServers === undefined ? { sessionId, cwd } : { sessionId, cwd, mcpServers },
+    );
+    if (!isRecord(result)) {
+      this.protocolViolation('DSH ACP session/resume returned an invalid response');
+    }
+    return Object.hasOwn(result, 'configOptions') ? { configOptions: result.configOptions } : {};
+  }
+
+  async setSessionConfigOption(input: {
+    sessionId: string;
+    configId: 'model' | 'reasoning_effort';
+    value: string;
+  }): Promise<{ configOptions?: unknown }> {
+    if (!isUsableSessionId(input.sessionId)) {
+      throw new Error('DSH ACP session/set_config_option requires a usable sessionId');
+    }
+    if (input.configId !== 'model' && input.configId !== 'reasoning_effort') {
+      throw new Error('DSH ACP session/set_config_option received an unsupported configId');
+    }
+    if (!isUsableConfigValue(input.value)) {
+      throw new Error('DSH ACP session/set_config_option received an invalid config value');
+    }
+    const result = await this.request<unknown>('session/set_config_option', input);
+    if (!isRecord(result)) {
+      this.protocolViolation('DSH ACP session/set_config_option returned an invalid response');
+    }
+    return Object.hasOwn(result, 'configOptions') ? { configOptions: result.configOptions } : {};
   }
 
   async prompt(input: { sessionId: string; prompt: readonly unknown[] }): Promise<DshAcpPromptResult> {

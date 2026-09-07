@@ -173,8 +173,11 @@ describe('ChatInput model source switching wiring', () => {
       'const intentTargetAgent = agentSwitchIntent?.target ?? null;',
     );
     expect(chatInputSource).toContain(
-      'const currentAgent = intentTargetAgent ?? vendorKeyToAgentKind(vendorKey);',
+      'const currentAgent = intentTargetAgent ?? vendorKeyToAgentKind(isDshManagedRuntime ? undefined : vendorKey);',
     );
+    // DSH is selected through New Maker but intentionally has no generic
+    // provider/model identity. It must never inherit a generic model panel.
+    expect(chatInputSource).toContain('isDshManagedRuntime ? undefined : vendorKey');
   });
 
   /**

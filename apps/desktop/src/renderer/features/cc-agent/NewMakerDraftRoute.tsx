@@ -69,6 +69,7 @@ import { resolveDeviceLinkSubmission } from './deviceLinkCreateArgs';
 import { commitRemoteSessionHandoff } from './remoteSessionHandoff';
 import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
 import { getBranchName } from '../../../shared/managedWorktreeBranches';
+import { DSH_MANAGED_RUNTIME_MODEL_ID } from '../../../shared/dshSession';
 import { AgentSelect } from '@/components/new-chat/AgentSelect';
 import { TopRightChipStack, TopRightChipStackProvider } from '@/components/chat/TopRightChipStack';
 import { useProportionalWidth } from '@/hooks/useProportionalWidth';
@@ -168,7 +169,11 @@ import {
   type DeferredUiAssignment,
 } from './deferredUiAssignment';
 import { CrossAgentConvertDialog } from '@/components/ui/cross-agent-convert-dialog';
-import type { SelectableVendor } from '@/lib/agentVendors';
+import {
+  NEW_MAKER_SELECTABLE_VENDORS,
+  type NewMakerSelectableVendor,
+  type SelectableVendor,
+} from '@/lib/agentVendors';
 import {
   ChevronDown,
   Code2,
@@ -769,11 +774,18 @@ export function NewMakerDraftRoute() {
    * 一格。改动前把 vendor 塞进快照再在失效效应里比,切走引擎会把**上一个引擎**的锚点判失效
    * 并清掉 —— 持久化之后那等于一切引擎只能记住最后一次选择。
    */
-  const draftFavoriteAnchor = useDraftFavoriteAnchor(draft.vendor);
   const persistedAgentKind = draft.vendor;
+  const isDshDraft = persistedAgentKind === 'dsh';
+  // DSH is not part of model favorites; use a stable ordinary slot solely to
+  // satisfy hook ordering, then never project the result into the DSH UI.
+  const draftFavoriteAnchor = useDraftFavoriteAnchor(
+    persistedAgentKind === 'dsh' ? 'cc' : persistedAgentKind,
+  );
   const authVendor = persistedAgentKind;
+  const modelRouteVendor: SelectableVendor =
+    persistedAgentKind === 'dsh' ? 'cc' : persistedAgentKind;
   const capabilityAgentKind =
-    persistedAgentKind === 'cc' ? 'claude-code' : persistedAgentKind;
+    modelRouteVendor === 'cc' ? 'claude-code' : modelRouteVendor;
 
   // 品牌区跟随当前主题；icon / logo 的固定布局统一由 ThemeBrandLockup 负责。
   const [activeColorTheme, setActiveColorTheme] = useState<ColorTheme | null>(() =>
@@ -915,6 +927,10 @@ export function NewMakerDraftRoute() {
   // 下面 isDeviceLinkDraft 与 create 分支的真值收窄对 undefined 同样成立)。
   const effectiveDeviceLinkDeviceId = draft.deviceLinkDeviceId ?? undefined;
   const effectiveDeviceLinkDeviceName = draft.deviceLinkDeviceName;
+  // DSH is a local, fixed Helper runtime in the current release scope. It is
+  // never projected to SSH or device-link targets, even if their catalog has a
+  // similarly named entry.
+  const dshAllowedAtTarget = !isRemoteProjectDraft && !effectiveDeviceLinkDeviceId;
   // 入口门控:只在 runtime 已注册的 agent 上开放创建入口(Pi 二进制缺失时 buildPiAgent 返回
   // null,agent map 无 pi,但模型目录仍投影 Pi → 需按 maker:list-available-agents 过滤,
   // 否则一路创建到 requireAgent 的 not-registered 报错,codex review P2)。远程草稿以被控端
@@ -922,10 +938,20 @@ export function NewMakerDraftRoute() {
   const { availableVendors, loaded: availableAgentsLoaded } = useAvailableAgents(
     effectiveDeviceLinkDeviceId,
   );
-  const hiddenSwitcherVendors = useMemo<SelectableVendor[]>(() => {
-    if (!availableAgentsLoaded) return [];
-    return (['cc', 'codex', 'pi'] as const).filter((vendor) => !availableVendors.has(vendor));
-  }, [availableAgentsLoaded, availableVendors]);
+  const dshAvailableForDraft =
+    dshAllowedAtTarget && availableAgentsLoaded && availableVendors.has('dsh');
+  const hiddenSwitcherVendors = useMemo<NewMakerSelectableVendor[]>(() => {
+    return NEW_MAKER_SELECTABLE_VENDORS.filter((vendor) =>
+      vendor === 'dsh'
+        ? !dshAvailableForDraft
+        : availableAgentsLoaded && !availableVendors.has(vendor),
+    );
+  }, [availableAgentsLoaded, availableVendors, dshAvailableForDraft]);
+  const availableDraftVendors = useMemo(() => {
+    const result = new Set(availableVendors);
+    if (!dshAllowedAtTarget) result.delete('dsh');
+    return result;
+  }, [availableVendors, dshAllowedAtTarget]);
   /**
    * 「这份草稿要建到对端设备上」—— 只看 deviceId,**不再要求 workingDir**(#807)。
    *
@@ -1037,7 +1063,21 @@ export function NewMakerDraftRoute() {
    * 免得又出现「只堵了一半」。
    */
   const guardedAttachmentState = useMemo(() => {
-    if (!isDeviceLinkDraft) return attachmentState;
+    if (!isDeviceLinkDraft && !isDshDraft) return attachmentState;
+    if (isDshDraft) {
+      return {
+        ...attachmentState,
+        addFiles: async () => {
+          toast.warning(t('newChat.dsh.textOnlyInput'));
+        },
+        addClipboardImage: async () => {
+          toast.warning(t('newChat.dsh.textOnlyInput'));
+        },
+        addFolderPath: () => {
+          toast.warning(t('newChat.dsh.textOnlyInput'));
+        },
+      };
+    }
     return {
       ...attachmentState,
       addFiles: async (fileList: FileList | readonly File[]) => {
@@ -1073,7 +1113,7 @@ export function NewMakerDraftRoute() {
         if (passed.length > 0) await attachmentState.addFiles(passed);
       },
     };
-  }, [isDeviceLinkDraft, attachmentState, t]);
+  }, [isDeviceLinkDraft, isDshDraft, attachmentState, t]);
   /**
    * 「远程草稿绝不携带控制端路径附件」的**收敛器** —— 兜住所有按路径逐个堵会漏掉的入口。
    *
@@ -1100,7 +1140,11 @@ export function NewMakerDraftRoute() {
   }, [isDeviceLinkDraft, attachmentState.attachments, attachmentState.removeFile, t]);
   // 零可用模型引导卡:device-link 草稿不出(连接态在被控端,本机替它连不上)。
   const providerOnboarding = useProviderOnboarding();
-  const showProviderOnboardingCard = providerOnboarding.visible && !isDeviceLinkDraft;
+  // DSH's provider/key route is Main-owned and deliberately not represented by
+  // the generic model-provider onboarding flow. Showing that card here would
+  // imply that a renderer-side provider selection can configure DSH.
+  const showProviderOnboardingCard =
+    providerOnboarding.visible && !isDeviceLinkDraft && !isDshDraft;
   const effectiveExtraDirs = draft.extraDirs;
   const effectiveWritableDirs = draft.writableDirs;
   const effectiveCollab = collab;
@@ -1297,7 +1341,8 @@ export function NewMakerDraftRoute() {
   // 旧面板是「先选引擎再选模型」,所以只要没真正启用统一面板,就必须把工具条上的引擎下拉
   // 还回来 —— 否则那条链路上根本换不了引擎(只按 capable 撤掉时,默认形态下的新建草稿
   // 就彻底没有换引擎入口)。统一面板真启用时不注入(引擎跟着模型走)。
-  const unifiedModelPanelEnabled = !effectiveDeviceLinkDeviceId || !deviceProvidersUnsupported;
+  const unifiedModelPanelEnabled =
+    !isDshDraft && (!effectiveDeviceLinkDeviceId || !deviceProvidersUnsupported);
   const modelPickerLayoutPref = useModelPickerLayout();
   const unifiedModelPanelActive = unifiedModelPanelEnabled && modelPickerLayoutPref !== 'original';
   const remoteModelListStatus = !isDeviceLinkDraft
@@ -2019,7 +2064,9 @@ export function NewMakerDraftRoute() {
   // device-link:fast 取镜像值(deviceLinkInitial.fastMode,seed 时已按被控端拍平能力校准),但再叠
   // 一道 per-provider 的 supportsFastMode gate —— 让 per-provider 判定对"显示+发送"都权威,堵住 seed
   // 拍平值在未来分叉下泄漏(seed 函数 deviceLinkDraftDefaults 保持纯/不依赖 ProviderView)。本地走原逻辑。
-  const effectiveFastMode = isDeviceLinkDraft
+  const effectiveFastMode = isDshDraft
+    ? false
+    : isDeviceLinkDraft
     ? supportsFastMode
       ? (deviceLinkInitial?.fastMode ?? false)
       : false
@@ -2028,22 +2075,27 @@ export function NewMakerDraftRoute() {
       : false;
   // 计划模式草稿态:仅本地草稿支持(device-link 远程草稿 v1 不透传,入口也不显示;
   // 创建后进会话仍可经运行时隧道切换)。
-  const effectivePlanMode = isDeviceLinkDraft ? false : chatPrefs.planMode === true;
+  const effectivePlanMode = isDshDraft || isDeviceLinkDraft ? false : chatPrefs.planMode === true;
 
   // 选中模型 + effort:device-link 用镜像 holder(deviceLinkInitial,被控端草稿值已按 capabilities
   // 校准);本地草稿用 chatPrefs(逐字节不变)。device-link 在 holder seed 完成前(等隧道 / 能力)
   // 极早期暂用 chatPrefs,随后被 deviceLinkInitial 取代。
   const { model: draftInitialModel, effort: draftInitialEffort } = useMemo(() => {
+    if (isDshDraft) {
+      return { model: DSH_MANAGED_RUNTIME_MODEL_ID, effort: 'medium' as Effort };
+    }
     if (isDeviceLinkDraft && deviceLinkInitial) {
       return { model: deviceLinkInitial.model, effort: deviceLinkInitial.effort };
     }
     // 校准在 calibratedDraftModel 一处完成,effort / fast / 来源都已按它推导 —— 这里
     // 直接用,不再单独算一次(否则又会出现模型与能力参数不同源的分叉)。
     return { model: calibratedDraftModel, effort: localDraftEffort };
-  }, [isDeviceLinkDraft, deviceLinkInitial, calibratedDraftModel, localDraftEffort]);
+  }, [isDshDraft, isDeviceLinkDraft, deviceLinkInitial, calibratedDraftModel, localDraftEffort]);
 
   // 远程草稿的权限档 / 来源同样取镜像 holder;本地走 chatPrefs。
-  const chatInitialPermissionMode = isDeviceLinkDraft
+  const chatInitialPermissionMode = isDshDraft
+    ? 'auto'
+    : isDeviceLinkDraft
     ? (deviceLinkInitial?.permissionMode ?? chatPrefs.permissionMode)
     : chatPrefs.permissionMode;
   // 显式来源只在**仍是当前生效来源**时才带进建会话。
@@ -2091,6 +2143,7 @@ export function NewMakerDraftRoute() {
    * 目录尚未加载完时可能解析为 null,无害:发送 / 建目标都被 deviceProvidersLoading 三重 gate 挡着。
    */
   const chatInitialProviderId = useMemo<string | null>(() => {
+    if (isDshDraft) return null;
     if (!isDeviceLinkDraft) return localProviderIdForDraft;
     return effectiveSourceIdForModel(
       deviceProviders,
@@ -2099,6 +2152,7 @@ export function NewMakerDraftRoute() {
       capabilityAgentKind,
     );
   }, [
+    isDshDraft,
     isDeviceLinkDraft,
     localProviderIdForDraft,
     deviceProviders,
@@ -2368,6 +2422,10 @@ export function NewMakerDraftRoute() {
     async (target: RemoteProjectTarget) => {
       // vendor 由外层 VendorSegmentedSwitcher (draft.vendor) 单一决策 —— dialog 不再让用户选。
       const draftVendor = draft.vendor;
+      if (draftVendor === 'dsh') {
+        toast.warning(t('newChat.dsh.managedRuntime'));
+        return;
+      }
 
       if (target.kind === 'device-link') {
         // device-link:**不**像 SSH 立即建会话(会在被控端留空会话)。改为把当前草稿指向该被控
@@ -2599,7 +2657,7 @@ export function NewMakerDraftRoute() {
   // 当前 vendor 的 prefs 已由 patchActivePrefs 同步进草稿；这里只切到新 vendor。
   // ChatInput 的 initial* 由父级传入,vendor 切换后 ChatInput 重新 mount(key 变化)
   // 自动 pickup 新 vendor 的 lastByVendor 值。
-  const handleVendorChange = useCallback((next: SelectableVendor) => {
+  const handleVendorChange = useCallback((next: NewMakerSelectableVendor) => {
     markDefaultTupleCustomized();
     switchVendor(next);
   }, []);
@@ -2609,8 +2667,8 @@ export function NewMakerDraftRoute() {
   // 只在已加载可用性后收敛;fallback 一定可见,收敛一次即稳定(switchVendor 同值早返,不成环)。
   useEffect(() => {
     if (!availableAgentsLoaded) return;
-    fallbackUnavailableVendor(availableVendors);
-  }, [availableAgentsLoaded, availableVendors]);
+    fallbackUnavailableVendor(availableDraftVendors);
+  }, [availableAgentsLoaded, availableDraftVendors]);
 
   // ─── 用户在 ChatInput 改 model/effort/permission 后,落进当前 vendor 的 prefs ──
   // 权限 / 计划模式不是默认模型 tuple：按界面 Harness 的槽写，但不改变 storage 中最新
@@ -3532,9 +3590,13 @@ export function NewMakerDraftRoute() {
           if (isDeviceLinkDraft && !isCurrentDataOwner()) return;
           // device-link:远程草稿就绪态以被控端为准(传 deviceId 走隧道查被控端 maker:agent:status);
           // 本地草稿 effectiveDeviceLinkDeviceId 为 undefined → 仍走控制端本机就绪检查(行为不变)。
-          const { proceed } = await vendorAuthGate.checkAndConfirm(authVendor, {
-            deviceId: effectiveDeviceLinkDeviceId,
-          });
+          const proceed = isDshDraft
+            ? true
+            : (
+                await vendorAuthGate.checkAndConfirm(authVendor, {
+                  deviceId: effectiveDeviceLinkDeviceId,
+                })
+              ).proceed;
           if (isDeviceLinkDraft && !isCurrentDataOwner()) return;
           if (!proceed) return;
 
@@ -3701,6 +3763,10 @@ export function NewMakerDraftRoute() {
             }
             // 提出来存一份:交接收尾要按**实际提交的** model / effort / permission / workspaceKind
             // 组装临时会话行(见 commitRemoteSessionHandoff),不能再各自推一遍。
+            if (persistedAgentKind === 'dsh') {
+              toast.warning(t('newChat.dsh.managedRuntime'));
+              return false;
+            }
             const createArgs = resolveDeviceLinkSubmission({
               agentKind: persistedAgentKind,
               // 远程 worktree:workingDir 换成刚建好的 worktree 路径(真实存在,被控端
@@ -3855,7 +3921,7 @@ export function NewMakerDraftRoute() {
           // agent 启动时看到的工作区已是迁移后的状态。fail-soft：检测错误只 warn，不阻塞 send。
           try {
             const wd = effectiveWorkingDir;
-            if (wd && !isRemoteProjectDraft && persistedAgentKind !== 'pi') {
+            if (wd && !isRemoteProjectDraft && persistedAgentKind !== 'pi' && !isDshDraft) {
               const r = await crossAgentConvertService.detect(
                 wd,
                 persistedAgentKind === 'cc' ? 'claude-code' : persistedAgentKind,
@@ -3922,7 +3988,14 @@ export function NewMakerDraftRoute() {
               return;
             }
             // 草稿里选中的那条收藏跟着会话走(见 carryDraftFavoriteAnchorToSession)。
-            carryDraftFavoriteAnchorToSession(newSession.id, persistedAgentKind, model, providerId);
+            if (persistedAgentKind !== 'dsh') {
+              carryDraftFavoriteAnchorToSession(
+                newSession.id,
+                persistedAgentKind,
+                model,
+                providerId,
+              );
+            }
             // 计划模式是一次性选择:随本次发送被消耗,草稿勾选同步熄灭,
             // 下一次 New Maker 不延续。
             if (effectivePlanMode) patchActivePrefs({ planMode: false });
@@ -4181,7 +4254,14 @@ export function NewMakerDraftRoute() {
             return;
           }
           // 草稿里选中的那条收藏跟着会话走(见 carryDraftFavoriteAnchorToSession)。
-          carryDraftFavoriteAnchorToSession(newSession.id, persistedAgentKind, model, providerId);
+          if (persistedAgentKind !== 'dsh') {
+            carryDraftFavoriteAnchorToSession(
+              newSession.id,
+              persistedAgentKind,
+              model,
+              providerId,
+            );
+          }
           // 计划模式是一次性选择:随本次发送被消耗,草稿勾选同步熄灭。
           if (effectivePlanMode) patchActivePrefs({ planMode: false });
           // 本机/SSH 首条在下面直接 sendMessage,createOpts 读 chat store 的
@@ -4189,7 +4269,11 @@ export function NewMakerDraftRoute() {
           // 必须先确定性 seed store,否则勾了计划模式的首条可能以 planMode:false 发出,
           // SSH 首条会把远端路径当本机 workdir(worktree 路径同款 seed)。
           makerChatStore.setSessionRuntime(newSession.id, {
-            agentKind: capabilityAgentKind,
+            // capabilityAgentKind is deliberately a three-vendor lookup key
+            // for the generic model catalog. It is not the session identity:
+            // projecting it here would turn a successfully created DSH task
+            // into a Claude Code send path before its first prompt.
+            agentKind: persistedAgentKind === 'cc' ? 'claude-code' : persistedAgentKind,
             fastMode: effectiveFastMode,
             planModeEnabled: effectivePlanMode,
             remoteHostId: workingDir ? (effectiveRemoteHostId ?? null) : null,
@@ -4424,6 +4508,7 @@ export function NewMakerDraftRoute() {
       dataOwnerId,
       effectiveExtraDirs,
       authVendor,
+      isDshDraft,
       persistedAgentKind,
       effectiveFastMode,
       // 计划模式一次性开关: handleSend 内读取 + 消耗(patchActivePrefs 清勾选),
@@ -4563,9 +4648,13 @@ export function NewMakerDraftRoute() {
         ) {
           throw new Error(t('ccAgent.draft.deviceStillLoading'));
         }
-        const { proceed } = await vendorAuthGate.checkAndConfirm(authVendor, {
-          deviceId: effectiveDeviceLinkDeviceId,
-        });
+        const proceed = isDshDraft
+          ? true
+          : (
+              await vendorAuthGate.checkAndConfirm(authVendor, {
+                deviceId: effectiveDeviceLinkDeviceId,
+              })
+            ).proceed;
         if (!proceed) return; // 用户取消授权:弹窗关闭即可,不算错误。
         if (isDeviceLinkDraft) {
           // partial state 防御:只要 deviceId 就够 —— #807 起「选了设备但没选项目」是合法状态
@@ -4672,6 +4761,9 @@ export function NewMakerDraftRoute() {
             }
           }
           // 与 handleSend 同口径先存一份 args:临时行要按实际提交的值组装(见 commitRemoteSessionHandoff)。
+          if (persistedAgentKind === 'dsh') {
+            throw new Error(t('newChat.dsh.managedRuntime'));
+          }
           const createArgs = resolveDeviceLinkSubmission({
             agentKind: persistedAgentKind,
             // 无项目 → 不传,由 workingDir 派生 workspaceKind:'dialogue'。
@@ -4912,12 +5004,14 @@ export function NewMakerDraftRoute() {
           throw new Error(t('ccAgent.draft.createSessionFailed'));
         }
         // 草稿里选中的那条收藏跟着会话走(见 carryDraftFavoriteAnchorToSession)。
-        carryDraftFavoriteAnchorToSession(
-          newSession.id,
-          persistedAgentKind,
-          draftInitialModel,
-          chatInitialProviderId ?? null,
-        );
+        if (persistedAgentKind !== 'dsh') {
+          carryDraftFavoriteAnchorToSession(
+            newSession.id,
+            persistedAgentKind,
+            draftInitialModel,
+            chatInitialProviderId ?? null,
+          );
+        }
         if (useLocalGoalWorktree) {
           const baseRepo = selectedWorktree.baseRepo!;
           await prepareLocalGoalWorktree({
@@ -5042,6 +5136,7 @@ export function NewMakerDraftRoute() {
       deviceProvidersLoading,
       vendorAuthGate,
       authVendor,
+      isDshDraft,
       effectiveDeviceLinkDeviceId,
       effectiveDeviceLinkDeviceName,
       effectiveWorkingDir,
@@ -5074,9 +5169,10 @@ export function NewMakerDraftRoute() {
   );
 
   const handleBeforeVoiceInputStart = useCallback(async () => {
+    if (isDshDraft) return true;
     const { proceed } = await vendorAuthGate.checkAndConfirm('codex', { purpose: 'voice-input' });
     return proceed;
-  }, [vendorAuthGate]);
+  }, [isDshDraft, vendorAuthGate]);
 
   const handleQuickStart = useCallback(
     (labelKey: (typeof createAgentQuickStarts)[number]['labelKey']) => {
@@ -5129,6 +5225,7 @@ export function NewMakerDraftRoute() {
         onDrop={(e) => {
           pageDragCounterRef.current = 0;
           setPageDragOver(false);
+          if (isDshDraft) return;
           // .cindy / .cshare 已被窗口级 capture 接管(装入 / 导入链路),不当附件消费。
           if (isGlobalDropIntercepted(e.nativeEvent)) return;
           const ghostMediaUri = getGhostMediaUriFromDataTransfer(e.dataTransfer);
@@ -5315,6 +5412,7 @@ export function NewMakerDraftRoute() {
                     externalDragOver={pageDragOver}
                     visualVariant="create-agent"
                     compactToolbar
+                    disabled={wtCreating || (isDshDraft && !dshAvailableForDraft)}
                     placeholder={t('newChat.chatInput.createAgentPlaceholder')}
                     sessionId={undefined}
                     initialWorkingDir={effectiveWorkingDir}
@@ -5326,9 +5424,9 @@ export function NewMakerDraftRoute() {
                     initialPermissionMode={chatInitialPermissionMode}
                     initialProviderId={chatInitialProviderId}
                     planModeEnabled={effectivePlanMode}
-                    onPlanModeChange={isDeviceLinkDraft ? undefined : handlePlanModeChange}
+                    onPlanModeChange={isDeviceLinkDraft || isDshDraft ? undefined : handlePlanModeChange}
                     fastMode={effectiveFastMode}
-                    onFastModeChange={handleFastModeChange}
+                    onFastModeChange={isDshDraft ? undefined : handleFastModeChange}
                     onWorkingDirChange={handleWorkingDirChange}
                     onModelDidChange={handleModelDidChange}
                     onEffortDidChange={handleEffortDidChange}
@@ -5345,10 +5443,11 @@ export function NewMakerDraftRoute() {
                     // 降级、以及形态偏好停在 'original'(默认档)—— 那两路 composer 都回落
                     // 旧面板,引擎下拉必须一起回来。
                     middleToolbarSlot={
-                      unifiedModelPanelActive ? undefined : (
+                      unifiedModelPanelActive && !isDshDraft ? undefined : (
                         <AgentSelect
                           value={draft.vendor}
                           onChange={handleVendorChange}
+                          includeDsh
                           visualVariant="create-agent"
                           className="shrink-0"
                           disabled={wtCreating}
@@ -5365,7 +5464,7 @@ export function NewMakerDraftRoute() {
                     // 走它而非简单 worker popover。ON 态点击 onChange(enabled:false) 关闭协同。
                     // createSession 后按本次策略校验结果用 workerConfig 拉起 Worker。
                     collaboration={
-                      collabPolicyEligible
+                      !isDshDraft && collabPolicyEligible
                         ? {
                             enabled: effectiveCollab.enabled,
                             worker: effectiveCollab.worker,
@@ -5401,10 +5500,11 @@ export function NewMakerDraftRoute() {
                         : undefined
                     }
                     compactMiddleToolbarSlot={
-                      unifiedModelPanelActive ? undefined : (
+                      unifiedModelPanelActive && !isDshDraft ? undefined : (
                         <AgentSelect
                           value={draft.vendor}
                           onChange={handleVendorChange}
+                          includeDsh
                           iconOnly
                           visualVariant="create-agent"
                           className="shrink-0"
@@ -5429,21 +5529,29 @@ export function NewMakerDraftRoute() {
                     // 不传 onChange 时 ExtraDirsButton 直接不渲染引用目录段(「新建目标」/ 计划模式 /
                     // Plugin 入口不受影响)。进入远程设备时 extraDirs 已被清空,不会留下无法删除的残留。
                     // 恢复这个能力要把 picker 路由到对端(设备域浏览器已有 fs:list-dir),见 follow-up。
-                    onExtraDirsChange={isDeviceLinkDraft ? undefined : handleExtraDirsChange}
+                    onExtraDirsChange={
+                      isDeviceLinkDraft || isDshDraft ? undefined : handleExtraDirsChange
+                    }
                     onWritableDirsChange={
-                      isDeviceLinkDraft || isRemoteProjectDraft
+                      isDeviceLinkDraft || isRemoteProjectDraft || isDshDraft
                         ? undefined
                         : handleWritableDirsChange
                     }
                     // 首页「新建目标」入口:草稿态没有 sessionId,由本组件 createSession→setGoal。
                     // ChatInput 把输入框当前文字传上来作默认目标内容。
-                    onNewGoal={(text) => {
-                      setNewGoalInitialObjective(text);
-                      setNewGoalOpen(true);
-                    }}
-                    rememberedEffortByModel={isDeviceLinkDraft ? undefined : draft.effortByModel}
+                    onNewGoal={
+                      isDshDraft
+                        ? undefined
+                        : (text) => {
+                            setNewGoalInitialObjective(text);
+                            setNewGoalOpen(true);
+                          }
+                    }
+                    rememberedEffortByModel={
+                      isDeviceLinkDraft || isDshDraft ? undefined : draft.effortByModel
+                    }
                     onRememberedEffortChange={
-                      isDeviceLinkDraft ? undefined : handleRememberedEffortChange
+                      isDeviceLinkDraft || isDshDraft ? undefined : handleRememberedEffortChange
                     }
                   />
                 </div>
@@ -5474,6 +5582,14 @@ export function NewMakerDraftRoute() {
                           })}
                     </span>
                   </div>
+                )}
+                {isDshDraft && (
+                  <p
+                    data-testid="dsh-managed-runtime-notice"
+                    className="mt-3 max-w-2xl self-center text-center text-12 leading-5 text-[var(--text-secondary)]"
+                  >
+                    {t('newChat.dsh.managedRuntimeDetails')}
+                  </p>
                 )}
                 {/* 零可用模型 → 快速开始换成「连接供应商」引导卡(互斥:此时快捷入口
                     只会把 prompt 填进发不出去的输入框;device-link 草稿由上方 chip 负责,

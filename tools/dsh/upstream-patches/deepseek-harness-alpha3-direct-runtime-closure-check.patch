@@ -1,0 +1,18 @@
+diff --git a/scripts/build-exe-for-python-sdk.ts b/scripts/build-exe-for-python-sdk.ts
+index 0000000..1111111 100644
+--- a/scripts/build-exe-for-python-sdk.ts
++++ b/scripts/build-exe-for-python-sdk.ts
+@@ -269,7 +269,10 @@ class SingleExeBuild {
+-
++
+  /** Verify the closure before compiling or packaging. */
+   async verifyClosure(): Promise<void> {
+-    await this.runPnpm('runtime dependency closure', ['run', 'verify-runtime-closure'])
++    await this.run('runtime dependency closure', process.execPath, [
++      resolve(root, 'node_modules', '.pnpm', 'tsx@4.22.4', 'node_modules', 'tsx', 'dist', 'cli.mjs'),
++      'scripts/verify-runtime-closure.ts',
++    ])
+  }
+-
++
+  /** Build all package artifacts unless `--skip-build` was passed. */

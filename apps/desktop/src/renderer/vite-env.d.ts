@@ -4308,7 +4308,7 @@ interface ElectronAPI {
         permissionMode?: string;
         fastMode?: boolean;
         planModeEnabled?: boolean;
-        agentKind?: 'cc' | 'codex' | 'pi';
+        agentKind?: import('@/lib/ccAgent.types').AgentKind;
         orcaRole?: import('@/lib/ccAgent.types').OrcaRole | null;
         /** 附加只读引用目录列表 (绝对路径); main 端 mapper 会 JSON.stringify 后写库。 */
         extraDirs?: string[];
@@ -4791,6 +4791,40 @@ interface ElectronAPI {
     listAvailableAgents: () => Promise<Array<'claude-code' | 'codex' | 'pi' | 'dsh'>>;
     onAgentsChanged: (cb: () => void) => () => void;
     getCapabilities: (agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh') => Promise<unknown>;
+    /** Cindy-owned DSH plan/todo state; local desktop only, never ACP data. */
+    readDshActivity: (
+      sessionId: string,
+    ) => Promise<import('../shared/dshActivity').DshActivityReadResult>;
+    createDshPlan: (
+      sessionId: string,
+      label: string,
+    ) => Promise<import('../shared/dshActivity').DshActivityMutationResult>;
+    createDshTodo: (
+      sessionId: string,
+      planActivityId: string,
+      label: string,
+    ) => Promise<import('../shared/dshActivity').DshActivityMutationResult>;
+    completeDshActivity: (
+      sessionId: string,
+      activityId: string,
+    ) => Promise<import('../shared/dshActivity').DshActivityMutationResult>;
+    cancelDshActivity: (
+      sessionId: string,
+      activityId: string,
+    ) => Promise<import('../shared/dshActivity').DshActivityMutationResult>;
+    /** Live DSH choices are opaque Main-issued tokens, never ACP values. */
+    getDshRuntimeConfiguration: (
+      sessionId: string,
+    ) => Promise<import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationSnapshot>;
+    setDshRuntimeConfiguration: (
+      sessionId: string,
+      controlId: import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationId,
+      choiceId: string,
+    ) => Promise<import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationSnapshot>;
+    /** Display-safe state only: no local pathname or bookmark crosses this API. */
+    getDshExistingHome: () => Promise<import('../shared/dshExistingHome').DshExistingHomeProjection>;
+    selectDshExistingHome: () => Promise<import('../shared/dshExistingHome').DshExistingHomeProjection>;
+    resetDshExistingHome: () => Promise<import('../shared/dshExistingHome').DshExistingHomeProjection>;
     /** workflow 逐 agent 进度树(只读);读不到 / 解析失败返回 null → 回退 workflow 级卡片。 */
     getWorkflowProgress: (
       sessionId: string,

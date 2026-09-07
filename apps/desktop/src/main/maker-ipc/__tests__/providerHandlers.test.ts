@@ -49,7 +49,10 @@ const validConfig: CustomProviderConfig = {
   id: 'openrouter',
   name: 'OpenRouter',
   runtimes: {
-    codex: { baseUrl: 'https://openrouter.ai/api/v1', models: [{ id: 'meta/llama-4', name: 'Llama 4' }] },
+    codex: {
+      baseUrl: 'https://openrouter.ai/api/v1',
+      models: [{ id: 'meta/llama-4', name: 'Llama 4' }],
+    },
   },
 };
 
@@ -219,12 +222,15 @@ describe('provider:list IPC handler', () => {
         },
       },
     } as unknown as ProviderView;
-    registerProviderHandlers(harness, makeDeps({
-      listProviders: async () => [provider],
-      isTrustedSender: () => false,
-    }));
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        listProviders: async () => [provider],
+        isTrustedSender: () => false,
+      }),
+    );
 
-    const result = await harness.invoke(MAKER_INVOKE.PROVIDER_LIST) as {
+    const result = (await harness.invoke(MAKER_INVOKE.PROVIDER_LIST)) as {
       providers: ProviderView[];
     };
     expect(result.providers[0].routing.pi?.headerOverride).toBeUndefined();
@@ -247,12 +253,15 @@ describe('provider:list IPC handler', () => {
         },
       },
     } as unknown as ProviderView;
-    registerProviderHandlers(harness, makeDeps({
-      listProviders: async () => [provider],
-      isTrustedSender: () => true,
-    }));
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        listProviders: async () => [provider],
+        isTrustedSender: () => true,
+      }),
+    );
 
-    const result = await harness.invoke(MAKER_INVOKE.PROVIDER_LIST) as {
+    const result = (await harness.invoke(MAKER_INVOKE.PROVIDER_LIST)) as {
       providers: ProviderView[];
     };
     expect(result.providers[0].routing.pi?.headerOverride).toBeUndefined();
@@ -385,7 +394,11 @@ describe('model-disable:set handler', () => {
         disabled: true,
       }),
     ).resolves.toEqual({ ok: true });
-    expect(deps.setModelsDisabled).toHaveBeenCalledWith('xd', ['claude-opus-5', 'chatgpt/gpt-5.5'], true);
+    expect(deps.setModelsDisabled).toHaveBeenCalledWith(
+      'xd',
+      ['claude-opus-5', 'chatgpt/gpt-5.5'],
+      true,
+    );
     expect(deps.broadcastChanged).toHaveBeenCalledOnce();
   });
 
@@ -396,7 +409,10 @@ describe('model-disable:set handler', () => {
 
     await expect(
       harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-        kind: 'model', providerId: 'xd', modelIds: ['seedream-5', 'seedance-2'], disabled: true,
+        kind: 'model',
+        providerId: 'xd',
+        modelIds: ['seedream-5', 'seedance-2'],
+        disabled: true,
       }),
     ).resolves.toEqual({ ok: true });
     expect(deps.setModelsDisabled).toHaveBeenCalledWith('xd', ['seedream-5', 'seedance-2'], true);
@@ -409,17 +425,25 @@ describe('model-disable:set handler', () => {
 
     await expect(
       harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-        kind: 'model', providerId: 'ghost', modelIds: ['claude-opus-5'], disabled: true,
+        kind: 'model',
+        providerId: 'ghost',
+        modelIds: ['claude-opus-5'],
+        disabled: true,
       }),
     ).rejects.toThrow(/INVALID_PARAMS/);
     await expect(
       harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-        kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5', 'not-in-catalog'], disabled: true,
+        kind: 'model',
+        providerId: 'xd',
+        modelIds: ['claude-opus-5', 'not-in-catalog'],
+        disabled: true,
       }),
     ).rejects.toThrow(/INVALID_PARAMS/);
     await expect(
       harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-        kind: 'provider', providerId: 'ghost', disabled: true,
+        kind: 'provider',
+        providerId: 'ghost',
+        disabled: true,
       }),
     ).rejects.toThrow(/INVALID_PARAMS/);
     expect(deps.setModelsDisabled).not.toHaveBeenCalled();
@@ -434,7 +458,10 @@ describe('model-disable:set handler', () => {
 
     await expect(
       harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-        kind: 'model', providerId: 'retired', modelIds: ['gone-model'], disabled: false,
+        kind: 'model',
+        providerId: 'retired',
+        modelIds: ['gone-model'],
+        disabled: false,
       }),
     ).resolves.toEqual({ ok: true });
     expect(deps.setModelsDisabled).toHaveBeenCalledWith('retired', ['gone-model'], false);
@@ -460,10 +487,16 @@ describe('model-disable:set handler', () => {
     registerProviderHandlers(harness, deps);
 
     const disableReq = harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-      kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5'], disabled: true,
+      kind: 'model',
+      providerId: 'xd',
+      modelIds: ['claude-opus-5'],
+      disabled: true,
     });
     const enableReq = harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-      kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5'], disabled: false,
+      kind: 'model',
+      providerId: 'xd',
+      modelIds: ['claude-opus-5'],
+      disabled: false,
     });
     await Promise.resolve();
     expect(order).toEqual([]); // 启用被队列挡在停用后面,而不是抢先落盘
@@ -492,7 +525,10 @@ describe('model-disable:set handler', () => {
 
     await expect(
       harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-        kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5'], disabled: true,
+        kind: 'model',
+        providerId: 'xd',
+        modelIds: ['claude-opus-5'],
+        disabled: true,
       }),
     ).rejects.toThrow(/INTERNAL/);
     expect(deps.setModelsDisabled).not.toHaveBeenCalled();
@@ -501,7 +537,10 @@ describe('model-disable:set handler', () => {
     // 账号稳定时照常放行。
     await expect(
       harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-        kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5'], disabled: true,
+        kind: 'model',
+        providerId: 'xd',
+        modelIds: ['claude-opus-5'],
+        disabled: true,
       }),
     ).resolves.toEqual({ ok: true });
     expect(deps.setModelsDisabled).toHaveBeenCalledOnce();
@@ -512,13 +551,18 @@ describe('model-disable:set handler', () => {
     const deps = makeDeps({
       listProviders: async () => xdCatalog(),
       setModelsDisabled: vi.fn(() => {
-        throw new Error('EACCES: permission denied, rename /Users/x/userData/model-disable-prefs.json');
+        throw new Error(
+          'EACCES: permission denied, rename /Users/x/userData/model-disable-prefs.json',
+        );
       }),
     });
     registerProviderHandlers(harness, deps);
 
     const req = harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-      kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5'], disabled: true,
+      kind: 'model',
+      providerId: 'xd',
+      modelIds: ['claude-opus-5'],
+      disabled: true,
     });
     await expect(req).rejects.toThrow(/INTERNAL/);
     await req.catch((err: unknown) => {
@@ -540,7 +584,10 @@ describe('model-disable:set handler', () => {
     registerProviderHandlers(harness, deps);
 
     await expect(
-      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'reset', providerId: 'gone-provider' }),
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'reset',
+        providerId: 'gone-provider',
+      }),
     ).resolves.toEqual({ ok: true });
     expect(deps.clearProviderDisableOverrides).toHaveBeenCalledWith('gone-provider');
     expect(listProviders).not.toHaveBeenCalled();
@@ -561,7 +608,11 @@ describe('model-disable:set handler', () => {
     registerProviderHandlers(harness, deps);
 
     await expect(
-      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'provider', providerId: 'xd', disabled: false }),
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'provider',
+        providerId: 'xd',
+        disabled: false,
+      }),
     ).resolves.toEqual({ ok: true });
     expect(deps.setProviderDisabled).toHaveBeenCalledWith('xd', false);
     expect(deps.broadcastChanged).toHaveBeenCalledOnce();
@@ -573,10 +624,19 @@ describe('model-disable:set handler', () => {
     registerProviderHandlers(harness, deps);
 
     await expect(
-      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'model', providerId: 'xd', modelIds: [], disabled: true }),
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'model',
+        providerId: 'xd',
+        modelIds: [],
+        disabled: true,
+      }),
     ).rejects.toThrow(/INVALID_PARAMS/);
     await expect(
-      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'nope', providerId: 'xd', disabled: true }),
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'nope',
+        providerId: 'xd',
+        disabled: true,
+      }),
     ).rejects.toThrow(/INVALID_PARAMS/);
     expect(deps.setModelsDisabled).not.toHaveBeenCalled();
     expect(deps.setProviderDisabled).not.toHaveBeenCalled();
@@ -592,17 +652,26 @@ describe('model-disable:set handler', () => {
     const hugeList = Array.from({ length: 600 }, (_v, i) => `m-${i}`);
     await expect(
       harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-        kind: 'model', providerId: hugeId, modelIds: ['m1'], disabled: true,
+        kind: 'model',
+        providerId: hugeId,
+        modelIds: ['m1'],
+        disabled: true,
       }),
     ).rejects.toThrow(/INVALID_PARAMS/);
     await expect(
       harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-        kind: 'model', providerId: 'xd', modelIds: [hugeId], disabled: true,
+        kind: 'model',
+        providerId: 'xd',
+        modelIds: [hugeId],
+        disabled: true,
       }),
     ).rejects.toThrow(/INVALID_PARAMS/);
     await expect(
       harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-        kind: 'model', providerId: 'xd', modelIds: hugeList, disabled: true,
+        kind: 'model',
+        providerId: 'xd',
+        modelIds: hugeList,
+        disabled: true,
       }),
     ).rejects.toThrow(/INVALID_PARAMS/);
     expect(deps.setModelsDisabled).not.toHaveBeenCalled();
@@ -618,7 +687,11 @@ describe('model-disable:set handler', () => {
     });
     registerProviderHandlers(harness, rejecting);
     await expect(
-      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'provider', providerId: 'xd', disabled: true }),
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'provider',
+        providerId: 'xd',
+        disabled: true,
+      }),
     ).rejects.toThrow(/PERMISSION_DENIED/);
     expect(rejecting.setProviderDisabled).not.toHaveBeenCalled();
 
@@ -626,7 +699,11 @@ describe('model-disable:set handler', () => {
     const unwired = makeDeps({ assertTrustedSender: undefined });
     registerProviderHandlers(harness2, unwired);
     await expect(
-      harness2.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'provider', providerId: 'xd', disabled: true }),
+      harness2.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'provider',
+        providerId: 'xd',
+        disabled: true,
+      }),
     ).rejects.toThrow(/PERMISSION_DENIED/);
     expect(unwired.setProviderDisabled).not.toHaveBeenCalled();
   });
@@ -666,7 +743,9 @@ describe('provider:models-rediscover handler', () => {
     const deps = makeDeps();
     registerProviderHandlers(harness, deps);
 
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REDISCOVER, 'anthropic')).resolves.toEqual({
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REDISCOVER, 'anthropic'),
+    ).resolves.toEqual({
       ok: true,
     });
     expect(deps.rediscoverModels).toHaveBeenCalledWith('anthropic');
@@ -714,10 +793,7 @@ describe('provider:models-refresh handler', () => {
     const harness = new IpcHarness();
     const assertTrustedSender = vi.fn();
     const refreshBuiltinModels = vi.fn(async () => {});
-    registerProviderHandlers(
-      harness,
-      makeDeps({ assertTrustedSender, refreshBuiltinModels }),
-    );
+    registerProviderHandlers(harness, makeDeps({ assertTrustedSender, refreshBuiltinModels }));
 
     await expect(
       harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REFRESH, 'anthropic'),
@@ -752,9 +828,9 @@ describe('provider:models-refresh handler', () => {
       }),
     );
 
-    await expect(
-      harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REFRESH, 'openai'),
-    ).rejects.toThrow(/PERMISSION_DENIED/);
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REFRESH, 'openai')).rejects.toThrow(
+      /PERMISSION_DENIED/,
+    );
     expect(refreshBuiltinModels).not.toHaveBeenCalled();
   });
 
@@ -769,9 +845,9 @@ describe('provider:models-refresh handler', () => {
       }),
     );
 
-    await expect(
-      harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REFRESH, 'xai'),
-    ).rejects.toThrow("[INTERNAL] model list refresh failed for 'xai'");
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REFRESH, 'xai')).rejects.toThrow(
+      "[INTERNAL] model list refresh failed for 'xai'",
+    );
   });
 
   it('preserves structured IPC errors from provider-specific refreshers', async () => {
@@ -785,9 +861,7 @@ describe('provider:models-refresh handler', () => {
       }),
     );
 
-    await expect(
-      harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REFRESH, 'xd'),
-    ).rejects.toMatchObject({
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REFRESH, 'xd')).rejects.toMatchObject({
       code: 'MODEL_ACCESS_FAILED',
       message: '[MODEL_ACCESS_FAILED] Cindy AI model list refresh failed.',
     });
@@ -799,20 +873,17 @@ describe('provider:models-refresh handler', () => {
       harness,
       makeDeps({
         refreshBuiltinModels: async () => {
-          throwIpcError(
-            'MODEL_CATALOG_FETCH_DISABLED',
-            '模型目录远程拉取未启用,本次未发起请求',
-          );
+          throwIpcError('MODEL_CATALOG_FETCH_DISABLED', '模型目录远程拉取未启用,本次未发起请求');
         },
       }),
     );
 
-    await expect(
-      harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REFRESH, 'xai'),
-    ).rejects.toMatchObject({
-      code: 'MODEL_CATALOG_FETCH_DISABLED',
-      message: '[MODEL_CATALOG_FETCH_DISABLED] 模型目录远程拉取未启用,本次未发起请求',
-    });
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_REFRESH, 'xai')).rejects.toMatchObject(
+      {
+        code: 'MODEL_CATALOG_FETCH_DISABLED',
+        message: '[MODEL_CATALOG_FETCH_DISABLED] 模型目录远程拉取未启用,本次未发起请求',
+      },
+    );
   });
 });
 
@@ -821,10 +892,7 @@ describe('provider:models-auto-refresh handler', () => {
     const harness = new IpcHarness();
     const assertTrustedSender = vi.fn();
     const requestModelsAutoRefresh = vi.fn(async () => {});
-    registerProviderHandlers(
-      harness,
-      makeDeps({ assertTrustedSender, requestModelsAutoRefresh }),
-    );
+    registerProviderHandlers(harness, makeDeps({ assertTrustedSender, requestModelsAutoRefresh }));
 
     await expect(
       harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_AUTO_REFRESH, 'model-selector-open'),
@@ -876,18 +944,10 @@ describe('provider:custom:* CRUD handlers', () => {
     registerProviderHandlers(harness, deps);
 
     await expect(
-      harness.invoke(
-        MAKER_INVOKE.PROVIDER_CUSTOM_CREATE,
-        validConfig,
-        { codex: 'must-not-stage' },
-      ),
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig, { codex: 'must-not-stage' }),
     ).rejects.toThrow(/PERMISSION_DENIED/);
     await expect(
-      harness.invoke(
-        MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE,
-        validConfig,
-        { codex: 'must-not-stage' },
-      ),
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, validConfig, { codex: 'must-not-stage' }),
     ).rejects.toThrow(/PERMISSION_DENIED/);
     await expect(
       harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, validConfig.id),
@@ -905,9 +965,9 @@ describe('provider:custom:* CRUD handlers', () => {
     const deps = makeDeps({ assertTrustedSender: undefined });
     registerProviderHandlers(harness, deps);
 
-    await expect(
-      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig),
-    ).rejects.toThrow(/PERMISSION_DENIED.*guard unavailable/);
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig)).rejects.toThrow(
+      /PERMISSION_DENIED.*guard unavailable/,
+    );
     expect(deps.storeCustomProviderKey).not.toHaveBeenCalled();
   });
 
@@ -970,17 +1030,17 @@ describe('provider:custom:* CRUD handlers', () => {
       },
     };
 
-    await expect(
-      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config),
-    ).resolves.toEqual({ ok: true });
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config)).resolves.toEqual({
+      ok: true,
+    });
     expect(storeCustomProviderHeaders).toHaveBeenCalledWith(
       'header-auth',
       'pi',
       config.runtimes.pi?.headers,
     );
-    const row = raw?.prepare('SELECT runtimes FROM custom_providers WHERE id = ?').get(
-      'header-auth',
-    ) as { runtimes: string };
+    const row = raw
+      ?.prepare('SELECT runtimes FROM custom_providers WHERE id = ?')
+      .get('header-auth') as { runtimes: string };
     expect(row.runtimes).not.toContain('top-secret');
     expect(row.runtimes).not.toContain('also-private');
     expect(JSON.parse(row.runtimes).pi.headers).toBeUndefined();
@@ -990,19 +1050,22 @@ describe('provider:custom:* CRUD handlers', () => {
     mountDb();
     const harness = new IpcHarness();
     const headers = new Map<AgentKind, Record<string, string>>();
-    registerProviderHandlers(harness, makeDeps({
-      readCustomProviderHeadersForMutation: vi.fn(
-        (_providerId, agent) => headers.get(agent) ?? null,
-      ),
-      storeCustomProviderHeaders: vi.fn((_providerId, agent, value) => {
-        headers.set(agent, { ...value });
-        return true;
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        readCustomProviderHeadersForMutation: vi.fn(
+          (_providerId, agent) => headers.get(agent) ?? null,
+        ),
+        storeCustomProviderHeaders: vi.fn((_providerId, agent, value) => {
+          headers.set(agent, { ...value });
+          return true;
+        }),
+        removeCustomProviderHeaders: vi.fn((_providerId, agent) => {
+          headers.delete(agent);
+          return { success: true };
+        }),
       }),
-      removeCustomProviderHeaders: vi.fn((_providerId, agent) => {
-        headers.delete(agent);
-        return { success: true };
-      }),
-    }));
+    );
     const config: CustomProviderConfig = {
       id: 'header-rollback',
       name: 'Header Rollback',
@@ -1026,16 +1089,18 @@ describe('provider:custom:* CRUD handlers', () => {
 
     // 端点改变且 UI 没回传 main-only headers 时会先删除旧端点凭证；随后 DB 更新
     // 失败，事务补偿必须恢复旧头，不能把安全清理变成凭证丢失。
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
-      ...config,
-      runtimes: {
-        pi: {
-          baseUrl: 'https://different-endpoint.example/v1',
-          wireProtocol: 'openai-chat',
-          models: [{ id: 'm', name: 'M' }],
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+        ...config,
+        runtimes: {
+          pi: {
+            baseUrl: 'https://different-endpoint.example/v1',
+            wireProtocol: 'openai-chat',
+            models: [{ id: 'm', name: 'M' }],
+          },
         },
-      },
-    })).rejects.toThrow(/simulated header write failure/);
+      }),
+    ).rejects.toThrow(/simulated header write failure/);
     expect(headers.get('pi')).toEqual({ Authorization: 'Bearer old' });
   });
 
@@ -1049,15 +1114,22 @@ describe('provider:custom:* CRUD handlers', () => {
       headers.delete(agent);
       return { success: true };
     });
-    const storeCustomProviderHeaders = vi.fn((_providerId, agent: AgentKind, value: Record<string, string>) => {
-      headers.set(agent, { ...value });
-      return true;
-    });
-    registerProviderHandlers(harness, makeDeps({
-      readCustomProviderHeadersForMutation: vi.fn((_providerId, agent: AgentKind) => headers.get(agent) ?? null),
-      storeCustomProviderHeaders,
-      removeCustomProviderHeaders,
-    }));
+    const storeCustomProviderHeaders = vi.fn(
+      (_providerId, agent: AgentKind, value: Record<string, string>) => {
+        headers.set(agent, { ...value });
+        return true;
+      },
+    );
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        readCustomProviderHeadersForMutation: vi.fn(
+          (_providerId, agent: AgentKind) => headers.get(agent) ?? null,
+        ),
+        storeCustomProviderHeaders,
+        removeCustomProviderHeaders,
+      }),
+    );
     const base: CustomProviderConfig = {
       id: 'keep-headers',
       name: 'Keep Headers',
@@ -1071,22 +1143,26 @@ describe('provider:custom:* CRUD handlers', () => {
         },
       },
     };
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, base)).resolves.toEqual({ ok: true });
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, base)).resolves.toEqual({
+      ok: true,
+    });
     expect(headers.get('pi')).toEqual({ Authorization: 'Bearer keepme' });
 
     removeCustomProviderHeaders.mockClear();
     storeCustomProviderHeaders.mockClear();
     // 更新只改模型名,runtime 仍在但不带 headers 字段(表单不回读头,故为空)。
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
-      ...base,
-      runtimes: {
-        pi: {
-          baseUrl: 'https://keep.example/v1',
-          wireProtocol: 'openai-chat',
-          models: [{ id: 'm', name: 'M renamed' }],
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+        ...base,
+        runtimes: {
+          pi: {
+            baseUrl: 'https://keep.example/v1',
+            wireProtocol: 'openai-chat',
+            models: [{ id: 'm', name: 'M renamed' }],
+          },
         },
-      },
-    })).resolves.toEqual({ ok: true });
+      }),
+    ).resolves.toEqual({ ok: true });
     // 未被清除、未被改写 → 保留。
     expect(removeCustomProviderHeaders).not.toHaveBeenCalledWith('keep-headers', 'pi');
     expect(storeCustomProviderHeaders).not.toHaveBeenCalled();
@@ -1096,17 +1172,19 @@ describe('provider:custom:* CRUD handlers', () => {
     // 被 hydrate 发往新 baseUrl(codex review)。
     removeCustomProviderHeaders.mockClear();
     // auth='none' 校验要求 baseUrl 为 loopback(no-auth 只允许本机端点)。
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
-      ...base,
-      auth: { method: 'none' },
-      runtimes: {
-        pi: {
-          baseUrl: 'http://127.0.0.1:8080/v1',
-          wireProtocol: 'openai-chat',
-          models: [{ id: 'm', name: 'M' }],
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+        ...base,
+        auth: { method: 'none' },
+        runtimes: {
+          pi: {
+            baseUrl: 'http://127.0.0.1:8080/v1',
+            wireProtocol: 'openai-chat',
+            models: [{ id: 'm', name: 'M' }],
+          },
         },
-      },
-    })).resolves.toEqual({ ok: true });
+      }),
+    ).resolves.toEqual({ ok: true });
     expect(removeCustomProviderHeaders).toHaveBeenCalledWith('keep-headers', 'pi');
     expect(headers.get('pi')).toBeUndefined();
   });
@@ -1119,14 +1197,21 @@ describe('provider:custom:* CRUD handlers', () => {
       headers.delete(agent);
       return { success: true };
     });
-    registerProviderHandlers(harness, makeDeps({
-      readCustomProviderHeadersForMutation: vi.fn((_providerId, agent: AgentKind) => headers.get(agent) ?? null),
-      storeCustomProviderHeaders: vi.fn((_providerId, agent: AgentKind, value: Record<string, string>) => {
-        headers.set(agent, { ...value });
-        return true;
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        readCustomProviderHeadersForMutation: vi.fn(
+          (_providerId, agent: AgentKind) => headers.get(agent) ?? null,
+        ),
+        storeCustomProviderHeaders: vi.fn(
+          (_providerId, agent: AgentKind, value: Record<string, string>) => {
+            headers.set(agent, { ...value });
+            return true;
+          },
+        ),
+        removeCustomProviderHeaders,
       }),
-      removeCustomProviderHeaders,
-    }));
+    );
     const config: CustomProviderConfig = {
       id: 'move-headers',
       name: 'Move Headers',
@@ -1144,17 +1229,19 @@ describe('provider:custom:* CRUD handlers', () => {
     await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config);
     removeCustomProviderHeaders.mockClear();
 
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
-      ...config,
-      runtimes: {
-        pi: {
-          baseUrl: 'https://new-endpoint.example/v1',
-          wireProtocol: 'openai-chat',
-          modelsUrl: 'https://new-endpoint.example/models',
-          models: [{ id: 'm', name: 'M' }],
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+        ...config,
+        runtimes: {
+          pi: {
+            baseUrl: 'https://new-endpoint.example/v1',
+            wireProtocol: 'openai-chat',
+            modelsUrl: 'https://new-endpoint.example/models',
+            models: [{ id: 'm', name: 'M' }],
+          },
         },
-      },
-    })).resolves.toEqual({ ok: true });
+      }),
+    ).resolves.toEqual({ ok: true });
 
     expect(removeCustomProviderHeaders).toHaveBeenCalledWith('move-headers', 'pi');
     expect(headers.get('pi')).toBeUndefined();
@@ -1168,16 +1255,19 @@ describe('provider:custom:* CRUD handlers', () => {
       keys.delete(agent);
       return { success: true };
     });
-    registerProviderHandlers(harness, makeDeps({
-      readCustomProviderKeyForMutation: vi.fn(
-        (_providerId, agent: AgentKind) => keys.get(agent) ?? null,
-      ),
-      storeCustomProviderKey: vi.fn((_providerId, agent: AgentKind, value: string) => {
-        keys.set(agent, value);
-        return true;
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        readCustomProviderKeyForMutation: vi.fn(
+          (_providerId, agent: AgentKind) => keys.get(agent) ?? null,
+        ),
+        storeCustomProviderKey: vi.fn((_providerId, agent: AgentKind, value: string) => {
+          keys.set(agent, value);
+          return true;
+        }),
+        removeCustomProviderKey,
       }),
-      removeCustomProviderKey,
-    }));
+    );
     const config: CustomProviderConfig = {
       id: 'move-api-key',
       name: 'Move API key',
@@ -1196,31 +1286,35 @@ describe('provider:custom:* CRUD handlers', () => {
     });
     removeCustomProviderKey.mockClear();
 
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
-      ...config,
-      name: 'Move API key — model edit only',
-      runtimes: {
-        pi: {
-          ...config.runtimes.pi!,
-          models: [{ id: 'm', name: 'M renamed' }],
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+        ...config,
+        name: 'Move API key — model edit only',
+        runtimes: {
+          pi: {
+            ...config.runtimes.pi!,
+            models: [{ id: 'm', name: 'M renamed' }],
+          },
         },
-      },
-    })).resolves.toEqual({ ok: true });
+      }),
+    ).resolves.toEqual({ ok: true });
     expect(removeCustomProviderKey).not.toHaveBeenCalledWith('move-api-key', 'pi');
     expect(keys.get('pi')).toBe('endpoint-bound-key');
     removeCustomProviderKey.mockClear();
 
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
-      ...config,
-      runtimes: {
-        pi: {
-          baseUrl: 'https://new-endpoint.example/v1',
-          wireProtocol: 'openai-chat',
-          modelsUrl: 'https://new-endpoint.example/models',
-          models: [{ id: 'm', name: 'M' }],
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+        ...config,
+        runtimes: {
+          pi: {
+            baseUrl: 'https://new-endpoint.example/v1',
+            wireProtocol: 'openai-chat',
+            modelsUrl: 'https://new-endpoint.example/models',
+            models: [{ id: 'm', name: 'M' }],
+          },
         },
-      },
-    })).resolves.toEqual({ ok: true });
+      }),
+    ).resolves.toEqual({ ok: true });
 
     expect(removeCustomProviderKey).toHaveBeenCalledWith('move-api-key', 'pi');
     expect(keys.get('pi')).toBeUndefined();
@@ -1231,23 +1325,28 @@ describe('provider:custom:* CRUD handlers', () => {
     mountDb();
     const harness = new IpcHarness();
     const fetchModels = vi.fn(async () => ({ ok: true, models: [{ id: 'm1', name: 'M1' }] }));
-    registerProviderHandlers(harness, makeDeps({
-      fetchModels,
-      readSavedProviderRoute: vi.fn((providerId, agent) =>
-        providerId === 'saved-1' && agent === 'pi'
-          ? { baseUrl: 'https://saved.example/v1', modelsUrl: null }
-          : null,
-      ),
-      readCustomProviderHeadersForMutation: vi.fn((providerId, agent) =>
-        providerId === 'saved-1' && agent === 'pi' ? { Authorization: 'Bearer stored' } : null,
-      ),
-    }));
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, {
-      agent: 'pi',
-      baseUrl: 'https://saved.example/v1',
-      authMethod: 'apiKey',
-      savedProviderId: 'saved-1',
-    })).resolves.toMatchObject({ ok: true });
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        fetchModels,
+        readSavedProviderRoute: vi.fn((providerId, agent) =>
+          providerId === 'saved-1' && agent === 'pi'
+            ? { baseUrl: 'https://saved.example/v1', modelsUrl: null }
+            : null,
+        ),
+        readCustomProviderHeadersForMutation: vi.fn((providerId, agent) =>
+          providerId === 'saved-1' && agent === 'pi' ? { Authorization: 'Bearer stored' } : null,
+        ),
+      }),
+    );
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, {
+        agent: 'pi',
+        baseUrl: 'https://saved.example/v1',
+        authMethod: 'apiKey',
+        savedProviderId: 'saved-1',
+      }),
+    ).resolves.toMatchObject({ ok: true });
     expect(fetchModels).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { Authorization: 'Bearer stored' } }),
     );
@@ -1259,21 +1358,26 @@ describe('provider:custom:* CRUD handlers', () => {
     mountDb();
     const harness = new IpcHarness();
     const fetchModels = vi.fn(async () => ({ ok: true, models: [{ id: 'm1', name: 'M1' }] }));
-    registerProviderHandlers(harness, makeDeps({
-      fetchModels,
-      readSavedProviderRoute: vi.fn(() => ({
-        baseUrl: 'https://saved.example/v1',
-        modelsUrl: 'https://saved.example/v1/models',
-      })),
-      readCustomProviderHeadersForMutation: vi.fn(() => ({ Authorization: 'Bearer stored' })),
-    }));
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, {
-      agent: 'pi',
-      baseUrl: 'https://evil.example/v1',
-      modelsUrl: 'https://evil.example/v1/models',
-      authMethod: 'apiKey',
-      savedProviderId: 'saved-1',
-    })).resolves.toMatchObject({ ok: true });
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        fetchModels,
+        readSavedProviderRoute: vi.fn(() => ({
+          baseUrl: 'https://saved.example/v1',
+          modelsUrl: 'https://saved.example/v1/models',
+        })),
+        readCustomProviderHeadersForMutation: vi.fn(() => ({ Authorization: 'Bearer stored' })),
+      }),
+    );
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, {
+        agent: 'pi',
+        baseUrl: 'https://evil.example/v1',
+        modelsUrl: 'https://evil.example/v1/models',
+        authMethod: 'apiKey',
+        savedProviderId: 'saved-1',
+      }),
+    ).resolves.toMatchObject({ ok: true });
     // 目标钉回已存端点(不是攻击者的 evil.example),密文头随之只发往已存端点。
     expect(fetchModels).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1288,20 +1392,27 @@ describe('provider:custom:* CRUD handlers', () => {
     mountDb();
     const harness = new IpcHarness();
     const fetchModels = vi.fn(async () => ({ ok: true, models: [{ id: 'm1', name: 'M1' }] }));
-    registerProviderHandlers(harness, makeDeps({
-      fetchModels,
-      readSavedProviderRoute: vi.fn(() => null),
-      readCustomProviderHeadersForMutation: vi.fn(() => ({ Authorization: 'Bearer stored' })),
-    }));
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, {
-      agent: 'pi',
-      baseUrl: 'https://evil.example/v1',
-      authMethod: 'apiKey',
-      savedProviderId: 'gone-1',
-    })).resolves.toMatchObject({ ok: true });
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        fetchModels,
+        readSavedProviderRoute: vi.fn(() => null),
+        readCustomProviderHeadersForMutation: vi.fn(() => ({ Authorization: 'Bearer stored' })),
+      }),
+    );
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, {
+        agent: 'pi',
+        baseUrl: 'https://evil.example/v1',
+        authMethod: 'apiKey',
+        savedProviderId: 'gone-1',
+      }),
+    ).resolves.toMatchObject({ ok: true });
     // 路由解析不出 → 不合并密文头(fetchModels 收到的 headers 不含 Authorization)。
     expect(fetchModels).toHaveBeenCalledWith(
-      expect.not.objectContaining({ headers: expect.objectContaining({ Authorization: expect.anything() }) }),
+      expect.not.objectContaining({
+        headers: expect.objectContaining({ Authorization: expect.anything() }),
+      }),
     );
   });
 
@@ -1311,22 +1422,23 @@ describe('provider:custom:* CRUD handlers', () => {
     const keys = new Map<AgentKind, string>();
     const storeCalls: string[] = [];
     const removeCalls: AgentKind[] = [];
-    registerProviderHandlers(harness, makeDeps({
-      readCustomProviderKeyForMutation: vi.fn(
-        (_providerId, agent) => keys.get(agent) ?? null,
-      ),
-      storeCustomProviderKey: vi.fn((_providerId, agent, value) => {
-        storeCalls.push(`${agent}:${value}`);
-        if (agent === 'codex') return false;
-        keys.set(agent, value);
-        return true;
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        readCustomProviderKeyForMutation: vi.fn((_providerId, agent) => keys.get(agent) ?? null),
+        storeCustomProviderKey: vi.fn((_providerId, agent, value) => {
+          storeCalls.push(`${agent}:${value}`);
+          if (agent === 'codex') return false;
+          keys.set(agent, value);
+          return true;
+        }),
+        removeCustomProviderKey: vi.fn((_providerId, agent) => {
+          removeCalls.push(agent);
+          keys.delete(agent);
+          return { success: true };
+        }),
       }),
-      removeCustomProviderKey: vi.fn((_providerId, agent) => {
-        removeCalls.push(agent);
-        keys.delete(agent);
-        return { success: true };
-      }),
-    }));
+    );
     const config: CustomProviderConfig = {
       ...validConfig,
       id: 'partial-create',
@@ -1343,19 +1455,15 @@ describe('provider:custom:* CRUD handlers', () => {
     };
 
     await expect(
-      harness.invoke(
-        MAKER_INVOKE.PROVIDER_CUSTOM_CREATE,
-        config,
-        { 'claude-code': 'first-key', codex: 'second-key' },
-      ),
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config, {
+        'claude-code': 'first-key',
+        codex: 'second-key',
+      }),
     ).rejects.toThrow(/failed to update codex provider credential/);
 
     expect(await listCustomProviders()).toEqual([]);
     expect(keys.size).toBe(0);
-    expect(storeCalls).toEqual([
-      'claude-code:first-key',
-      'codex:second-key',
-    ]);
+    expect(storeCalls).toEqual(['claude-code:first-key', 'codex:second-key']);
     expect(removeCalls).toEqual(['codex', 'claude-code']);
   });
 
@@ -1377,11 +1485,7 @@ describe('provider:custom:* CRUD handlers', () => {
     };
 
     await expect(
-      harness.invoke(
-        MAKER_INVOKE.PROVIDER_CUSTOM_CREATE,
-        config,
-        { codex: 'must-not-be-stored' },
-      ),
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config, { codex: 'must-not-be-stored' }),
     ).resolves.toEqual({ ok: true });
 
     expect(deps.readCustomProviderKeyForMutation).not.toHaveBeenCalled();
@@ -1469,9 +1573,9 @@ describe('provider:custom:* CRUD handlers', () => {
     ).resolves.toEqual({ ok: true });
     expect((await listCustomProviders())[0]?.name).toBe('Legacy custom xAI edited');
 
-    await expect(
-      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, 'xai'),
-    ).resolves.toEqual({ ok: true });
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, 'xai')).resolves.toEqual({
+      ok: true,
+    });
     expect(deps.stageClearProviderDisableOverrides).toHaveBeenCalledWith('custom:xai');
     expect(deps.stageClearProviderModelPriceOverrides).toHaveBeenCalledWith('custom:xai');
     expect(await listCustomProviders()).toEqual([]);
@@ -1482,9 +1586,9 @@ describe('provider:custom:* CRUD handlers', () => {
     const harness = new IpcHarness();
     registerProviderHandlers(harness, makeDeps());
     await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig);
-    await expect(
-      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig),
-    ).rejects.toThrow(/ALREADY_EXISTS/);
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig)).rejects.toThrow(
+      /ALREADY_EXISTS/,
+    );
   });
 
   it('updates an existing provider; missing id → NOT_FOUND', async () => {
@@ -1538,16 +1642,20 @@ describe('provider:custom:* CRUD handlers', () => {
     storeCustomProviderHeaders.mockClear();
 
     // invoke 同步执行至 `await getCustomProvider()`；切号发生在该异步边界内。
-    const update = harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
-      ...config,
-      name: 'Must not reach owner B',
-      runtimes: {
-        pi: {
-          ...config.runtimes.pi!,
-          headers: { Authorization: 'Bearer owner-a-new' },
+    const update = harness.invoke(
+      MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE,
+      {
+        ...config,
+        name: 'Must not reach owner B',
+        runtimes: {
+          pi: {
+            ...config.runtimes.pi!,
+            headers: { Authorization: 'Bearer owner-a-new' },
+          },
         },
       },
-    }, { pi: 'owner-a-new-key' });
+      { pi: 'owner-a-new-key' },
+    );
     ownerSession = { dataOwnerId: 'owner-b', generation: 2 };
 
     await expect(update).rejects.toThrow(/active account changed during provider mutation/);
@@ -1770,21 +1878,22 @@ describe('provider:custom:* CRUD handlers', () => {
     const harness = new IpcHarness();
     const keys = new Map<AgentKind, string>([['codex', 'old-key']]);
     const storeCalls: string[] = [];
-    registerProviderHandlers(harness, makeDeps({
-      readCustomProviderKeyForMutation: vi.fn(
-        (_providerId, agent) => keys.get(agent) ?? null,
-      ),
-      storeCustomProviderKey: vi.fn((_providerId, agent, value) => {
-        storeCalls.push(`${agent}:${value}`);
-        keys.set(agent, value);
-        return true;
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        readCustomProviderKeyForMutation: vi.fn((_providerId, agent) => keys.get(agent) ?? null),
+        storeCustomProviderKey: vi.fn((_providerId, agent, value) => {
+          storeCalls.push(`${agent}:${value}`);
+          keys.set(agent, value);
+          return true;
+        }),
+        removeCustomProviderKey: vi.fn((_providerId, agent) => {
+          keys.delete(agent);
+          return { success: true };
+        }),
+        stageClearProviderModelPriceOverrides: vi.fn(() => () => true),
       }),
-      removeCustomProviderKey: vi.fn((_providerId, agent) => {
-        keys.delete(agent);
-        return { success: true };
-      }),
-      stageClearProviderModelPriceOverrides: vi.fn(() => () => true),
-    }));
+    );
     await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig);
     raw!.exec(`
       CREATE TRIGGER fail_custom_provider_update
@@ -1826,11 +1935,14 @@ describe('provider:custom:* CRUD handlers', () => {
       keys.delete(agent);
       return { success: true };
     });
-    registerProviderHandlers(harness, makeDeps({
-      readCustomProviderKeyForMutation,
-      storeCustomProviderKey,
-      removeCustomProviderKey,
-    }));
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        readCustomProviderKeyForMutation,
+        storeCustomProviderKey,
+        removeCustomProviderKey,
+      }),
+    );
     const config: CustomProviderConfig = {
       ...validConfig,
       id: 'strict-snapshot',
@@ -1841,11 +1953,7 @@ describe('provider:custom:* CRUD handlers', () => {
         },
       },
     };
-    await harness.invoke(
-      MAKER_INVOKE.PROVIDER_CUSTOM_CREATE,
-      config,
-      { 'claude-code': 'old-key' },
-    );
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config, { 'claude-code': 'old-key' });
     unreadable = true;
     storeCustomProviderKey.mockClear();
     removeCustomProviderKey.mockClear();
@@ -1885,27 +1993,26 @@ describe('provider:custom:* CRUD handlers', () => {
         await refreshGate;
       }
     });
-    registerProviderHandlers(harness, makeDeps({
-      refreshCatalog,
-      readCustomProviderKeyForMutation: vi.fn(
-        (_providerId, agent) => keys.get(agent) ?? null,
-      ),
-      storeCustomProviderKey: vi.fn((_providerId, agent, value) => {
-        storeCalls.push(`${agent}:${value}`);
-        keys.set(agent, value);
-        return true;
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        refreshCatalog,
+        readCustomProviderKeyForMutation: vi.fn((_providerId, agent) => keys.get(agent) ?? null),
+        storeCustomProviderKey: vi.fn((_providerId, agent, value) => {
+          storeCalls.push(`${agent}:${value}`);
+          keys.set(agent, value);
+          return true;
+        }),
+        removeCustomProviderKey: vi.fn((_providerId, agent) => {
+          keys.delete(agent);
+          return { success: true };
+        }),
       }),
-      removeCustomProviderKey: vi.fn((_providerId, agent) => {
-        keys.delete(agent);
-        return { success: true };
-      }),
-    }));
-
-    const create = harness.invoke(
-      MAKER_INVOKE.PROVIDER_CUSTOM_CREATE,
-      validConfig,
-      { codex: 'created-key' },
     );
+
+    const create = harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig, {
+      codex: 'created-key',
+    });
     await firstReachedRefresh;
     const update = harness.invoke(
       MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE,
@@ -1946,9 +2053,7 @@ describe('provider:custom:* CRUD handlers', () => {
     });
     const deps = makeDeps({
       refreshCatalog,
-      readCustomProviderKeyForMutation: vi.fn(
-        (_providerId, agent) => keys.get(agent) ?? null,
-      ),
+      readCustomProviderKeyForMutation: vi.fn((_providerId, agent) => keys.get(agent) ?? null),
       storeCustomProviderKey: vi.fn((_providerId, agent, value) => {
         storeCalls.push(`${agent}:${value}`);
         keys.set(agent, value);
@@ -1998,9 +2103,7 @@ describe('provider:custom:* CRUD handlers', () => {
         calls.push('clear');
         return () => true;
       }),
-      readCustomProviderKeyForMutation: vi.fn(
-        (_providerId, agent) => keys.get(agent) ?? null,
-      ),
+      readCustomProviderKeyForMutation: vi.fn((_providerId, agent) => keys.get(agent) ?? null),
       storeCustomProviderKey: vi.fn((_providerId, agent, value) => {
         keys.set(agent, value);
         return true;
@@ -2011,11 +2114,7 @@ describe('provider:custom:* CRUD handlers', () => {
       }),
     });
     registerProviderHandlers(harness, deps);
-    await harness.invoke(
-      MAKER_INVOKE.PROVIDER_CUSTOM_CREATE,
-      validConfig,
-      { codex: 'delete-me' },
-    );
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig, { codex: 'delete-me' });
 
     const del = await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, 'openrouter');
     expect(del).toEqual({ ok: true });
@@ -2036,9 +2135,7 @@ describe('provider:custom:* CRUD handlers', () => {
     const keys = new Map<AgentKind, string>();
     const deps = makeDeps({
       removeOAuthCredentials: vi.fn(() => null),
-      readCustomProviderKeyForMutation: vi.fn(
-        (_providerId, agent) => keys.get(agent) ?? null,
-      ),
+      readCustomProviderKeyForMutation: vi.fn((_providerId, agent) => keys.get(agent) ?? null),
       storeCustomProviderKey: vi.fn((_providerId, agent, value) => {
         keys.set(agent, value);
         return true;
@@ -2049,15 +2146,13 @@ describe('provider:custom:* CRUD handlers', () => {
       }),
     });
     registerProviderHandlers(harness, deps);
-    await harness.invoke(
-      MAKER_INVOKE.PROVIDER_CUSTOM_CREATE,
-      validConfig,
-      { codex: 'must-survive' },
-    );
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig, {
+      codex: 'must-survive',
+    });
 
-    await expect(
-      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, 'openrouter'),
-    ).rejects.toThrow(/INTERNAL.*failed to remove existing OAuth credentials/);
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, 'openrouter')).rejects.toThrow(
+      /INTERNAL.*failed to remove existing OAuth credentials/,
+    );
     expect(await listCustomProviders()).toHaveLength(1);
     expect(keys.get('codex')).toBe('must-survive');
   });
@@ -2097,10 +2192,20 @@ describe('provider:custom:* CRUD handlers', () => {
     // 等删除事务推进到 afterChange(此刻配置已删、队列仍被删除事务持有)。
     await deleteRefreshEnteredGate;
     const set = harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
-      kind: 'model', providerId: 'openrouter', modelIds: ['meta/llama-4'], disabled: true,
+      kind: 'model',
+      providerId: 'openrouter',
+      modelIds: ['meta/llama-4'],
+      disabled: true,
     });
     let setSettled = false;
-    void set.then(() => { setSettled = true; }, () => { setSettled = true; });
+    void set.then(
+      () => {
+        setSettled = true;
+      },
+      () => {
+        setSettled = true;
+      },
+    );
     await Promise.resolve();
     await Promise.resolve();
     // 队列被删除事务持有 —— 并发停用写不得在目录刷新前落盘或返回。
@@ -2124,9 +2229,7 @@ describe('model price override handlers', () => {
   it('reads and writes a catalog member through the trusted visual settings path', async () => {
     const harness = new IpcHarness();
     const deps = makeDeps({
-      listProviders: async () => [
-        catalogView('openrouter', { codex: ['meta/llama-4'] }),
-      ],
+      listProviders: async () => [catalogView('openrouter', { codex: ['meta/llama-4'] })],
     });
     registerProviderHandlers(harness, deps);
 
@@ -2241,7 +2344,9 @@ describe('provider:presets handler', () => {
       {
         id: 'openrouter',
         name: 'OpenRouter',
-        runtimes: { codex: { baseUrl: 'https://openrouter.ai/api/v1', models: [{ id: 'a', name: 'A' }] } },
+        runtimes: {
+          codex: { baseUrl: 'https://openrouter.ai/api/v1', models: [{ id: 'a', name: 'A' }] },
+        },
       },
     ];
     registerProviderHandlers(harness, makeDeps({ listPresets: () => presets }));
@@ -2292,26 +2397,30 @@ describe('provider:test-connection handler', () => {
     const testConnection = vi.fn(async () => ({ ok: true as const, latencyMs: 2 }));
     registerProviderHandlers(harness, makeDeps({ testConnection }));
 
-    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_TEST_CONNECTION, {
-      kind: 'adhoc',
-      spec: {
-        agent: 'pi',
-        wireProtocol: 'openai-chat',
-        baseUrl: 'https://pi.example/v1',
-        modelId: 'pi-model',
-        authMethod: 'apiKey',
-        requestPath: '/ignored-by-pi',
-        apiKey: 'k',
-      },
-    })).resolves.toMatchObject({ ok: true });
-    expect(testConnection).toHaveBeenCalledWith(expect.objectContaining({
-      kind: 'adhoc',
-      spec: expect.objectContaining({
-        agent: 'pi',
-        wireProtocol: 'openai-chat',
-        requestPath: undefined,
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_TEST_CONNECTION, {
+        kind: 'adhoc',
+        spec: {
+          agent: 'pi',
+          wireProtocol: 'openai-chat',
+          baseUrl: 'https://pi.example/v1',
+          modelId: 'pi-model',
+          authMethod: 'apiKey',
+          requestPath: '/ignored-by-pi',
+          apiKey: 'k',
+        },
       }),
-    }));
+    ).resolves.toMatchObject({ ok: true });
+    expect(testConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'adhoc',
+        spec: expect.objectContaining({
+          agent: 'pi',
+          wireProtocol: 'openai-chat',
+          requestPath: undefined,
+        }),
+      }),
+    );
   });
 
   it('rejects remote no-auth adhoc probes before invoking the network dependency', async () => {
@@ -2340,10 +2449,28 @@ describe('provider:test-connection handler', () => {
     const bad = [
       null,
       { kind: 'adhoc', spec: { agent: 'gemini', baseUrl: 'https://x.example', modelId: 'm' } },
+      { kind: 'adhoc', spec: { agent: 'dsh', baseUrl: 'https://x.example', modelId: 'm' } },
+      { kind: 'saved', providerId: 'dsh-provider', agent: 'dsh' },
       { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'ftp://x', modelId: 'm' } },
       { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: '' } },
-      { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', requestPath: '//evil.example' } },
-      { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', requestPath: '/infer#fragment' } },
+      {
+        kind: 'adhoc',
+        spec: {
+          agent: 'codex',
+          baseUrl: 'https://x.example',
+          modelId: 'm',
+          requestPath: '//evil.example',
+        },
+      },
+      {
+        kind: 'adhoc',
+        spec: {
+          agent: 'codex',
+          baseUrl: 'https://x.example',
+          modelId: 'm',
+          requestPath: '/infer#fragment',
+        },
+      },
       {
         kind: 'adhoc',
         spec: {
@@ -2356,7 +2483,9 @@ describe('provider:test-connection handler', () => {
       { kind: 'saved', providerId: '', agent: 'codex' },
     ];
     for (const input of bad) {
-      await expect(harness.invoke(MAKER_INVOKE.PROVIDER_TEST_CONNECTION, input)).rejects.toThrow(/INVALID_PARAMS/);
+      await expect(harness.invoke(MAKER_INVOKE.PROVIDER_TEST_CONNECTION, input)).rejects.toThrow(
+        /INVALID_PARAMS/,
+      );
     }
     expect(deps.testConnection).not.toHaveBeenCalled();
   });
@@ -2372,7 +2501,11 @@ describe('provider:test-connection handler', () => {
       }),
     );
     await expect(
-      harness.invoke(MAKER_INVOKE.PROVIDER_TEST_CONNECTION, { kind: 'saved', providerId: 'ghost', agent: 'codex' }),
+      harness.invoke(MAKER_INVOKE.PROVIDER_TEST_CONNECTION, {
+        kind: 'saved',
+        providerId: 'ghost',
+        agent: 'codex',
+      }),
     ).rejects.toThrow(/INVALID_PARAMS/);
   });
 });
@@ -2472,13 +2605,16 @@ describe('provider:models-fetch handler', () => {
     const bad = [
       null,
       { agent: 'gemini', baseUrl: 'https://x.example' },
+      { agent: 'dsh', baseUrl: 'https://x.example' },
       { agent: 'codex', baseUrl: 'ftp://x' },
       { agent: 'codex', baseUrl: '' },
       { agent: 'codex', baseUrl: 'https://x.example', modelsUrl: 'not-a-url' },
       { agent: 'codex', baseUrl: 'https://x.example', headers: { a: 1 } },
     ];
     for (const input of bad) {
-      await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, input)).rejects.toThrow(/INVALID_PARAMS/);
+      await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, input)).rejects.toThrow(
+        /INVALID_PARAMS/,
+      );
     }
     expect(deps.fetchModels).not.toHaveBeenCalled();
   });
@@ -2496,9 +2632,9 @@ describe('provider:oauth mutation ordering', () => {
     });
     registerProviderHandlers(harness, deps);
 
-    await expect(
-      harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, 'openrouter'),
-    ).resolves.toEqual({ ok: true });
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, 'openrouter')).resolves.toEqual(
+      { ok: true },
+    );
     expect(calls).toEqual(['cancel', 'logout']);
   });
 
@@ -2523,10 +2659,7 @@ describe('provider:oauth mutation ordering', () => {
       finish: (result: { ok: boolean }) => void;
     }> = [];
     const oauthLogin = vi.fn(
-      async (
-        _providerId: string,
-        isCurrent: () => boolean,
-      ): Promise<{ ok: boolean }> =>
+      async (_providerId: string, isCurrent: () => boolean): Promise<{ ok: boolean }> =>
         new Promise((resolve) => {
           pending.push({ isCurrent, finish: resolve });
         }),
@@ -2534,41 +2667,31 @@ describe('provider:oauth mutation ordering', () => {
     const oauthCancel = vi.fn();
     registerProviderHandlers(harness, makeDeps({ oauthLogin, oauthCancel }));
 
-    const first = harness.invokeFrom(
-      101,
-      MAKER_INVOKE.PROVIDER_OAUTH_LOGIN,
-      'openrouter',
-      { ownerId: 'window-101-provider-login' },
-    );
+    const first = harness.invokeFrom(101, MAKER_INVOKE.PROVIDER_OAUTH_LOGIN, 'openrouter', {
+      ownerId: 'window-101-provider-login',
+    });
     await vi.waitFor(() => expect(pending).toHaveLength(1));
-    const second = harness.invokeFrom(
-      202,
-      MAKER_INVOKE.PROVIDER_OAUTH_LOGIN,
-      'openrouter',
-      { ownerId: 'window-202-provider-login' },
-    );
+    const second = harness.invokeFrom(202, MAKER_INVOKE.PROVIDER_OAUTH_LOGIN, 'openrouter', {
+      ownerId: 'window-202-provider-login',
+    });
     await vi.waitFor(() => expect(pending).toHaveLength(2));
     expect(pending[0].isCurrent()).toBe(false);
     expect(pending[1].isCurrent()).toBe(true);
 
     await expect(
-      harness.invokeFrom(
-        101,
-        MAKER_INVOKE.PROVIDER_OAUTH_CANCEL,
-        'openrouter',
-        { releaseOwner: true, ownerId: 'window-101-provider-login' },
-      ),
+      harness.invokeFrom(101, MAKER_INVOKE.PROVIDER_OAUTH_CANCEL, 'openrouter', {
+        releaseOwner: true,
+        ownerId: 'window-101-provider-login',
+      }),
     ).resolves.toEqual({ ok: true });
     expect(oauthCancel).not.toHaveBeenCalled();
     expect(pending[1].isCurrent()).toBe(true);
 
     await expect(
-      harness.invokeFrom(
-        202,
-        MAKER_INVOKE.PROVIDER_OAUTH_CANCEL,
-        'openrouter',
-        { releaseOwner: true, ownerId: 'window-202-provider-login' },
-      ),
+      harness.invokeFrom(202, MAKER_INVOKE.PROVIDER_OAUTH_CANCEL, 'openrouter', {
+        releaseOwner: true,
+        ownerId: 'window-202-provider-login',
+      }),
     ).resolves.toEqual({ ok: true });
     expect(oauthCancel).toHaveBeenCalledOnce();
     expect(oauthCancel).toHaveBeenCalledWith('openrouter');
@@ -2585,10 +2708,7 @@ describe('provider:oauth mutation ordering', () => {
     let isCurrent!: () => boolean;
     let finishLogin!: (result: { ok: boolean }) => void;
     const oauthLogin = vi.fn(
-      async (
-        _providerId: string,
-        checkCurrent: () => boolean,
-      ): Promise<{ ok: boolean }> =>
+      async (_providerId: string, checkCurrent: () => boolean): Promise<{ ok: boolean }> =>
         new Promise((resolve) => {
           isCurrent = checkCurrent;
           finishLogin = resolve;
@@ -2597,12 +2717,9 @@ describe('provider:oauth mutation ordering', () => {
     const oauthCancel = vi.fn();
     registerProviderHandlers(harness, makeDeps({ oauthLogin, oauthCancel }));
 
-    const login = harness.invokeFrom(
-      101,
-      MAKER_INVOKE.PROVIDER_OAUTH_LOGIN,
-      'openrouter',
-      { ownerId: 'window-101-destroyed' },
-    );
+    const login = harness.invokeFrom(101, MAKER_INVOKE.PROVIDER_OAUTH_LOGIN, 'openrouter', {
+      ownerId: 'window-101-destroyed',
+    });
     await vi.waitFor(() => expect(oauthLogin).toHaveBeenCalledOnce());
     expect(isCurrent()).toBe(true);
 
@@ -2617,10 +2734,7 @@ describe('provider:oauth mutation ordering', () => {
   it('invalidates post-login work when the provider is edited before discovery finishes', async () => {
     mountDb();
     const harness = new IpcHarness();
-    let finishLogin!: (result: {
-      ok: boolean;
-      rollbackCredentials?: () => boolean;
-    }) => void;
+    let finishLogin!: (result: { ok: boolean; rollbackCredentials?: () => boolean }) => void;
     let loginIsCurrent!: () => boolean;
     const oauthLogin = vi.fn(
       async (
@@ -2695,7 +2809,8 @@ describe('provider:oauth mutation ordering', () => {
     const blockedRefresh = new Promise<void>((resolve) => {
       finishRefresh = resolve;
     });
-    const refreshCatalog = vi.fn()
+    const refreshCatalog = vi
+      .fn()
       .mockResolvedValueOnce(undefined)
       .mockReturnValueOnce(blockedRefresh);
     const oauthLogin = vi.fn(async () => ({ ok: true }));
@@ -2740,7 +2855,8 @@ describe('provider:oauth mutation ordering', () => {
     const blockedRefresh = new Promise<void>((resolve) => {
       finishRefresh = resolve;
     });
-    const refreshCatalog = vi.fn()
+    const refreshCatalog = vi
+      .fn()
       .mockResolvedValueOnce(undefined)
       .mockReturnValueOnce(blockedRefresh)
       .mockResolvedValueOnce(undefined);
@@ -2768,10 +2884,7 @@ describe('provider:oauth mutation ordering', () => {
     const harness = new IpcHarness();
     const pending: Array<{
       isCurrent: () => boolean;
-      finish: (result: {
-        ok: boolean;
-        rollbackCredentials?: () => boolean;
-      }) => void;
+      finish: (result: { ok: boolean; rollbackCredentials?: () => boolean }) => void;
     }> = [];
     const oauthLogin = vi.fn(
       async (

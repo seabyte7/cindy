@@ -46,6 +46,8 @@ export type DbTxName =
   | 'wechatPromoteTaskAttachments'
   | 'wechatRefreshOutboxContexts'
   | 'wechatUnbindCleanup'
+  | 'dsh.commitProjection'
+  | 'dsh.rejectProjection'
   | 'session.importShare';
 
 export interface CodexImportMessagesArgs {
@@ -804,6 +806,55 @@ export interface WechatUnbindCleanupResult {
   filePaths: string[];
 }
 
+/**
+ * One display-safe DSH event and its binding cursor advance.  The worker
+ * commits them in one SQLite transaction; callers must never advance the
+ * cursor separately and then attempt to write an event.
+ */
+export interface DshCommitProjectionArgs {
+  cindySessionId: string;
+  expectedBindingRevision: number;
+  sequence: number;
+  recordJson: string;
+  recordSha256: string;
+  createdAt: number;
+}
+
+export interface DshProjectionBindingSnapshot {
+  cindySessionId: string;
+  lifecycleState: 'active' | 'closed' | 'needs_reconcile';
+  lastProjectedSequence: number;
+  revision: number;
+}
+
+export type DshCommitProjectionResult =
+  | { kind: 'advanced'; binding: DshProjectionBindingSnapshot }
+  | { kind: 'duplicate'; binding: DshProjectionBindingSnapshot }
+  | { kind: 'gap'; binding: DshProjectionBindingSnapshot }
+  | { kind: 'inactive'; binding: DshProjectionBindingSnapshot }
+  | { kind: 'conflict'; binding: DshProjectionBindingSnapshot | null };
+
+export type DshProjectionRejectionReason =
+  | 'invalid-envelope'
+  | 'invalid-message-update'
+  | 'invalid-thought-update'
+  | 'invalid-tool-call'
+  | 'invalid-tool-result'
+  | 'invalid-usage-update';
+
+export interface DshRejectProjectionArgs {
+  cindySessionId: string;
+  expectedBindingRevision: number;
+  sequence: number;
+  reason: DshProjectionRejectionReason;
+  createdAt: number;
+}
+
+export type DshRejectProjectionResult =
+  | { kind: 'rejected'; binding: DshProjectionBindingSnapshot }
+  | { kind: 'inactive'; binding: DshProjectionBindingSnapshot }
+  | { kind: 'conflict'; binding: DshProjectionBindingSnapshot | null };
+
 export type DbTxArgsByName = {
   'codex.importMessages': CodexImportMessagesArgs;
   'claude.importMessages': ClaudeImportMessagesArgs;
@@ -852,6 +903,8 @@ export type DbTxArgsByName = {
   wechatPromoteTaskAttachments: WechatPromoteTaskAttachmentsArgs;
   wechatRefreshOutboxContexts: WechatRefreshOutboxContextsArgs;
   wechatUnbindCleanup: WechatUnbindCleanupArgs;
+  'dsh.commitProjection': DshCommitProjectionArgs;
+  'dsh.rejectProjection': DshRejectProjectionArgs;
   'session.importShare': SessionImportShareArgs;
 };
 
@@ -903,5 +956,7 @@ export type DbTxResultByName = {
   wechatPromoteTaskAttachments: WechatPromoteTaskAttachmentsResult;
   wechatRefreshOutboxContexts: WechatRefreshOutboxContextsResult;
   wechatUnbindCleanup: WechatUnbindCleanupResult;
+  'dsh.commitProjection': DshCommitProjectionResult;
+  'dsh.rejectProjection': DshRejectProjectionResult;
   'session.importShare': { messageCount: number };
 };
