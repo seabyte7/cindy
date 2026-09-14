@@ -84,6 +84,8 @@ test("parseWorkspacePatterns reads pnpm-workspace.yaml package globs", () => {
 
 test("root unit and all scripts run runner self-tests before workspace sweep", () => {
 	const scripts = readRootScripts();
+	// CI uses the package lifecycle to propagate npm_execpath without duplicating self-tests.
+	assert.equal(scripts["test:workspaces"], "node scripts/test-workspaces.mjs");
 	assert.match(
 		scripts["test:unit"],
 		/^pnpm test:runner && node scripts\/test-workspaces\.mjs --tier unit$/,
@@ -100,6 +102,12 @@ test("root unit and all scripts run runner self-tests before workspace sweep", (
 
 test("root db and guard delegate to the workspace runner", () => {
 	const scripts = readRootScripts();
+	for (const tier of ["integration", "e2e"]) {
+		assert.equal(
+			scripts[`test:${tier}`],
+			`pnpm test:runner && node scripts/test-workspaces.mjs --tier ${tier}`,
+		);
+	}
 	assert.equal(
 		scripts["test:git-integration"],
 		"pnpm test:runner && node scripts/test-workspaces.mjs --tier git-integration",
@@ -199,27 +207,23 @@ test("unit workspace concurrency reserves the full worker budget for heavy works
 	assert.equal(desktopUnitWorkerCount(32), 8);
 	assert.equal(desktopUnitWorkerCount(Number.NaN), 1);
 	assert.equal(
-		desktopUnitPool({ platform: "darwin", nodeVersion: "22.12.0" }),
+		desktopUnitPool("darwin", "22.12.0", false),
 		"threads",
 	);
 	assert.equal(
-		desktopUnitPool({ platform: "darwin", nodeVersion: "24.15.0" }),
+		desktopUnitPool("darwin", "24.15.0", false),
 		"forks",
 	);
 	assert.equal(
-		desktopUnitPool({ platform: "linux", nodeVersion: "24.15.0" }),
-		"threads",
-	);
-	assert.equal(
-		desktopUnitPool({ platform: "win32", nodeVersion: "22.12.0" }),
+		desktopUnitPool("linux", "24.15.0", false),
 		"forks",
 	);
 	assert.equal(
-		desktopUnitPool({
-			platform: "darwin",
-			nodeVersion: "22.12.0",
-			webstorageEnabled: true,
-		}),
+		desktopUnitPool("win32", "22.12.0", false),
+		"forks",
+	);
+	assert.equal(
+		desktopUnitPool("darwin", "22.12.0", true),
 		"forks",
 	);
 	assert.equal(mobile.tiers.unit.execution, "exclusive");
@@ -230,11 +234,61 @@ test("unit workspace concurrency reserves the full worker budget for heavy works
 		...unitTestShardArgs(),
 	]);
 	assert.equal(makerCore.tiers.unit.execution, undefined);
+	assert.deepEqual(makerCore.tiers.unit.exclude, [
+		"**/*.integration.test.ts",
+		"**/*.e2e.test.ts",
+		"**/*.git-integration.test.ts",
+	]);
 	assert.deepEqual(makerCore.tiers.unit.command, {
 		type: "packageBin",
 		bin: "vitest",
 		args: ["run", "--pool=forks", "--maxWorkers=1", ...unitTestShardArgs()],
 	});
+});
+
+test("real agent integration tests are explicit tiers outside unit", () => {
+	const makerCore = manifest.workspaces.find(
+		(workspace) => workspace.cwd === "packages/maker-core",
+	);
+	const piManager = manifest.workspaces.find(
+		(workspace) => workspace.cwd === "packages/maker-pi-manager",
+	);
+	const desktop = manifest.workspaces.find(
+		(workspace) => workspace.cwd === "apps/desktop",
+	);
+	assert.equal(makerCore.tiers.integration.status, "manual");
+	assert.equal(makerCore.tiers.integration.execution, "exclusive");
+	assert.equal(makerCore.tiers.integration.coverage, "allowlist");
+	assert.deepEqual(makerCore.tiers.integration.include, [
+		"src/agents/codex/*.integration.test.ts",
+		"src/agents/claude-code/__tests__/*.integration.test.ts",
+		"src/agents/pi/__tests__/*.integration.test.ts",
+	]);
+	assert.deepEqual(piManager.tiers.unit.exclude, [
+		"src/__tests__/pi-manager.integration.test.ts",
+	]);
+	assert.deepEqual(piManager.tiers.integration.include, [
+		"src/__tests__/pi-manager.integration.test.ts",
+	]);
+	assert.deepEqual(desktop.tiers.e2e.include, [
+		"src/main/maker-host/__tests__/*.e2e.test.ts",
+	]);
+});
+
+test("Pi RPC lifecycle stays in unit while binary resource discovery stays in integration", () => {
+	const makerCore = manifest.workspaces.find(
+		(workspace) => workspace.cwd === "packages/maker-core",
+	);
+	const testDir = "packages/maker-core/src/agents/pi/__tests__";
+	const files = fs.readdirSync(path.join(ROOT, testDir))
+		.filter((file) => file.startsWith("pi-rpc-"))
+		.map((file) => `${testDir}/${file}`);
+	assert.deepEqual(selectFilesForTier(makerCore, makerCore.tiers.unit, files), [
+		`${testDir}/pi-rpc-harness.test.ts`,
+	]);
+	assert.deepEqual(selectFilesForTier(makerCore, makerCore.tiers.integration, files), [
+		`${testDir}/pi-rpc-resource-discovery.integration.test.ts`,
+	]);
 });
 
 test("unit tier pins an explicit vitest pool, forks only by documented exception", () => {
@@ -246,12 +300,10 @@ test("unit tier pins an explicit vitest pool, forks only by documented exception
 	// opting back into forks must be a deliberate edit to this list.
 	// Desktop's entry is conditional: it stays on forks on a Node whose
 	// webstorage globals force the execArgv that worker threads cannot take,
-	// on win32, and on macOS Node 24+ where native addon finalizers crash during
+	// on win32, and on Node 24+ where native addon finalizers crash during
 	// worker isolate teardown.
 	const forksByException = [
-		...(desktopUnitPool() === "forks"
-			? ["apps/desktop"]
-			: []),
+		...(desktopUnitPool() === "forks" ? ["apps/desktop"] : []),
 		"packages/maker-core",
 	];
 	const unpinned = [];
@@ -280,6 +332,13 @@ test("nodeWebstorageEnabled detects the globals that force the webstorage flag",
 		nodeWebstorageEnabled({ localStorage: Object.create(null) }),
 		true,
 	);
+});
+
+test("desktop unit uses forks on Node 24+ to avoid native finalizer crashes", () => {
+	assert.equal(desktopUnitPool("darwin", "24.18.0", false), "forks");
+	assert.equal(desktopUnitPool("darwin", "22.23.0", false), "threads");
+	assert.equal(desktopUnitPool("win32", "22.23.0", false), "forks");
+	assert.equal(desktopUnitPool("darwin", "25.0.0", true), "forks");
 });
 
 test("normalizeRelPath makes path matching independent of host path separators", () => {
@@ -444,12 +503,14 @@ test("single-level include pattern matches orca workflow test file", () => {
 	);
 });
 
-test("desktop unit excludes migration, direct db-tier, and source-contract guard tests while keeping normal unit tests", () => {
+test("desktop unit excludes integration, migration, direct db-tier, and source-contract guard tests while keeping normal unit tests", () => {
 	const workspace = { cwd: "apps/desktop", status: "required" };
 	const tier = {
 		status: "required",
 		exclude: [
 			"**/*.git-integration.test.ts",
+			"**/*.integration.test.ts",
+			"**/*.e2e.test.ts",
 			"src/main/localDb/**",
 			"src/main/__tests__/*Migration.test.ts",
 			"src/main/__tests__/schemaDriftRepair.test.ts",
@@ -518,6 +579,32 @@ test("desktop real-Git coverage is an explicit coordinated tier outside default 
 		"apps/desktop/src/main/git-review/__tests__/gitReviewSmoke.test.ts",
 	]);
 	assert.deepEqual(selectFilesForTier(desktop, tier, files), files.slice(0, 2));
+});
+
+test("maker-core real-Git worktree matrix is an explicit tier outside default unit", () => {
+	const makerCore = manifest.workspaces.find(
+		(workspace) => workspace.cwd === "packages/maker-core",
+	);
+	const tier = makerCore.tiers["git-integration"];
+
+	assert.equal(tier.status, "manual");
+	assert.equal(tier.coverage, "allowlist");
+	assert.deepEqual(tier.include, ["src/**/*.git-integration.test.ts"]);
+	assert.deepEqual(tier.command, {
+		type: "packageBin",
+		bin: "vitest",
+		args: ["run", "--maxWorkers=1"],
+	});
+	assert.ok(makerCore.tiers.unit.exclude.includes("**/*.git-integration.test.ts"));
+
+	const files = [
+		"packages/maker-core/src/memory/scope-resolver.git-integration.test.ts",
+		"packages/maker-core/src/memory/scope-resolver.test.ts",
+	];
+	assert.deepEqual(selectFilesForTier(makerCore, makerCore.tiers.unit, files), [
+		"packages/maker-core/src/memory/scope-resolver.test.ts",
+	]);
+	assert.deepEqual(selectFilesForTier(makerCore, tier, files), files.slice(0, 1));
 });
 
 test("default desktop unit keeps real Git subprocess coverage to one smoke", () => {
@@ -987,7 +1074,7 @@ test("unit CI shard arguments cover valid halves and reject malformed input", ()
 });
 
 test("test gate lock covers heavy local tiers but skips guard, CI, and explicit bypass", () => {
-	for (const tier of ["unit", "db", "git-integration"]) {
+	for (const tier of ["unit", "db", "git-integration", "integration", "e2e"]) {
 		assert.equal(shouldUseTestGateLock({ tier, env: {} }), true);
 	}
 	assert.equal(shouldUseTestGateLock({ all: true, env: {} }), true);

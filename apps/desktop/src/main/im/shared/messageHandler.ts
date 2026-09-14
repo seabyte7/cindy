@@ -66,14 +66,6 @@ export function createMessageHandler(
     }
   }
 
-  async function mirrorTerminalReply(event: IMMessageEvent, text: string): Promise<void> {
-    if (!event.finalReplyMirror) return;
-    try {
-      await richIm?.mirrorFinalReply?.(event.finalReplyMirror, text);
-    } catch {
-      /* swallow */
-    }
-  }
   const log = createLogger(`im:${channel}:msg`);
 
   /** Per-user serial lock — same shape as legacy messageRouter.turnLocks. */
@@ -158,7 +150,6 @@ export function createMessageHandler(
         const msg = err instanceof Error ? err.message : String(err);
         log.warn(`controlInProgress notice failed (non-fatal): ${msg}`);
       }
-      await mirrorTerminalReply(event, ui.agent.controlInProgress);
       return;
     }
 
@@ -202,7 +193,6 @@ export function createMessageHandler(
           log.warn(`!stop reply failed (non-fatal): ${msg}`);
         }
       }
-      await mirrorTerminalReply(event, reply);
       return;
     }
 
@@ -239,18 +229,11 @@ export function createMessageHandler(
             },
           }
         : undefined;
-      let slashMirrored = false;
-      const mirrorSlashReply = async (text: string): Promise<void> => {
-        if (slashMirrored) return;
-        slashMirrored = true;
-        await mirrorTerminalReply(event, text);
-      };
       try {
         await slash.handleSlashCommand(event.text, {
           botContextId: event.contextId,
           userId: event.senderId,
           consumePendingOpener: sink,
-          ...(event.finalReplyMirror ? { mirrorTerminalReply: mirrorSlashReply } : {}),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -278,7 +261,6 @@ export function createMessageHandler(
             /* 发送失败与卡残留同一最终边界 */
           }
         }
-        await mirrorSlashReply(errorText);
       }
       return;
     }
@@ -304,7 +286,6 @@ export function createMessageHandler(
           log.warn(`unsupportedOnly send failed (non-fatal): ${msg}`);
         }
       }
-      await mirrorTerminalReply(event, notice);
       return;
     }
 
@@ -327,11 +308,7 @@ export function createMessageHandler(
 
     // ── invoke agent ────────────────────────────────────────────────────────
     // 送模型正文改写钩子(群上下文拼装): 失败按"不改写"降级, 不阻断消息。
-    let prepared: {
-      agentText: string;
-      contextAttachments?: IMAttachment[];
-      commit?: () => void | Promise<void>;
-    } | null = null;
+    let prepared: Awaited<ReturnType<NonNullable<ImChannelAdapter['prepareAgentTurnText']>>> = null;
     // 「已收到」表情先落, 再拼上下文 —— 群上下文拼装要回翻群历史(可能翻页 + 调
     // 轻量模型), 慢的时候几十秒没有任何反馈, 用户只能看着不动的消息猜 bot 是不是
     // 挂了(实测最慢到 87s)。句柄交给 turn 接管(turn 收口时照常撤掉/换成结果
@@ -393,6 +370,7 @@ export function createMessageHandler(
           : {}),
         ...(prePersisted ? { prePersistedUserMessage: prePersisted } : {}),
         ...(prepared ? { agentText: prepared.agentText } : {}),
+        ...(prepared?.contextSnapshot ? { contextSnapshot: prepared.contextSnapshot } : {}),
         // 群历史附件只进模型消息、不落库(见 ImRunAgentTurnArgs.contextAttachments)。
         ...(prepared?.contextAttachments?.length
           ? { contextAttachments: prepared.contextAttachments }
@@ -407,7 +385,6 @@ export function createMessageHandler(
             }
           : {}),
         attachments: event.attachments,
-        ...(event.finalReplyMirror ? { finalReplyMirror: event.finalReplyMirror } : {}),
         // threadScoped 渠道: scopeKey = thread root ts(thread = session 路由键)
         scopeKey: threadScoped ? event.scopeKey : undefined,
         // Title generation and similar detached work must stay visible to the
@@ -442,7 +419,6 @@ export function createMessageHandler(
           /* swallow */
         }
       }
-      await mirrorTerminalReply(event, errorText);
     }
   }
 
@@ -454,16 +430,6 @@ export function createMessageHandler(
       if (accountGeneration === null) {
         log.info(`drop inbound message after account boundary closed channel=${channel}`);
         return;
-      }
-      let releaseQueuedMirror: (() => void) | undefined;
-      if (event.finalReplyMirror) {
-        try {
-          const release = richIm?.retainFinalReplyMirror?.(event.finalReplyMirror);
-          if (typeof release === 'function') releaseQueuedMirror = release;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.warn(`retainFinalReplyMirror at enqueue failed (non-fatal): ${msg}`);
-        }
       }
       // threadScoped 渠道: 同 thread 串行、跨 thread 并行(scopeKey 进锁键);
       // feishu scopeKey 恒 undefined — 键多一个冒号后缀, 行为不变。
@@ -477,15 +443,6 @@ export function createMessageHandler(
           runInImAccountGeneration(accountGeneration, () =>
             processOne(im, event, accountGeneration),
           ).catch((err) => {
-            // `processOne` only rejects before it has handed the mirror to a
-            // terminal send path (for example, when an adapter policy hook
-            // throws). Release the enqueue retain for every such drop, not
-            // only account-generation invalidation.
-            try {
-              releaseQueuedMirror?.();
-            } catch {
-              /* best-effort */
-            }
             if (isImAccountScopeClosedError(err)) {
               log.info(`drop inbound message from stale account generation channel=${channel}`);
               return;

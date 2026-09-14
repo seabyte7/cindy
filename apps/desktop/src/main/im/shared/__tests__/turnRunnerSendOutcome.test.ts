@@ -6,20 +6,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  Maker,
+  Session,
   MAIN_OWNED_SEND_CONTEXT,
   TurnPermissionPolicyUnsupportedError,
 } from '@cindy/maker-core';
 import type {
+  AgentSessionHandle,
+  BaseAgent,
+  SessionStorage,
   AgentEvent,
   Capabilities,
   InteractionDecision,
   InteractionRequest,
   MakerEvent,
-  Session,
   SessionSendResult,
   TurnPermissionPolicy,
 } from '@cindy/maker-core';
 import type { ChannelIM } from '@cindy/im';
+import { setMainLocale } from '../../../i18n';
 
 const mocks = vi.hoisted(() => ({
   logger: {
@@ -28,7 +33,6 @@ const mocks = vi.hoisted(() => ({
     error: vi.fn(),
     debug: vi.fn(),
   },
-  releaseFinalReplyMirror: vi.fn(),
   feishuIm: {
     reactToMessage: vi.fn(),
     removeMessageReaction: vi.fn(),
@@ -41,8 +45,6 @@ const mocks = vi.hoisted(() => ({
     consumePendingOpenerCard: vi.fn(),
     getPendingOpenerTrigger: vi.fn(),
     takeNotedFallbackOpenerId: vi.fn(),
-    retainFinalReplyMirror: vi.fn(),
-    mirrorFinalReply: vi.fn(),
   },
   getMaker: vi.fn(),
   listProviders: vi.fn(),
@@ -424,6 +426,7 @@ function setupSessionWithId(
 }
 
 interface TurnOverrides {
+  contextSnapshot?: { groupContext?: string; replyContext?: string };
   userMessageId?: string;
   text?: string;
   agentText?: string;
@@ -432,12 +435,6 @@ interface TurnOverrides {
   groupHistoryAccess?: GroupHistoryAccessScope;
   prePersistedUserMessage?: { sessionId: string; clientId: string };
   onEarlyReject?: (reason: string, text: string) => Promise<boolean> | boolean;
-  finalReplyMirror?: {
-    kind: 'parent-chat';
-    chatId: string;
-    idempotencyKey: string;
-    accountEpoch: number;
-  };
 }
 
 async function runDefaultTurn(onTurnComplete = vi.fn(), overrides: TurnOverrides = {}) {
@@ -453,6 +450,7 @@ async function startDefaultTurn(onTurnComplete = vi.fn(), overrides: TurnOverrid
     userMessageId: overrides.userMessageId ?? 'msg-user',
     text: overrides.text ?? 'PROMPT_SECRET full user message TOKEN_VALUE file body',
     ...(overrides.agentText ? { agentText: overrides.agentText } : {}),
+    contextSnapshot: overrides.contextSnapshot,
     attachments: [],
     onTurnComplete,
     ...(overrides.onRouteResolved ? { onRouteResolved: overrides.onRouteResolved } : {}),
@@ -462,7 +460,6 @@ async function startDefaultTurn(onTurnComplete = vi.fn(), overrides: TurnOverrid
       ? { prePersistedUserMessage: overrides.prePersistedUserMessage }
       : {}),
     ...(overrides.onEarlyReject ? { onEarlyReject: overrides.onEarlyReject } : {}),
-    ...(overrides.finalReplyMirror ? { finalReplyMirror: overrides.finalReplyMirror } : {}),
   });
   return { onTurnComplete, turnPromise };
 }
@@ -567,7 +564,6 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     mocks.feishuIm.consumePendingOpenerCard.mockResolvedValue(false);
     mocks.feishuIm.getPendingOpenerTrigger.mockReturnValue(undefined);
     mocks.feishuIm.takeNotedFallbackOpenerId.mockReturnValue(undefined);
-    mocks.feishuIm.retainFinalReplyMirror.mockReturnValue(mocks.releaseFinalReplyMirror);
     mocks.feishuIm.startStreamingText.mockResolvedValue({
       messageId: 'stream-1',
       append: vi.fn(),
@@ -625,6 +621,71 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     await runDefaultTurn();
 
     expect(mocks.beginTurnChangeSetAtDispatch).toHaveBeenCalledWith(h.session, 'im-anchor-client');
+    expect(mocks.persistUserMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: expect.objectContaining({ im: 'feishu', contextSnapshot: {} }),
+      }),
+    );
+  });
+
+  it('uses the adapter service identity for both early persistence and accepted enrichment', async () => {
+    fakeAdapter.messageSourceIm = () => 'lark';
+    try {
+      const h = setupSession(async () => ({ accepted: true }));
+      mocks.getMaker.mockReturnValue({
+        ...createMakerHarness(h.session),
+        getSession: () => h.session,
+      });
+      mocks.persistUserMessage.mockResolvedValue({ clientId: 'early-client' });
+      await getRunner().persistInboundUserMessageEarly!({
+        botContextId: 'cli_test_bot',
+        userId: 'ou_user',
+        text: 'question',
+      });
+      expect(mocks.persistUserMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          source: expect.objectContaining({ im: 'lark', contextSnapshot: {} }),
+        }),
+      );
+
+      await runDefaultTurn(vi.fn(), {
+        prePersistedUserMessage: { sessionId: 'feishu-session', clientId: 'early-client' },
+        contextSnapshot: { groupContext: 'saved background' },
+      });
+      expect(mocks.persistUserMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          existingClientId: 'early-client',
+          source: expect.objectContaining({
+            im: 'lark',
+            contextSnapshot: { groupContext: 'saved background' },
+          }),
+        }),
+      );
+      expect(fakeAdapter.channel).toBe('feishu');
+    } finally {
+      delete fakeAdapter.messageSourceIm;
+    }
+  });
+
+  it('marks early IM rows with an empty snapshot rather than parsing the user body as context', async () => {
+    const h = setupSession(async () => ({ accepted: true }));
+    mocks.getMaker.mockReturnValue({
+      ...createMakerHarness(h.session),
+      getSession: () => h.session,
+    });
+    mocks.persistUserMessage.mockResolvedValue({ clientId: 'early-client' });
+    const text = '<group_chat_context>\n[群里最近的消息]\nuser pasted this\n</group_chat_context>';
+    await getRunner().persistInboundUserMessageEarly!({
+      botContextId: 'cli_test_bot',
+      userId: 'ou_user',
+      text,
+    });
+    expect(mocks.persistUserMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text,
+        source: { im: 'feishu', userText: text, contentFormat: 'user-text', contextSnapshot: {} },
+      }),
+    );
   });
 
   /**
@@ -633,12 +694,22 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
    */
   it('reuses a pre-persisted user message instead of writing a second row', async () => {
     const h = setupSession(async () => ({ accepted: true }));
+    mocks.persistUserMessage.mockResolvedValue({ clientId: 'early-client' });
 
     await runDefaultTurn(vi.fn(), {
       prePersistedUserMessage: { sessionId: 'feishu-session', clientId: 'early-client' },
+      contextSnapshot: { groupContext: '[Alice] saved background' },
     });
 
-    expect(mocks.persistUserMessage).not.toHaveBeenCalled();
+    expect(mocks.persistUserMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        existingClientId: 'early-client',
+        source: expect.objectContaining({
+          im: 'feishu',
+          contextSnapshot: { groupContext: '[Alice] saved background' },
+        }),
+      }),
+    );
     expect(mocks.beginTurnChangeSetAtDispatch).toHaveBeenCalledWith(h.session, 'early-client');
   });
 
@@ -1041,6 +1112,104 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     expect(mocks.persistUserMessage).not.toHaveBeenCalled();
   });
 
+  it('sends retirement recovery separately after the personal IM turn has completed', async () => {
+    setMainLocale('zh-CN');
+    const terminal = deferred<void>();
+    const ended = deferred<void>();
+    const closeFailure = deferred<void>();
+    let running = false;
+    const handle = {
+      id: 'pi', agentKind: 'pi', model: 'm',
+      send: vi.fn(async () => { running = true; }),
+      close: vi.fn(async () => { await closeFailure.promise; throw new Error('exit unconfirmed'); }),
+      isTurnRunning: () => running, setInteractionResolver() {},
+      async *events() {
+        await terminal.promise;
+        yield { type: 'text', data: { text: 'saved result', isFinal: true }, source: 'pi' } as AgentEvent;
+        running = false;
+        yield { type: 'done', data: { status: 'completed' }, source: 'pi' } as AgentEvent;
+        await ended.promise;
+      },
+    } as unknown as AgentSessionHandle;
+    const logger = { ...mocks.logger, trace() {}, fatal() {}, child() { return this; } };
+    const session = new Session({ id: 'feishu-session', agentKind: 'pi', workDir: '/repo',
+      handle, capabilities: {} as Capabilities, logger, turnStallMs: 0 });
+    mocks.getMaker.mockReturnValue(createMakerHarness(session));
+    const complete = vi.fn();
+    try {
+      await runDefaultTurn(complete);
+      expect(await session.closeAfterCurrentTurn({ failureEvent: () => ({ type: 'text', data: {
+        text: 'restart-cindy-to-refresh-packages', isFinal: true,
+      } }) })).toBe('deferred');
+      terminal.resolve();
+      await waitForAssertion(() => expect(complete).toHaveBeenCalledOnce());
+      mocks.feishuIm.sendText.mockClear();
+      closeFailure.resolve();
+      await waitForAssertion(() => expect(session.getStatus()).toBe('error'));
+      expect(mocks.feishuIm.sendText).toHaveBeenCalledExactlyOnceWith('ou_user',
+        'Pi 扩展未能完成刷新。请重启 Cindy 后再使用 Pi。', { threadTs: undefined });
+      expect(complete).toHaveBeenCalledOnce();
+      expect(handle.send).toHaveBeenCalledOnce();
+    } finally {
+      closeFailure.resolve();
+      vi.mocked(handle.close).mockImplementation(async () => { ended.resolve(); });
+      await session.close();
+      setMainLocale('en');
+    }
+  });
+
+  it('preserves queued IM input when an explicit switch takes over pending Pi retirement', async () => {
+    function handle(kind: 'pi' | 'claude-code') {
+      let end!: () => void;
+      const ended = new Promise<void>(resolve => { end = resolve; });
+      return {
+        id: kind, agentKind: kind, model: 'm',
+        send: vi.fn(async () => {}), close: vi.fn(async () => { end(); }),
+        isTurnRunning: () => false, setInteractionResolver() {},
+        async *events() { await ended; yield* [] as AgentEvent[]; },
+      } as unknown as AgentSessionHandle;
+    }
+    const oldHandle = handle('pi'), newHandle = handle('claude-code');
+    const agent = (kind: 'pi' | 'claude-code', runtime: AgentSessionHandle) => ({
+      kind, capabilities: {}, startSession: vi.fn(async () => runtime),
+    }) as unknown as BaseAgent;
+    const storage = {
+      get: vi.fn(async () => null),
+      create: vi.fn(async meta => ({ ...meta, createdAt: 1, updatedAt: 1 })),
+      update: vi.fn(async () => {}), list: vi.fn(async () => []), delete: vi.fn(async () => {}),
+    } as unknown as SessionStorage;
+    const logger = { ...mocks.logger, trace() {}, fatal() {}, child() { return this; } };
+    const maker = new Maker({ agents: { pi: agent('pi', oldHandle), 'claude-code': agent('claude-code', newHandle) }, storage, logger });
+    const old = await maker.createSession({ id: 'feishu-session', agentKind: 'pi', workingDir: '/repo', model: 'm' });
+    const closeEvents: MakerEvent[] = [];
+    maker.on(event => { if (event.type === 'session:closed') closeEvents.push(event); });
+    mocks.getMaker.mockReturnValue(maker);
+    const releaseSwitch = vi.fn();
+    const acquirePendingAgentSwitch = vi.fn(async () => {
+      const release = old.acquireTurnLease()!;
+      expect(await maker.closeSessionIfCurrent(old, 'runtime-refresh', { afterCurrentTurn: true })).toBe('deferred');
+      try {
+        await maker.closeSession(old.id, 'agent-switch');
+        await maker.createSession({ id: old.id, agentKind: 'claude-code', workingDir: '/repo', model: 'm' });
+      } finally { release(); }
+      return releaseSwitch;
+    });
+    const localRunner = createTurnRunner(fakeAdapter, fakeRepo, fakeCards, { acquirePendingAgentSwitch });
+    try {
+      await localRunner.runAgentTurn({ botContextId: 'cli_test_bot', userId: 'ou_user',
+        userMessageId: 'switch-after-retirement', text: 'send to the selected engine', attachments: [] });
+      expect(acquirePendingAgentSwitch).toHaveBeenCalledOnce();
+      expect(newHandle.send).toHaveBeenCalledOnce();
+      expect(oldHandle.send).not.toHaveBeenCalled();
+      expect(closeEvents).toEqual([{ type: 'session:closed', sessionId: old.id, session: old, reason: 'agent-switch' }]);
+      expect(localRunner.getMakerSessionById(old.id)).toBe(maker.getSession(old.id));
+      expect(releaseSwitch).toHaveBeenCalledOnce();
+    } finally {
+      localRunner.disposeAllSessions();
+      await maker.closeSession(old.id);
+    }
+  });
+
   it('applies a deferred switch and sends the first queued IM message through the refreshed session', async () => {
     const order: string[] = [];
     const turnPermissionPolicy: TurnPermissionPolicy = {
@@ -1172,6 +1341,75 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     },
   );
 
+  it.each([
+    {
+      capabilities: {} as Capabilities,
+      mode: 'ask' as const,
+      expected: 'AGENT_UNSUPPORTED_COPY',
+    },
+    {
+      capabilities: {
+        turnPermissionPolicy: {
+          supported: { supported: true },
+          unsupportedPermissionModes: ['bypassPermissions'],
+        },
+      } as unknown as Capabilities,
+      mode: 'bypassPermissions' as const,
+      expected: 'MODE_UNSUPPORTED_COPY:bypassPermissions',
+    },
+  ])(
+    'maps policy rejection to the matching user guidance',
+    async ({ capabilities, mode, expected }) => {
+      const h = createSessionHarness(
+        async () => {
+          throw new TurnPermissionPolicyUnsupportedError('claude-code', mode);
+        },
+        'feishu-session',
+        { capabilities },
+      );
+      mocks.getMaker.mockReturnValue(createMakerHarness(h.session));
+      const localRunner = createTurnRunner(
+        {
+          ...fakeAdapter,
+          ui: {
+            ...fakeAdapter.ui,
+            error: {
+              ...fakeAdapter.ui.error,
+              agentUnsupported: 'AGENT_UNSUPPORTED_COPY',
+              permissionModeUnsupported: (permissionMode: string) =>
+                `MODE_UNSUPPORTED_COPY:${permissionMode}`,
+            },
+          },
+        },
+        fakeRepo,
+        fakeCards,
+      );
+
+      try {
+        await localRunner.runAgentTurn({
+          botContextId: 'cli_test_bot',
+          userId: 'ou_user',
+          userMessageId: `msg-policy-copy-${mode}`,
+          text: 'policy failure',
+          attachments: [],
+          turnPermissionPolicy: {
+            origin: { kind: 'im', channel: 'wechat' },
+            confirmationSurface: 'channel',
+            forceConfirmToolCall: () => false,
+          },
+        });
+
+        expect(mocks.feishuIm.sendText).toHaveBeenCalledWith(
+          'ou_user',
+          expected,
+          expect.anything(),
+        );
+      } finally {
+        localRunner.disposeAllSessions();
+      }
+    },
+  );
+
   it('skips the turn policy when the channel declares the session mode optional (Full access guardrail removal)', async () => {
     // feishu 渠道设置显式放行「完全访问」后: 该档位的群轮次不再挂强确认
     // 策略, maker 不 fail-closed, 按用户选择直接执行。
@@ -1208,6 +1446,59 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
       );
       // 与策略配套的 turn lease 也不该挂。
       expect(h.session.acquireTurnLease).not.toHaveBeenCalled();
+    } finally {
+      localRunner.disposeAllSessions();
+    }
+  });
+
+  it('keeps a non-optional group policy in Full access so the turn fails closed', async () => {
+    mocks.peekSessionById.mockImplementationOnce(async () => ({
+      permissionMode: 'bypassPermissions',
+    } as unknown as ImSessionRow));
+    const h = createSessionHarness(
+      async () => {
+        throw new TurnPermissionPolicyUnsupportedError('pi', 'bypassPermissions');
+      },
+      'telegram-guest-full-access',
+      {
+        capabilities: {
+          turnPermissionPolicy: {
+            supported: { supported: true },
+            unsupportedPermissionModes: ['bypassPermissions'],
+          },
+        } as unknown as Capabilities,
+      },
+    );
+    mocks.getMaker.mockReturnValue(createMakerHarness(h.session));
+    const turnPermissionPolicy: TurnPermissionPolicy = {
+      origin: { kind: 'im', channel: 'telegram', taskId: 'msg-guest-policy' },
+      confirmationSurface: 'channel',
+      forceConfirmToolCall: () => false,
+    };
+    const optionalForMode = vi.fn(() => false);
+    const localAdapter = {
+      ...fakeAdapter,
+      turnPolicyOptionalForMode: optionalForMode,
+    } as unknown as ImChannelAdapter;
+    const localRunner = createTurnRunner(localAdapter, fakeRepo, fakeCards, {});
+
+    try {
+      const dispatch = await localRunner.dispatchAgentTurn({
+        botContextId: 'cli_test_bot',
+        userId: 'g/-100/77',
+        userMessageId: 'msg-guest-policy',
+        text: 'guest full access group turn',
+        attachments: [],
+        queueMode: 'external',
+        beforeProviderStart: vi.fn(async () => undefined),
+        turnPermissionPolicy,
+      });
+
+      expect(optionalForMode).toHaveBeenCalledWith('bypassPermissions', turnPermissionPolicy);
+      expect(dispatch).toEqual({
+        kind: 'rejected',
+        reason: 'TURN_PERMISSION_POLICY_UNSUPPORTED:mode:bypassPermissions',
+      });
     } finally {
       localRunner.disposeAllSessions();
     }
@@ -1800,32 +2091,6 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     );
   });
 
-  it('mirrors credential-busy early reject onto the parent-chat dual-delivery target', async () => {
-    const busy = new CredentialModeSwitchBusyError(['busy-session']);
-    mocks.getMaker.mockReturnValue(createMakerCreateSessionFailureHarness(busy));
-    const mirror = {
-      kind: 'parent-chat' as const,
-      chatId: 'oc_group',
-      accountEpoch: 1,
-      idempotencyKey: 'mirror-busy',
-    };
-
-    await runDefaultTurn(vi.fn(), { finalReplyMirror: mirror });
-    await flushMicrotasks();
-
-    expect(mocks.feishuIm.sendText).toHaveBeenCalledWith('ou_user', ui.agent.credentialBusy, {
-      threadTs: undefined,
-    });
-    expect(mocks.feishuIm.mirrorFinalReply).toHaveBeenCalledWith(
-      {
-        ...mirror,
-        allowedFileRoots: ['F:\\XDMaker'],
-        pinnedFileRoots: [],
-      },
-      ui.agent.credentialBusy,
-    );
-  });
-
   it('queues a second message while the first turn is running and dispatches it after done', async () => {
     mocks.feishuIm.reactToMessage.mockImplementation(
       async (messageId: string) => `reaction-${messageId}`,
@@ -1898,36 +2163,6 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
       'msg-second',
       'reaction-msg-second',
     );
-  });
-
-  it('releases mirror retention when a queued turn is dropped by stop', async () => {
-    setupSession(async () => ({ accepted: true }));
-    await runDefaultTurn(vi.fn(), { userMessageId: 'msg-first' });
-    const mirror = {
-      kind: 'parent-chat' as const,
-      chatId: 'oc_group',
-      accountEpoch: 1,
-      idempotencyKey: 'mirror-queued-stop',
-    };
-
-    await runDefaultTurn(vi.fn(), {
-      userMessageId: 'msg-second',
-      finalReplyMirror: mirror,
-    });
-    expect(mocks.feishuIm.retainFinalReplyMirror).toHaveBeenCalledWith({
-      ...mirror,
-      allowedFileRoots: ['F:\\XDMaker'],
-      pinnedFileRoots: [],
-    });
-    expect(mocks.releaseFinalReplyMirror).not.toHaveBeenCalled();
-
-    await expect(
-      getRunner().stopActiveTurn({
-        botContextId: 'cli_test_bot',
-        userId: 'ou_user',
-      }),
-    ).resolves.toMatchObject({ stopped: true, droppedQueued: 1 });
-    expect(mocks.releaseFinalReplyMirror).toHaveBeenCalledTimes(1);
   });
 
   it('queues while a desktop-originated turn is running (attached takeover) and dispatches on its stray done', async () => {
@@ -2699,188 +2934,12 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     );
   });
 
-  it('mirrors missing-auth early reject onto the parent-chat dual-delivery target', async () => {
-    mocks.readXdGatewayApiKey.mockReturnValue(null);
-    mocks.findActiveSession.mockResolvedValue(null);
-    const mirror = {
-      kind: 'parent-chat' as const,
-      chatId: 'oc_group',
-      accountEpoch: 1,
-      idempotencyKey: 'mirror-auth',
-    };
-    const expected = ui.agent.authMissing?.({
-      agentKind: 'claude-code',
-      model: 'claude-opus-4-7',
-      providerId: 'xd',
-      providerLabel: 'XD',
-      missing: 'gateway-key',
-    });
-
-    await runDefaultTurn(vi.fn(), { finalReplyMirror: mirror });
-
-    expect(mocks.createSession).not.toHaveBeenCalled();
-    expect(mocks.feishuIm.sendText).toHaveBeenCalledWith('ou_user', expected, {
-      threadTs: undefined,
-    });
-    expect(mocks.feishuIm.mirrorFinalReply).toHaveBeenCalledWith(mirror, expected);
-  });
-
-  it('arms only the true terminal finalize with the parent-chat mirror', async () => {
-    const handle = {
-      messageId: 'stream-terminal',
-      append: vi.fn(),
-      replace: vi.fn(),
-      finalize: vi.fn(),
-      close: vi.fn(),
-    };
-    mocks.feishuIm.startStreamingText.mockResolvedValue(handle);
-    const mirror = {
-      kind: 'parent-chat' as const,
-      chatId: 'oc_group',
-      accountEpoch: 1,
-      idempotencyKey: 'mirror-stream-done',
-    };
-    const h = setupSession(async () => ({ accepted: true }));
-    const onTurnComplete = vi.fn();
-    await runDefaultTurn(onTurnComplete, { finalReplyMirror: mirror });
-
-    expect(mocks.feishuIm.retainFinalReplyMirror).toHaveBeenCalledWith({
-      ...mirror,
-      allowedFileRoots: ['F:\\XDMaker'],
-      pinnedFileRoots: [],
-    });
-    expect(mocks.releaseFinalReplyMirror).not.toHaveBeenCalled();
-
-    h.emit({ type: 'text', data: { text: 'final answer', isFinal: true } });
-    await waitForAssertion(() => {
-      expect(mocks.feishuIm.startStreamingText).toHaveBeenCalledTimes(1);
-    });
-    expect(mocks.feishuIm.startStreamingText).toHaveBeenCalledWith('ou_user', undefined, {
-      threadTs: undefined,
-    });
-    expect(mocks.feishuIm.mirrorFinalReply).not.toHaveBeenCalled();
-
-    h.emit({ type: 'done', data: {} });
-    await waitForAssertion(() => {
-      expect(onTurnComplete).toHaveBeenCalledTimes(1);
-      expect(handle.finalize).toHaveBeenCalledTimes(1);
-    });
-    expect(handle.finalize).toHaveBeenCalledWith(expect.stringContaining('final answer'), {
-      finalReplyMirror: {
-        ...mirror,
-        allowedFileRoots: ['F:\\XDMaker'],
-        pinnedFileRoots: [],
-      },
-    });
-    expect(mocks.releaseFinalReplyMirror).toHaveBeenCalledTimes(1);
-    expect(mocks.feishuIm.mirrorFinalReply).not.toHaveBeenCalled();
-  });
-
-  it('supplies the parent-chat mirror only at terminal finalize so files reuse the upload key', async () => {
-    const handle = {
-      messageId: 'stream-armed',
-      append: vi.fn(),
-      replace: vi.fn(),
-      finalize: vi.fn(),
-      close: vi.fn(),
-    };
-    mocks.feishuIm.startStreamingText.mockResolvedValue(handle);
-    const mirror = {
-      kind: 'parent-chat' as const,
-      chatId: 'oc_group',
-      accountEpoch: 1,
-      idempotencyKey: 'mirror-armed',
-    };
-    const h = setupSession(async () => ({ accepted: true }));
-    const onTurnComplete = vi.fn();
-    await runDefaultTurn(onTurnComplete, { finalReplyMirror: mirror });
-
-    h.emit({ type: 'text', data: { text: 'see the file', isFinal: true } });
-    await waitForAssertion(() => {
-      expect(mocks.feishuIm.startStreamingText).toHaveBeenCalledTimes(1);
-    });
-    expect(handle.finalize).not.toHaveBeenCalled();
-    expect(mocks.feishuIm.mirrorFinalReply).not.toHaveBeenCalled();
-
-    h.emit({ type: 'done', data: {} });
-    await waitForAssertion(() => {
-      expect(onTurnComplete).toHaveBeenCalledTimes(1);
-      expect(handle.finalize).toHaveBeenCalledTimes(1);
-    });
-    expect(handle.finalize).toHaveBeenCalledWith(expect.stringContaining('see the file'), {
-      finalReplyMirror: {
-        ...mirror,
-        allowedFileRoots: ['F:\\XDMaker'],
-        pinnedFileRoots: [],
-      },
-    });
-    expect(mocks.feishuIm.mirrorFinalReply).not.toHaveBeenCalled();
-  });
-
-  it('mirrors side-channel tool images onto the parent-chat even when the final text omits them', async () => {
-    const extraAbsPath = 'C:\\cindy-media\\tool-extra.png';
-    mocks.resolveXdtImageUrl.mockReturnValue({ absPath: extraAbsPath });
-    const handle = {
-      messageId: 'stream-extra-image',
-      append: vi.fn(),
-      replace: vi.fn(),
-      finalize: vi.fn(),
-      close: vi.fn(),
-      addExtraImageAbsPath: vi.fn(),
-    };
-    mocks.feishuIm.startStreamingText.mockResolvedValue(handle);
-    const mirror = {
-      kind: 'parent-chat' as const,
-      chatId: 'oc_group',
-      accountEpoch: 1,
-      idempotencyKey: 'mirror-extra-image',
-    };
-    const h = setupSession(async () => ({ accepted: true }));
-    const onTurnComplete = vi.fn();
-    await runDefaultTurn(onTurnComplete, { finalReplyMirror: mirror });
-
-    h.emit({
-      type: 'tool_result_full',
-      data: {
-        fullText: JSON.stringify({ xdt_image_url: 'xdt-image://blob/tool-extra.png' }),
-      },
-    });
-    h.emit({ type: 'text', data: { text: 'here is the image', isFinal: true } });
-    await waitForAssertion(() => {
-      expect(mocks.feishuIm.startStreamingText).toHaveBeenCalled();
-    });
-    h.emit({ type: 'done', data: {} });
-    await waitForAssertion(() => {
-      expect(onTurnComplete).toHaveBeenCalledTimes(1);
-      expect(handle.finalize).toHaveBeenCalledTimes(1);
-    });
-    expect(handle.addExtraImageAbsPath).toHaveBeenCalledWith(extraAbsPath);
-    expect(handle.finalize).toHaveBeenCalledWith(
-      expect.stringContaining('here is the image'),
-      {
-        finalReplyMirror: {
-          ...mirror,
-          allowedFileRoots: ['F:\\XDMaker'],
-          pinnedFileRoots: [],
-        },
-      },
-    );
-    expect(mocks.feishuIm.mirrorFinalReply).not.toHaveBeenCalled();
-
-  });
-
-  it('never treats SSH workdir or media paths as local parent-chat files', async () => {
-    const mirror = {
-      kind: 'parent-chat' as const,
-      chatId: 'oc_group',
-      accountEpoch: 1,
-      idempotencyKey: 'mirror-remote-safe',
-    };
+  it('never treats SSH workdir or media paths as local files', async () => {
     const h = setupAttachedSession(async () => ({ accepted: true }), {
       remoteHostId: 'ssh-host-1',
     });
     const onTurnComplete = vi.fn();
-    await runDefaultTurn(onTurnComplete, { finalReplyMirror: mirror });
+    await runDefaultTurn(onTurnComplete);
 
     h.emit({
       type: 'tool_result_full',
@@ -2898,100 +2957,7 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     expect(mocks.resolveXdtImageUrl).not.toHaveBeenCalled();
     expect(mocks.materializeLocalMarkdownImages).not.toHaveBeenCalled();
     const handle = await mocks.feishuIm.startStreamingText.mock.results[0].value;
-    expect(handle.finalize).toHaveBeenCalledWith(expect.stringContaining('remote final'), {
-      finalReplyMirror: {
-        ...mirror,
-        allowedFileRoots: [],
-        pinnedFileRoots: [],
-      },
-    });
-    expect(mocks.feishuIm.mirrorFinalReply).not.toHaveBeenCalled();
-  });
-
-  it('defers parent-chat mirroring across an in-turn permission card until the turn completes', async () => {
-    const firstHandle = {
-      messageId: 'stream-pre',
-      append: vi.fn(),
-      replace: vi.fn(),
-      finalize: vi.fn(),
-      close: vi.fn(),
-    };
-    const secondHandle = {
-      messageId: 'stream-post',
-      append: vi.fn(),
-      replace: vi.fn(),
-      finalize: vi.fn(),
-      close: vi.fn(),
-    };
-    mocks.feishuIm.startStreamingText
-      .mockResolvedValueOnce(firstHandle)
-      .mockResolvedValueOnce(secondHandle);
-    mocks.buildPermissionCard.mockReturnValue({
-      title: 'allow bash?',
-      body: 'run bash',
-      buttons: [{ id: 'allow', label: 'Allow' }],
-    });
-    mocks.feishuIm.sendInteractiveCard.mockResolvedValue({ messageId: 'perm-card' });
-    const permissionGate = deferred<InteractionDecision>();
-    mocks.registerPending.mockReturnValue(permissionGate.promise);
-    const mirror = {
-      kind: 'parent-chat' as const,
-      chatId: 'oc_group',
-      accountEpoch: 1,
-      idempotencyKey: 'mirror-interact',
-    };
-    const h = setupSession(async () => ({ accepted: true }));
-    const onTurnComplete = vi.fn();
-    await runDefaultTurn(onTurnComplete, { finalReplyMirror: mirror });
-
-    h.emit({ type: 'text', data: { text: 'I will run bash', isFinal: true } });
-    await waitForAssertion(() => {
-      expect(mocks.feishuIm.startStreamingText).toHaveBeenCalledTimes(1);
-    });
-    expect(mocks.feishuIm.startStreamingText).toHaveBeenCalledWith('ou_user', undefined, {
-      threadTs: undefined,
-    });
-
-    const interactionPromise = h.dispatchInteraction({
-      kind: 'permission',
-      requestId: 'req-perm',
-      toolName: 'bash',
-      input: { command: 'ls' },
-    });
-    await waitForAssertion(() => {
-      expect(firstHandle.finalize).toHaveBeenCalled();
-      expect(mocks.feishuIm.sendInteractiveCard).toHaveBeenCalled();
-    });
-    expect(firstHandle.finalize).toHaveBeenCalledWith(expect.stringContaining('I will run bash'));
-    expect(mocks.feishuIm.mirrorFinalReply).not.toHaveBeenCalled();
-
-    permissionGate.resolve({ kind: 'permission', behavior: 'allow' });
-    await expect(interactionPromise).resolves.toEqual({
-      kind: 'permission',
-      behavior: 'allow',
-    });
-
-    h.emit({ type: 'text', data: { text: 'command finished: ok', isFinal: true } });
-    await waitForAssertion(() => {
-      expect(mocks.feishuIm.startStreamingText).toHaveBeenCalledTimes(2);
-    });
-    h.emit({ type: 'done', data: {} });
-    await waitForAssertion(() => {
-      expect(onTurnComplete).toHaveBeenCalledTimes(1);
-      expect(secondHandle.finalize).toHaveBeenCalled();
-    });
-    expect(secondHandle.finalize).toHaveBeenCalledWith(
-      expect.stringContaining('command finished: ok'),
-      {
-        finalReplyMirror: {
-          ...mirror,
-          allowedFileRoots: ['F:\\XDMaker'],
-          pinnedFileRoots: [],
-        },
-      },
-    );
-    expect(String(secondHandle.finalize.mock.calls[0][0])).not.toContain('I will run bash');
-    expect(mocks.feishuIm.mirrorFinalReply).not.toHaveBeenCalled();
+    expect(handle.finalize).toHaveBeenCalledWith(expect.stringContaining('remote final'));
   });
 
   it('does not report route resolution before auth passes on an existing route', async () => {

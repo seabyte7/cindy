@@ -338,6 +338,20 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     });
   });
 
+  it.each([2, 3] as const)('keeps v%s legacy recommendation metadata approved across reload', async (schemaVersion) => {
+    const recommendations = { custom: 'unrelated metadata' };
+    const manifest = schemaVersion === 2
+      ? { ...goodManifest(), recommendations }
+      : { schemaVersion: 3, minCindyVersion: '0.1.61', id: 'hello', name: 'Hello', version: '1.0.0', entry: 'main.js', recommendations };
+    await writeLegacyInstall('hello', manifest);
+    expect((await manager.migrateLegacyApprovalsOnce()).migrated).toEqual(['hello']);
+    expect(manager.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
+    const approved = manager.approvedInstallEvidence('hello')?.approvedManifest;
+    if (schemaVersion === 2) expect(approved).not.toHaveProperty('recommendations');
+    else expect(approved).toHaveProperty('recommendations', recommendations);
+    expect(manager.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
+  });
+
   it('带 setup.kv 的旧安装无感迁移并保留标准化就绪声明', async () => {
     await writeLegacyInstall('hello', setupKvManifest(), {
       files: { 'settings.html': '<!doctype html>' },
@@ -1541,6 +1555,35 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
   /** 在同一组根上新建 manager —— 构造期跑一次崩溃恢复扫描。 */
   const freshManager = () =>
     new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale, onChanged });
+
+  it('rejects cancellation during install preparation before publishing bytes and allows retry', async () => {
+    const file = await makeCindy('cancelled.cindy', goodManifest());
+    const controller = new AbortController();
+    const writePending = GhostInstallReceiptStore.prototype.writePendingMutation;
+    const pendingSpy = vi.spyOn(GhostInstallReceiptStore.prototype, 'writePendingMutation')
+      .mockImplementation(async function (this: GhostInstallReceiptStore, ...args) {
+        await writePending.apply(this, args);
+        controller.abort();
+      });
+    const guard = vi.fn(() => {
+      expect(fs.existsSync(pendingMarkerPath())).toBe(true);
+      expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(false);
+      controller.signal.throwIfAborted();
+    });
+    try {
+      await expectRejection(await manager.install(file, { beforePackagePlacement: guard }), 'io');
+      expect(guard).toHaveBeenCalledOnce();
+      expect(manager.list()).toEqual([]);
+      expect(fs.existsSync(pendingMarkerPath())).toBe(false);
+      expect(fs.existsSync(receiptPath())).toBe(false);
+      expect((await fs.promises.readdir(rootDir)).filter(name => name.startsWith('.cindy-installing-'))).toEqual([]);
+      expect(onChanged).not.toHaveBeenCalled();
+    } finally {
+      pendingSpy.mockRestore();
+    }
+    const retried = await manager.install(file);
+    expect(retried).toMatchObject({ ghost: { manifest: { id: 'hello' }, enabled: true } });
+  });
 
   it('崩溃的装入(有 finalDir、无 receipt、有 install 标记)被恢复删除,不被迁移收编', async () => {
     // install 在 rename(staging→final) 之后、写 receipt 之前崩溃:finalDir 完整、无

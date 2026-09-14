@@ -9,16 +9,26 @@ import {
   CODEX_HISTORY_OVERSIZED_REASON,
   CONTEXT_OVERFLOW_REASON,
   isContextOverflowErrorMessage,
+  isRemoteCompactEncryptedContentError,
 } from '@cindy/maker-core';
 import {
   projectAgentFacingText,
   readAgentInputReferences,
 } from '@cindy/maker-shared/agent-input-projection';
 
+import {
+  assessModelSwitchContext,
+  MODEL_WINDOW_SWITCH_FORCE_REBUILD_PCT,
+  shouldHandoffAfterContextAssessment,
+} from '../../shared/modelSwitchAssessment.js';
 import { afterStripAttempt, decideCindyCompression } from './cindyContextCompression.js';
 import { buildHandoffText, extractPlainText, type HandoffSourceMessage } from './agentHandoff.js';
 
 const SYNTHETIC_TRIGGER_PREFIX = '[UI_ACTION_TRIGGER]';
+
+export const CODEX_HISTORY_CONTINUE_MESSAGE =
+  'Continue the unfinished task from the retained history. Do not repeat completed actions. ' +
+  'Some historical tool images were omitted during recovery; inspect them again only if needed.';
 
 export interface OverflowSourceMessage extends HandoffSourceMessage {
   clientId: string;
@@ -43,7 +53,9 @@ export function isContextOverflowErrorData(data: unknown): boolean {
   const rec = data as { reason?: unknown; message?: unknown; sdkError?: unknown };
   if (rec.reason === CONTEXT_OVERFLOW_REASON) return true;
   return [rec.message, rec.sdkError].some(
-    (value) => typeof value === 'string' && isContextOverflowErrorMessage(value),
+    (value) =>
+      typeof value === 'string' &&
+      (isContextOverflowErrorMessage(value) || isRemoteCompactEncryptedContentError(value)),
   );
 }
 
@@ -53,6 +65,13 @@ export function isOversizedHistoryErrorData(data: unknown): boolean {
 }
 
 export type CodexStripRelinkResult = 'recovered' | 'not-needed' | 'failed' | 'busy' | 'stale';
+
+export interface NativeSessionRecoveryTarget {
+  model: string;
+  providerId: string | null;
+  effort: string | null;
+  fastMode: boolean;
+}
 
 const PI_PROMPT_RPC_TIMEOUT_RE = /pi rpc timeout after \d+ms: prompt\b/i;
 
@@ -292,6 +311,7 @@ export function findLatestRebuildableError(
 export interface ContextOverflowRolloverDeps {
   getSessionRow(sessionId: string): Promise<{
     status: string;
+    source?: string | null;
     agentKind: string;
     remoteHostId: string | null;
     clearedAt: number | null;
@@ -329,19 +349,22 @@ export interface ContextOverflowRolloverDeps {
     isTurnRunning(): boolean;
     getUsageSnapshot?(): { contextTokens: number; contextWindow: number; needsRollover?: boolean };
   } | null | undefined;
+  rehydrateColdPiRuntimeForWindowVerification?(sessionId: string): Promise<void>;
   closeSession(sessionId: string): Promise<void>;
   drainPersistQueue(): Promise<void>;
   commitRebuild(
     sessionId: string,
     handoff: string,
     meta: {
-      reason: 'context-overflow' | 'pi-prompt-timeout';
+      reason: 'context-overflow' | 'model-window-switch' | 'pi-prompt-timeout' | 'native-session-recovery';
       sourceUserClientId: string | null;
       sourceAgentKind?: 'cc' | 'codex' | 'pi';
       sourceModel?: string | null;
       sourceProviderId?: string | null;
       expectedClearedAt?: number | null;
+      replacementRoute?: NativeSessionRecoveryTarget & { expectedSdkSessionId: string };
     },
+    signal?: AbortSignal,
   ): Promise<void>;
   setPendingHandoff(sessionId: string, handoff: string, expectedGeneration?: number): void;
   readPendingHandoffGeneration?(sessionId: string): number;
@@ -349,7 +372,17 @@ export interface ContextOverflowRolloverDeps {
     sessionId: string,
     content: unknown,
     agentFacingWireContent?: unknown,
+    recovery?: { signal?: AbortSignal; resumeRetainedHistory?: false } | {
+      signal?: AbortSignal;
+      resumeRetainedHistory: true;
+      sourceUserContent: unknown;
+      sourceUserClientId: string;
+      sourceCapabilitySelectionText: string;
+    },
   ): Promise<{ accepted: boolean }>;
+  getRecoveryAbortSignal?(sessionId: string): AbortSignal;
+  /** Synchronous: external dispatch may release its turn marker on this same terminal event. */
+  hasExternalRecoveryOwner?(sessionId: string): boolean;
   onRebuilt?(sessionId: string): void;
   withSessionLock?<T>(sessionId: string, fn: () => Promise<T>): Promise<T>;
   withCloseSuppressed<T>(sessionId: string, fn: () => Promise<T>): Promise<T>;
@@ -361,12 +394,72 @@ export interface ContextOverflowRolloverDeps {
 
 export type OverflowClaimResult = 'claimed' | 'in-flight' | 'idle';
 
+export type ModelWindowSwitchPreparationResult =
+  | 'not-needed'
+  | 'confirmation-required'
+  | 'rebuilt'
+  | 'busy'
+  | 'remote-unsupported'
+  | 'unknown-context'
+  | 'in-flight';
+
+export function hasModelWindowContextToProtect(
+  contextTokensKnown: boolean,
+  contextTokens: number,
+): boolean {
+  return !contextTokensKnown || contextTokens !== 0;
+}
+
+export function shouldRebuildForModelWindowSwitch(input: {
+  contextTokens: number;
+  currentContextWindow: number;
+  targetContextWindow: number;
+}): boolean {
+  if (
+    !Number.isFinite(input.currentContextWindow) ||
+    input.currentContextWindow <= 0 ||
+    !Number.isFinite(input.targetContextWindow) ||
+    input.targetContextWindow <= 0 ||
+    input.targetContextWindow >= input.currentContextWindow
+  ) {
+    return false;
+  }
+  return shouldHandoffAfterContextAssessment(
+    assessModelSwitchContext({
+      contextTokens: input.contextTokens,
+      targetContextWindow: input.targetContextWindow,
+      autoCompactThresholdPct: MODEL_WINDOW_SWITCH_FORCE_REBUILD_PCT,
+    }),
+  );
+}
+
 export function createContextOverflowRollover(deps: ContextOverflowRolloverDeps): {
   claim(sessionId: string): OverflowClaimResult;
+  cancelRecovery(sessionId: string): void;
   tryRecover(sessionId: string, errorData: unknown): Promise<boolean>;
   prepareUnhealthySession(sessionId: string): Promise<boolean>;
+  prepareNativeSessionRecovery(
+    sessionId: string,
+    // null is an explicit Bot restart: keep its route, including before the first native handle.
+    target: NativeSessionRecoveryTarget | null,
+    assertCanCommit: () => void,
+    signal?: AbortSignal,
+  ): Promise<void>;
+  prepareModelWindowSwitch(
+    sessionId: string,
+    target: {
+      contextWindow: number;
+      recheckTargetPressure?: boolean;
+      confirmedTargetPressure?: boolean;
+      onConfirmationRequired?: (contextTokens: number) => void;
+      assertCanCommit?: () => void;
+      beforeClose?: () => void;
+    },
+  ): Promise<ModelWindowSwitchPreparationResult>;
 } {
-  const inFlight = new Set<string>();
+  const inFlight = new Map<string, AbortController | undefined>();
+  // One automatic continuation per source input, not one per replacement thread.
+  const continuedInputs = new Map<string, string>();
 
   const runStripRelink = async (
     sessionId: string,
@@ -394,14 +487,21 @@ export function createContextOverflowRollover(deps: ContextOverflowRolloverDeps)
     });
   };
 
-  const runRecover = async (sessionId: string, errorData: unknown): Promise<boolean> => {
+  const runRecover = async (
+    sessionId: string,
+    errorData: unknown,
+    signal?: AbortSignal,
+  ): Promise<boolean> => {
+    if (signal?.aborted) return true;
     const oversized = isOversizedHistoryErrorData(errorData);
     if (!isContextOverflowErrorData(errorData) && !oversized) return false;
     await deps.drainPersistQueue();
     const sessionRow = await deps.getSessionRow(sessionId);
+    signal?.throwIfAborted();
     if (!sessionRow || sessionRow.status === 'deleted') return false;
     // SSH only. device-link 会话落在被控桌面本地库,没有 remoteHostId,必须继续换窗。
     if (sessionRow.remoteHostId) return false;
+    if (oversized && sessionRow.source !== 'desktop') return false;
 
     return deps.withCloseSuppressed(sessionId, async () => {
       const live = deps.getLiveSession(sessionId);
@@ -418,16 +518,47 @@ export function createContextOverflowRollover(deps: ContextOverflowRolloverDeps)
         tokens,
       });
       if (action === 'strip') {
+        const source = await deps.listMessages(sessionId);
+        const sourceUser =
+          [...source].reverse().find((message) => message.role === 'user' && !isSyntheticUser(message)) ??
+          (await deps.findLatestUser?.(sessionId));
+        if (signal?.aborted) return true;
+        if (deps.hasExternalRecoveryOwner?.(sessionId)) return false;
+        if (sourceUser && continuedInputs.get(sessionId) === sourceUser.clientId) return false;
         const strip = await runStripRelink(sessionId, sessionRow);
+        signal?.throwIfAborted();
         const next = afterStripAttempt(strip, { local: true, tokens });
-        if (next === 'done') {
+        if (next === 'done' || (strip === 'not-needed' && next === 'none')) {
+          // A repaired thread still needs a turn. Continue from retained history,
+          // never replay the original input after tools may already have run.
+          if (!sourceUser || isExternalDispatchOwner(sourceUser.agentMeta) ||
+            deps.hasExternalRecoveryOwner?.(sessionId)) return false;
+          const sourceWire = persistedUserContentToWireMessage(
+            sourceUser.agentMeta?.agentFacingWireContent ?? sourceUser.content,
+          );
+          const sourceText = typeof sourceWire === 'string' ? sourceWire : sourceWire.content;
+          continuedInputs.set(sessionId, sourceUser.clientId);
+          const continuation = await deps.replayUserMessage(
+            sessionId,
+            CODEX_HISTORY_CONTINUE_MESSAGE,
+            undefined,
+            {
+              signal,
+              resumeRetainedHistory: true,
+              sourceUserContent: sourceUser.content,
+              sourceUserClientId: sourceUser.clientId,
+              sourceCapabilitySelectionText: typeof sourceText === 'string'
+                ? sourceText : extractPlainText(sourceText),
+            },
+          );
+          if (signal?.aborted) return true;
+          if (!continuation.accepted) return false;
           deps.onRebuilt?.(sessionId);
           deps.log.info('codex oversized history strip settled', { sessionId, strip, next });
           return true;
         }
         if (next === 'none') {
-          if (strip === 'not-needed') deps.onRebuilt?.(sessionId);
-          return strip === 'not-needed';
+          return false;
         }
         action = next;
         deps.log.warn('codex oversized strip did not finish; rebuilding', { sessionId, strip });
@@ -438,6 +569,7 @@ export function createContextOverflowRollover(deps: ContextOverflowRolloverDeps)
         deps.listMessages(sessionId),
         deps.findLatestRebuildMeta(sessionId),
       ]);
+      signal?.throwIfAborted();
       const alreadyRolled =
         rebuildMeta?.reason === 'context-overflow' ? rebuildMeta.sourceUserClientId : null;
       const plan = planContextOverflowRollover(source, alreadyRolled);
@@ -450,6 +582,7 @@ export function createContextOverflowRollover(deps: ContextOverflowRolloverDeps)
       }
 
       if (live) await deps.closeSession(sessionId);
+      signal?.throwIfAborted();
       const label = engineLabelForOverflow(sessionRow.agentKind);
       const handoff = buildHandoffText(plan.handoffMessages, {
         fromLabel: label,
@@ -464,7 +597,8 @@ export function createContextOverflowRollover(deps: ContextOverflowRolloverDeps)
         sourceModel: sessionRow.model ?? null,
         sourceProviderId: sessionRow.providerId ?? null,
         expectedClearedAt: sessionRow.clearedAt,
-      });
+      }, signal);
+      signal?.throwIfAborted();
       deps.setPendingHandoff(sessionId, handoff, handoffGeneration);
       if (plan.skipGenericReplay) {
         deps.log.info('overflow rebuilt; external owner must retry send', {
@@ -473,14 +607,13 @@ export function createContextOverflowRollover(deps: ContextOverflowRolloverDeps)
         });
         return true;
       }
-      const replay =
-        plan.sourceUserAgentFacingWireContent !== undefined
-          ? await deps.replayUserMessage(
-              sessionId,
-              plan.sourceUserContent,
-              plan.sourceUserAgentFacingWireContent,
-            )
-          : await deps.replayUserMessage(sessionId, plan.sourceUserContent);
+      const replay = await deps.replayUserMessage(
+        sessionId,
+        plan.sourceUserContent,
+        plan.sourceUserAgentFacingWireContent,
+        { signal },
+      );
+      signal?.throwIfAborted();
       if (!replay.accepted) {
         deps.log.warn('context overflow rollover replay was not accepted', {
           sessionId,
@@ -496,6 +629,163 @@ export function createContextOverflowRollover(deps: ContextOverflowRolloverDeps)
       });
       return true;
     });
+  };
+
+  const runPrepareModelWindowSwitch = async (
+    sessionId: string,
+    target: {
+      contextWindow: number;
+      recheckTargetPressure?: boolean;
+      confirmedTargetPressure?: boolean;
+      onConfirmationRequired?: (contextTokens: number) => void;
+      assertCanCommit?: () => void;
+      beforeClose?: () => void;
+    },
+  ): Promise<ModelWindowSwitchPreparationResult> => {
+    await deps.drainPersistQueue();
+    const sessionRow = await deps.getSessionRow(sessionId);
+    if (!sessionRow || sessionRow.status === 'deleted' || !sessionRow.sdkSessionId) {
+      return 'not-needed';
+    }
+    const persistedContextTokens =
+      typeof sessionRow.contextTokens === 'number' &&
+      Number.isFinite(sessionRow.contextTokens) &&
+      sessionRow.contextTokens >= 0
+        ? sessionRow.contextTokens
+        : 0;
+    let live = deps.getLiveSession(sessionId);
+    let rehydratedColdPi = false;
+    if (sessionRow.agentKind === 'pi' && !live) {
+      if (sessionRow.remoteHostId) {
+        // A cold SSH runtime cannot be rehydrated locally. Persisted usage is still
+        // sufficient to allow an empty/low-pressure switch or reject a required rebuild.
+        const requiresRemoteRebuild = shouldHandoffAfterContextAssessment(
+          assessModelSwitchContext({
+            contextTokens: persistedContextTokens,
+            targetContextWindow: target.contextWindow,
+            autoCompactThresholdPct: MODEL_WINDOW_SWITCH_FORCE_REBUILD_PCT,
+          }),
+        );
+        return requiresRemoteRebuild ? 'remote-unsupported' : 'not-needed';
+      }
+      if (!deps.rehydrateColdPiRuntimeForWindowVerification) return 'unknown-context';
+      try {
+        await deps.rehydrateColdPiRuntimeForWindowVerification(sessionId);
+      } catch (error) {
+        deps.log.warn('cold Pi runtime window verification failed', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return 'unknown-context';
+      }
+      live = deps.getLiveSession(sessionId);
+      rehydratedColdPi = true;
+    }
+    const liveUsage = live?.getUsageSnapshot?.();
+    if (
+      rehydratedColdPi &&
+      (!liveUsage || !Number.isFinite(liveUsage.contextWindow) || liveUsage.contextWindow <= 0)
+    ) {
+      return 'unknown-context';
+    }
+    const liveContextTokens =
+      liveUsage && Number.isFinite(liveUsage.contextTokens) && liveUsage.contextTokens >= 0
+        ? liveUsage.contextTokens
+        : null;
+    // A freshly/lazily attached runtime reports the placeholder 0 before any usage.
+    // Only persisted 0 confirms that zero is authoritative; a positive live value is authoritative itself.
+    const contextTokens =
+      liveContextTokens !== null && (liveContextTokens > 0 || persistedContextTokens === 0)
+        ? liveContextTokens
+        : persistedContextTokens;
+    const reportedCurrentWindow =
+      liveUsage && Number.isFinite(liveUsage.contextWindow) && liveUsage.contextWindow > 0
+        ? liveUsage.contextWindow
+        : (sessionRow.contextWindow ?? 0);
+    const verifiedCurrentWindow = lookupVerifiedContextWindow(
+      deps.resolveVerifiedWindow,
+      sessionRow.model,
+      sessionRow.providerId,
+      sessionRow.agentKind,
+    );
+    // Cold Pi rows may contain either a catalog value or a runtime-verified value in
+    // the same legacy column. Rehydration above makes get_state the cold-path source.
+    const piRuntimeWindow =
+      liveUsage && Number.isFinite(liveUsage.contextWindow) && liveUsage.contextWindow > 0
+        ? liveUsage.contextWindow
+        : (sessionRow.contextWindow ?? 0);
+    const currentContextWindow =
+      sessionRow.agentKind === 'pi'
+        ? piRuntimeWindow
+        : effectiveContextWindow(
+            sessionRow.model,
+            reportedCurrentWindow,
+            verifiedCurrentWindow,
+          );
+    if (contextTokens > 0 && currentContextWindow <= 0) return 'unknown-context';
+    const targetPressureRequiresRebuild =
+      target.recheckTargetPressure === true &&
+      shouldHandoffAfterContextAssessment(
+        assessModelSwitchContext({
+          contextTokens,
+          targetContextWindow: target.contextWindow,
+          autoCompactThresholdPct: MODEL_WINDOW_SWITCH_FORCE_REBUILD_PCT,
+        }),
+      );
+    if (
+      !targetPressureRequiresRebuild &&
+      !shouldRebuildForModelWindowSwitch({
+        contextTokens,
+        currentContextWindow,
+        targetContextWindow: target.contextWindow,
+      })
+    ) {
+      return 'not-needed';
+    }
+    if (sessionRow.remoteHostId) return 'remote-unsupported';
+    if (live?.isTurnRunning()) return 'busy';
+    if (targetPressureRequiresRebuild && target.confirmedTargetPressure !== true) {
+      target.onConfirmationRequired?.(contextTokens);
+      return 'confirmation-required';
+    }
+
+    const source = (await deps.listMessages(sessionId)).filter(
+      (message) => message.role !== 'error',
+    );
+    const latestUser =
+      [...source].reverse().find((message) => message.role === 'user' && !isSyntheticUser(message)) ??
+      (await deps.findLatestUser?.(sessionId)) ??
+      null;
+    const handoffGeneration = deps.readPendingHandoffGeneration?.(sessionId);
+    target.assertCanCommit?.();
+    target.beforeClose?.();
+    if (live) await deps.closeSession(sessionId);
+    target.assertCanCommit?.();
+    const label = engineLabelForOverflow(sessionRow.agentKind);
+    const handoff = buildHandoffText(source, {
+      fromLabel: label,
+      toLabel: label,
+      sessionId,
+      reason: 'model-window-switch',
+    });
+    await deps.commitRebuild(sessionId, handoff, {
+      reason: 'model-window-switch',
+      sourceUserClientId: latestUser?.clientId ?? null,
+      sourceAgentKind: normalizeOverflowDbAgentKind(sessionRow.agentKind),
+      sourceModel: sessionRow.model ?? null,
+      sourceProviderId: sessionRow.providerId ?? null,
+      expectedClearedAt: sessionRow.clearedAt,
+    });
+    deps.setPendingHandoff(sessionId, handoff, handoffGeneration);
+    deps.onRebuilt?.(sessionId);
+    deps.log.info('model window shrink rebuilt native context before runtime switch', {
+      sessionId,
+      agentKind: sessionRow.agentKind,
+      contextTokens,
+      currentContextWindow,
+      targetContextWindow: target.contextWindow,
+    });
+    return 'rebuilt';
   };
 
   const runPrepare = async (sessionId: string): Promise<boolean> => {
@@ -620,19 +910,92 @@ export function createContextOverflowRollover(deps: ContextOverflowRolloverDeps)
   };
 
   return {
+    async prepareNativeSessionRecovery(sessionId, target, assertCanCommit, signal) {
+      if (inFlight.has(sessionId)) throw new Error('Native session recovery is already in progress');
+      inFlight.set(sessionId, undefined);
+      try {
+        await deps.withCloseSuppressed(sessionId, async () => {
+          await deps.drainPersistQueue();
+          const row = await deps.getSessionRow(sessionId);
+          if (!row || row.status === 'deleted' ||
+              (target ? (!row.sdkSessionId || row.remoteHostId) : (row.source !== 'bot' || row.status !== 'active'))) {
+            throw new Error('Native session recovery source is unavailable');
+          }
+          const generation = deps.readPendingHandoffGeneration?.(sessionId);
+          let source = (await deps.listMessages(sessionId)).filter((message) => message.role !== 'error');
+          if (source.length === 0 && row.contextTokens !== 0) {
+            throw new Error('Cindy history is unavailable for native session recovery');
+          }
+          assertCanCommit();
+          const live = deps.getLiveSession(sessionId);
+          if (target && live?.isTurnRunning()) {
+            throw new Error('Native session recovery cannot interrupt a running turn');
+          }
+          // Manual restart closes the broken runtime without asking it to compact.
+          if (live) await deps.closeSession(sessionId);
+          assertCanCommit();
+          if (!target) {
+            // Include any last output persisted while the old runtime was stopping.
+            await deps.drainPersistQueue();
+            assertCanCommit();
+            source = (await deps.listMessages(sessionId)).filter((message) => message.role !== 'error');
+            assertCanCommit();
+          }
+          const handoff = buildHandoffText(source, {
+            fromLabel: engineLabelForOverflow(row.agentKind),
+            toLabel: engineLabelForOverflow(row.agentKind),
+            sessionId,
+            reason: 'native-session-recovery',
+          });
+          // Durable handoff, SDK reset and complete target route succeed or fail together.
+          // No user turn or tool call is replayed by this control-plane operation.
+          const commitArgs: Parameters<ContextOverflowRolloverDeps['commitRebuild']> = [sessionId, handoff, {
+            reason: 'native-session-recovery',
+            sourceUserClientId: [...source].reverse().find((message) => message.role === 'user')?.clientId ?? null,
+            sourceAgentKind: normalizeOverflowDbAgentKind(row.agentKind),
+            sourceModel: row.model ?? null,
+            sourceProviderId: row.providerId ?? null,
+            expectedClearedAt: row.clearedAt,
+            ...(target ? { replacementRoute: { ...target, expectedSdkSessionId: row.sdkSessionId! } } : {}),
+          }];
+          if (signal) commitArgs[3] = signal;
+          await deps.commitRebuild(...commitArgs);
+          deps.setPendingHandoff(sessionId, handoff, generation);
+          deps.onRebuilt?.(sessionId);
+        });
+      } finally {
+        inFlight.delete(sessionId);
+      }
+    },
+
     claim(sessionId: string): OverflowClaimResult {
       if (inFlight.has(sessionId)) return 'in-flight';
-      inFlight.add(sessionId);
+      inFlight.set(sessionId, new AbortController());
       return 'claimed';
     },
 
+    cancelRecovery(sessionId: string): void {
+      // Keep the claim until its async work unwinds; only the hidden send is
+      // cancelled, never the newer input or the session's normal generation.
+      inFlight.get(sessionId)?.abort();
+    },
+
     async tryRecover(sessionId: string, errorData: unknown): Promise<boolean> {
+      let signal: AbortSignal | undefined;
       try {
+        // IM may not persist this input (protected content), and an attached IM
+        // turn can outlive its binding. Check live ownership before any await.
+        if (isOversizedHistoryErrorData(errorData) && deps.hasExternalRecoveryOwner?.(sessionId)) return false;
+        const claim = inFlight.get(sessionId) ?? new AbortController();
+        inFlight.set(sessionId, claim);
+        const inputSignal = deps.getRecoveryAbortSignal?.(sessionId);
+        signal = inputSignal ? AbortSignal.any([claim.signal, inputSignal]) : claim.signal;
         if (deps.withSessionLock) {
-          return await deps.withSessionLock(sessionId, () => runRecover(sessionId, errorData));
+          return await deps.withSessionLock(sessionId, () => runRecover(sessionId, errorData, signal));
         }
-        return await runRecover(sessionId, errorData);
+        return await runRecover(sessionId, errorData, signal);
       } catch (error) {
+        if (signal?.aborted) return true;
         deps.log.warn('context overflow rollover failed', {
           sessionId,
           error: error instanceof Error ? error.message : String(error),
@@ -645,7 +1008,7 @@ export function createContextOverflowRollover(deps: ContextOverflowRolloverDeps)
 
     async prepareUnhealthySession(sessionId: string): Promise<boolean> {
       if (inFlight.has(sessionId)) return false;
-      inFlight.add(sessionId);
+      inFlight.set(sessionId, undefined);
       try {
         return await deps.withCloseSuppressed(sessionId, () => runPrepare(sessionId));
       } catch (error) {
@@ -655,6 +1018,25 @@ export function createContextOverflowRollover(deps: ContextOverflowRolloverDeps)
         });
         // A failed pre-send rebuild must not fall through to the caller's
         // stale resume/fork/thread options. Let the send boundary fail closed.
+        throw error;
+      } finally {
+        inFlight.delete(sessionId);
+      }
+    },
+
+    async prepareModelWindowSwitch(sessionId, target) {
+      if (inFlight.has(sessionId)) return 'in-flight';
+      inFlight.set(sessionId, undefined);
+      try {
+        return await deps.withCloseSuppressed(sessionId, () =>
+          runPrepareModelWindowSwitch(sessionId, target),
+        );
+      } catch (error) {
+        deps.log.warn('model window switch preparation failed', {
+          sessionId,
+          targetContextWindow: target.contextWindow,
+          error: error instanceof Error ? error.message : String(error),
+        });
         throw error;
       } finally {
         inFlight.delete(sessionId);

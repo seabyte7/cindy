@@ -7,6 +7,12 @@ import {
 import { composerDocumentFromSerializedMessage } from '@/session/composerDocument';
 import { buildMobileMessageCopyText } from '@/session/messageActions';
 import { normalizeRemoteMessages } from '@/session/messageNormalize';
+import { isShareableMessage } from '@/session/shareSelectionStore';
+import { buildMobileMessageRenderItems } from '@/session/messageRenderModel';
+import {
+  MOBILE_TOOL_INPUT_PROJECTION_THRESHOLD_BYTES,
+  projectLargeSettledToolInputs,
+} from '@/session/messageToolPayloadProjection';
 import type { RemoteMessage } from '@/session/types';
 
 function message(patch: Partial<RemoteMessage> & Pick<RemoteMessage, 'id' | 'role' | 'content'>): RemoteMessage {
@@ -23,6 +29,41 @@ function message(patch: Partial<RemoteMessage> & Pick<RemoteMessage, 'id' | 'rol
 describe('normalizeRemoteMessages', () => {
   beforeAll(async () => {
     await i18n.changeLanguage('zh-CN');
+  });
+
+  it('renders a projected large tool input from its bounded summary and keeps its result', () => {
+    const projected = projectLargeSettledToolInputs([
+      message({
+        id: 'large-tool',
+        role: 'tool_use',
+        toolUseId: 'toolu-large',
+        content: {
+          input: { payload: 'x'.repeat(MOBILE_TOOL_INPUT_PROJECTION_THRESHOLD_BYTES + 1) },
+          toolName: 'WebFetch',
+          toolUseId: 'toolu-large',
+        },
+      }),
+      message({
+        id: 'large-result',
+        role: 'tool_result',
+        toolUseId: 'toolu-large',
+        content: 'finished',
+        createdAt: '2026-01-01T00:00:01.000Z',
+      }),
+    ]);
+
+    const [item] = normalizeRemoteMessages(projected);
+    expect(item).toMatchObject({
+      kind: 'tool',
+      label: 'WebFetch',
+      secondaryBody: 'finished',
+      toolSettled: true,
+      toolInputProjection: {
+        projected: true,
+        toolUseMessageId: 'large-tool',
+      },
+    });
+    expect(item.body.length).toBeLessThanOrEqual(480);
   });
 
   it('projects a persisted agent task terminal state from tool_use metadata', () => {
@@ -998,6 +1039,14 @@ describe('normalizeRemoteMessages', () => {
     expect(items[1].body).toBe('something exploded');
   });
 
+  it('localizes a persisted output limit in message history', () => {
+    const items = normalizeRemoteMessages([message({
+      id: 'output-limit', role: 'error',
+      content: JSON.stringify({ message: 'Pi reached the model output limit.', reason: 'output-limit' }),
+    })]);
+    expect(items[0]).toMatchObject({ kind: 'system', label: 'error', body: i18n.t('session.tail.outputLimit') });
+  });
+
   it('localizes persisted tool-loop errors from reason and bounded details', () => {
     const items = normalizeRemoteMessages([
       message({
@@ -1081,6 +1130,29 @@ describe('normalizeRemoteMessages', () => {
       ['assistant-ignored', undefined],
     ]);
   });
+
+  it.each(['telegram', 'slack', 'feishu', 'lark', 'discord', 'wechat', 'wecom', 'dingtalk'])(
+    'ignores additive local %s context metadata and retains ordinary user presentation',
+    (im) => {
+      const text = 'a'.repeat(20_100);
+      const url = 'https://example.invalid/image.png';
+      const [item] = normalizeRemoteMessages([message({
+        id: 'local-im',
+        role: 'user',
+        content: { text, images: [{ url, originalName: 'image.png' }] },
+        agentMeta: {
+          imSource: {
+            im, userText: text, contentFormat: 'user-text',
+            contextSnapshot: { groupContext: 'background', groupMessageCount: 1 },
+          },
+        },
+      })]);
+      expect(item).toMatchObject({ body: text, kind: 'user', align: 'user' });
+      expect(item.hookSource).toBeUndefined();
+      expect(item.attachments).toEqual(expect.arrayContaining([expect.objectContaining({ uri: url })]));
+      expect(isShareableMessage(item)).toBe(true);
+    },
+  );
 
   it('normalizes Telegram hook source into a left-aligned Cindy card payload', () => {
     const [item, unknown] = normalizeRemoteMessages([
@@ -1222,6 +1294,39 @@ describe('normalizeRemoteMessages', () => {
   });
 });
 
+describe('context rebuild boundaries', () => {
+  it.each(['context-overflow', 'pi-prompt-timeout', 'codex-history-strip'])('restores %s as a visible standalone boundary', (reason) => {
+    const rows = [
+      message({ id: 'before', role: 'assistant', content: 'Before' }),
+      message({ id: 'rebuild', role: 'assistant', content: '', agentMeta: { contextRebuild: { reason, handoff: 'Private handoff' } } }),
+      message({ id: 'after', role: 'assistant', content: 'After' }),
+    ];
+    const items = buildMobileMessageRenderItems(rows);
+    const boundary = items.find((item) => item.type === 'message' && item.message.systemCardType === 'context-rebuild');
+    expect(boundary).toMatchObject({ type: 'message', message: {
+      kind: 'system', body: '', systemCardData: { reason, handoff: 'Private handoff' },
+    } });
+    // Intermediate assistant work can be folded; the following answer stays outside the marker.
+    expect(items.at(-1)).toMatchObject({ type: 'message', message: { body: 'After' } });
+  });
+
+  it('accepts projected cards and defaults incomplete persisted metadata', () => {
+    expect(normalizeRemoteMessages([
+      message({ id: 'projected', role: 'assistant', content: '', systemCardType: 'context-rebuild', systemCardData: { handoff: 'Summary' } }),
+      message({ id: 'legacy', role: 'assistant', content: '', agentMeta: { contextRebuild: { reason: 12, handoff: false } } }),
+    ])).toMatchObject([
+      { systemCardType: 'context-rebuild', systemCardData: { handoff: 'Summary' } },
+      { systemCardType: 'context-rebuild', systemCardData: { reason: 'context-overflow', handoff: '' } },
+    ]);
+  });
+
+  it.each([null, 'invalid', []])('keeps ordinary assistant text when metadata is invalid: %j', (contextRebuild) => {
+    const [item] = normalizeRemoteMessages([message({ id: 'ordinary', role: 'assistant', content: 'Keep this text', agentMeta: { contextRebuild } })]);
+    expect(item.body).toBe('Keep this text');
+    expect(item.systemCardType).toBeUndefined();
+  });
+});
+
 describe('normalizeRemoteMessages — /goal 持久记录与 plan_review 状态', () => {
   it('renders goal completion records as goal-complete system cards instead of empty assistant bubbles', () => {
     const items = normalizeRemoteMessages([
@@ -1262,4 +1367,63 @@ describe('normalizeRemoteMessages — /goal 持久记录与 plan_review 状态',
     ]);
     expect(items[0].label).toBe('plan_review:cancelled');
   });
+});
+
+
+describe('companion timeline', () => {
+  it.each([false, true])('keeps task instructions out of live/history display (source order: %s)', (preserveSourceOrder) => {
+    const content = '已向后台任务发送消息：读取 /workspace/project/AGENTS.md 并核对执行授权。';
+    const task = { v: 1, role: 'interjection', delegationId: 'job', fromBotId: 'bot', fromBotName: 'Writer', toBotId: null, toBotName: 'Cindy', parentSessionId: 's1', childSessionId: 'child', objective: 'Write report' };
+    const legacy = message({ id: 'trace', role: 'assistant', content, agentMeta: { botCollaboration: task } });
+    const rows = normalizeRemoteMessages([
+      legacy,
+      message({ id: 'anchor', role: 'assistant', content, agentMeta: { botCollaboration: { ...task, role: 'delegation-request' } } }),
+      message({ id: 'user', role: 'user', content }),
+      message({ id: 'assistant', role: 'assistant', content }),
+      message({ id: 'invalid', role: 'assistant', content, agentMeta: { botCollaboration: { ...task, v: 2 } } }),
+    ], { preserveSourceOrder });
+    expect(rows.find(row => row.source.id === 'trace')).toMatchObject({ body: '', companion: { kind: 'task' } });
+    expect(rows.find(row => row.source.id === 'anchor')).toMatchObject({ body: '', companion: { kind: 'task' } });
+    for (const id of ['user', 'assistant', 'invalid']) expect(rows.find(row => row.source.id === id)?.body).toBe(content);
+    expect(legacy.content).toBe(content);
+  });
+
+  it('preserves empty task anchors and private thread links for the mobile renderer', () => {
+    const task = { v: 1, role: 'delegation-request', delegationId: 'job', fromBotId: 'bot', fromBotName: 'Writer', toBotId: null, toBotName: 'Cindy', parentSessionId: 's1', childSessionId: 'child', objective: 'Write report' };
+    const direct = { v: 1, threadId: 'private', viewerBotId: 'bot', peerBotId: 'peer', peerBotName: 'Dash', direction: 'sent', sequence: 1, preview: 'Discuss report' };
+    const rows = normalizeRemoteMessages([
+      message({ id: 'task', role: 'assistant', content: '', agentMeta: { botCollaboration: task } }),
+      message({ id: 'direct', role: 'assistant', content: '', agentMeta: { botDirectMessage: direct } }),
+      message({ id: 'invalid', role: 'assistant', content: 'Regular reply', agentMeta: { botDirectMessage: { ...direct, v: 2 } } }),
+    ]);
+    expect(rows[0]).toMatchObject({ kind: 'system', companion: { kind: 'task', meta: task }, source: { sessionId: 's1' } });
+    expect(rows[1]).toMatchObject({ kind: 'system', companion: { kind: 'direct', meta: direct } });
+    expect(rows[2]).toMatchObject({ kind: 'assistant', body: 'Regular reply' });
+    expect(rows[2].companion).toBeUndefined();
+  });
+});
+
+it('keeps one companion task after its initiating explanation and before its completion reply', () => {
+  const meta = { v: 1, role: 'delegation-request', delegationId: 'd', fromBotId: 'bot', fromBotName: 'Cindy', toBotId: null, toBotName: 'Cindy', parentSessionId: 's1', childSessionId: 'child', objective: 'Change' };
+  const input = [
+    message({ id: 'start', role: 'user', content: 'Change' }),
+    message({ id: 'task', role: 'assistant', content: '', agentMeta: { botCollaboration: meta } }),
+    message({ id: 'intro', role: 'assistant', content: 'Started' }),
+    message({ id: 'trigger', role: 'user', content: 'finished', agentMeta: { synthetic: true } }),
+    message({ id: 'done', role: 'assistant', content: 'Done' }),
+  ];
+  const items = buildMobileMessageRenderItems(input, { preserveSourceOrder: true, isSessionStreaming: true });
+  expect(items.flatMap((item) => item.type === 'message' ? [item.message.source.id] : [])).toEqual(['start', 'intro', 'task', 'trigger', 'done']);
+});
+
+it.each(['steer', 'new', 'completion'])('pairs companion introduction across steer only: %s', (kind) => {
+  const meta = { v: 1, role: 'delegation-request', delegationId: 'd', fromBotId: 'bot', fromBotName: 'Cindy', toBotId: null, toBotName: 'Cindy', parentSessionId: 's1', childSessionId: 'child', objective: 'Change' };
+  const rows = normalizeRemoteMessages([
+    message({ id: 'start', role: 'user', content: 'Change' }),
+    message({ id: 'task', role: 'assistant', content: '', agentMeta: { botCollaboration: meta } }),
+    message({ id: 'interruption', role: 'user', content: 'Also', agentMeta: kind === 'steer' ? { delivery: 'steer' } : kind === 'completion' ? { synthetic: true } : {} }),
+    message({ id: 'intro', role: 'assistant', content: 'Started' }),
+  ], { preserveSourceOrder: true });
+  const ids = rows.map((row) => row.source.id);
+  expect(ids.indexOf('task') > ids.indexOf('intro')).toBe(kind === 'steer');
 });
