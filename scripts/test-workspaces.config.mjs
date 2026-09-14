@@ -26,21 +26,25 @@ const vitestBin = (...args) => ({ type: 'packageBin', bin: 'vitest', args });
 // `process.env` there is a thread-local copy while `os.homedir()` reads the real
 // environment through libuv.
 //
-// win32 opts desktop out wholesale: on Windows (Node 24.14.1, 2026-07-30) the
-// desktop suite under threads segfaulted the whole vitest process (exit 139)
-// on 2 of 2 runs — same native-addon-finalizer-in-isolate-teardown crash
-// class node-webstorage.mjs documents, only without execArgv in play — while
-// forks passed 15651 tests twice in a row. The same crash is reproducible on
-// macOS with Node 24.15.0, where forks also pass the complete desktop unit tier.
-// The churn this pool exists to avoid is a LaunchServices problem; Windows has
-// no launchservicesd, and Node 24+ is not the documented CI runtime, so forks
-// costs those fallback environments nothing they already depend on.
+// Node 24+ opts desktop out of threads: the suite segfaults during native-addon
+// finalization on macOS as well as Windows, even without the webstorage
+// execArgv. Older Node 22 macOS runs stay on threads to avoid process churn;
+// Windows has no launchservicesd, so it stays on forks regardless of version.
 //
 // Keep every opt-out listed in the pool regression test, and keep the list
 // short: at 1330 of this tier's 1845 files, desktop alone decides whether the
 // churn is a trickle or back to where it started.
 const UNIT_POOL_DEFAULT = 'threads';
 const UNIT_TEST_SHARD_ENV = 'XDT_UNIT_TEST_SHARD';
+
+export function desktopUnitPool(
+  platform = process.platform,
+  nodeVersion = process.versions.node,
+  webstorageEnabled = nodeWebstorageEnabled(),
+) {
+  const nodeMajor = Number.parseInt(nodeVersion, 10);
+  return webstorageEnabled || platform === 'win32' || nodeMajor >= 24 ? 'forks' : 'threads';
+}
 
 /**
  * Split every Vitest workspace by the same CI shard so the two Windows jobs
@@ -82,6 +86,17 @@ const desktopDbExclude = [
 const desktopGitIntegrationInclude = [
   'src/main/**/*.git-integration.test.ts',
 ];
+const makerCoreIntegrationInclude = [
+  'src/agents/codex/*.integration.test.ts',
+  'src/agents/claude-code/__tests__/*.integration.test.ts',
+  'src/agents/pi/__tests__/*.integration.test.ts',
+];
+const makerPiManagerIntegrationInclude = [
+  'src/__tests__/pi-manager.integration.test.ts',
+];
+const desktopE2eInclude = [
+  'src/main/maker-host/__tests__/*.e2e.test.ts',
+];
 
 export function desktopUnitWorkerCount(
   availableParallelism = os.availableParallelism(),
@@ -92,19 +107,6 @@ export function desktopUnitWorkerCount(
   return Math.max(1, Math.min(8, available));
 }
 
-export function desktopUnitPool({
-  platform = process.platform,
-  nodeVersion = process.versions.node,
-  webstorageEnabled = nodeWebstorageEnabled(),
-} = {}) {
-  const nodeMajor = Number.parseInt(String(nodeVersion).split('.')[0], 10);
-  const macOSNode24Plus =
-    platform === 'darwin' && Number.isInteger(nodeMajor) && nodeMajor >= 24;
-  return webstorageEnabled || platform === 'win32' || macOSNode24Plus
-    ? 'forks'
-    : 'threads';
-}
-
 const noCollectableWorkspace = (name, cwd, reason = noCollectableTestsReason) => ({
   name,
   cwd,
@@ -113,7 +115,7 @@ const noCollectableWorkspace = (name, cwd, reason = noCollectableTestsReason) =>
   tiers: {},
 });
 
-const requiredUnitWorkspace = (name, cwd, { workers = 1, execution, pool } = {}) => ({
+const requiredUnitWorkspace = (name, cwd, { workers = 1, execution, pool, exclude } = {}) => ({
   name,
   cwd,
   status: 'required',
@@ -122,6 +124,7 @@ const requiredUnitWorkspace = (name, cwd, { workers = 1, execution, pool } = {})
       status: 'required',
       ...(execution ? { execution } : {}),
       command: unitVitestCommand(workers, pool),
+      ...(exclude?.length ? { exclude } : {}),
     },
   },
 });
@@ -154,6 +157,8 @@ export default {
           ),
           exclude: [
             '**/*.git-integration.test.ts',
+            '**/*.integration.test.ts',
+            '**/*.e2e.test.ts',
             'src/main/localDb/**',
             'src/main/__tests__/*Migration.test.ts',
             'src/main/__tests__/schemaDriftRepair.test.ts',
@@ -174,6 +179,14 @@ export default {
           coverage: 'allowlist',
           command: vitestBin('run', `--maxWorkers=${desktopUnitWorkerCount()}`),
           include: desktopGitIntegrationInclude,
+        },
+        e2e: {
+          status: 'manual',
+          reason: 'Desktop E2E tests spawn the real Codex binary and are explicit because they are platform and binary dependent.',
+          execution: 'exclusive',
+          coverage: 'allowlist',
+          command: vitestBin('run', '--pool=forks', '--maxWorkers=1'),
+          include: desktopE2eInclude,
         },
         db: {
           status: 'manual',
@@ -225,6 +238,7 @@ export default {
     requiredUnitWorkspace('@cindy/anthropic-compat-proxy', 'packages/anthropic-compat-proxy'),
     requiredUnitWorkspace('@cindy/anthropic-responses-bridge', 'packages/anthropic-responses-bridge'),
     requiredUnitWorkspace('@cindy/responses-anthropic-bridge', 'packages/responses-anthropic-bridge'),
+    requiredUnitWorkspace('@cindy/model-compat', 'packages/model-compat'),
     requiredUnitWorkspace('@cindy/responses-chat-bridge', 'packages/responses-chat-bridge'),
     requiredUnitWorkspace('@cindy/auth-client', 'packages/auth-client'),
     requiredUnitWorkspace('@cindy/browser-control-runtime', 'packages/browser-control-runtime'),
@@ -242,11 +256,56 @@ export default {
     // Stays on forks: palette-scanner's tests stub HOME and the scanner resolves
     // it through os.homedir(), which a worker thread cannot see (see
     // UNIT_POOL_DEFAULT above).
-    requiredUnitWorkspace('@cindy/maker-core', 'packages/maker-core', { pool: 'forks' }),
+    {
+      name: '@cindy/maker-core',
+      cwd: 'packages/maker-core',
+      status: 'required',
+      tiers: {
+        unit: {
+          status: 'required',
+          command: unitVitestCommand(1, 'forks'),
+          exclude: ['**/*.integration.test.ts', '**/*.e2e.test.ts', '**/*.git-integration.test.ts'],
+        },
+        'git-integration': {
+          status: 'manual',
+          reason: 'Full real-Git coverage is explicit because each case builds temporary repos, linked worktrees and separate-git-dir clones via git subprocesses.',
+          coverage: 'allowlist',
+          command: vitestBin('run', '--maxWorkers=1'),
+          include: ['src/**/*.git-integration.test.ts'],
+        },
+        integration: {
+          status: 'manual',
+          reason: 'Claude/Pi/Codex integration tests spawn real agent binaries and local protocol servers.',
+          execution: 'exclusive',
+          coverage: 'allowlist',
+          command: vitestBin('run', '--pool=forks', '--maxWorkers=1'),
+          include: makerCoreIntegrationInclude,
+        },
+      },
+    },
     requiredUnitWorkspace('@cindy/maker-remote-ssh', 'packages/maker-remote-ssh'),
     // 轮 42:新包 maker-pi-manager(TS 单例 pi daemon)已随 SSH remote 交付;
     // 漏登记会让 test-workspaces 的 manifest 覆盖校验失败(全量门禁拒跑)。
-    requiredUnitWorkspace('@cindy/maker-pi-manager', 'packages/maker-pi-manager'),
+    {
+      name: '@cindy/maker-pi-manager',
+      cwd: 'packages/maker-pi-manager',
+      status: 'required',
+      tiers: {
+        unit: {
+          status: 'required',
+          command: unitVitestCommand(),
+          exclude: ['src/__tests__/pi-manager.integration.test.ts'],
+        },
+        integration: {
+          status: 'manual',
+          reason: 'Pi manager integration tests spawn real processes and sockets.',
+          execution: 'exclusive',
+          coverage: 'allowlist',
+          command: vitestBin('run', '--pool=forks', '--maxWorkers=1'),
+          include: makerPiManagerIntegrationInclude,
+        },
+      },
+    },
     requiredUnitWorkspace('@cindy/maker-scheduler', 'packages/maker-scheduler'),
     requiredUnitWorkspace('@cindy/maker-shared', 'packages/maker-shared'),
     requiredUnitWorkspace('@cindy/model-providers', 'packages/model-providers'),
@@ -269,5 +328,6 @@ export default {
     noCollectableWorkspace('@cindy/device-link-protocol', 'packages/device-link-protocol'),
     requiredUnitWorkspace('@cindy/plugin-protocol', 'packages/plugin-protocol'),
     requiredUnitWorkspace('@cindy/slack-hook-protocol', 'packages/slack-hook-protocol'),
+    requiredUnitWorkspace('@cindy/design-tokens', 'packages/design-tokens'),
   ],
 };

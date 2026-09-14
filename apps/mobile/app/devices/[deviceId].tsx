@@ -1,7 +1,8 @@
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useIsFocused, useLocalSearchParams, useRouter } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
   RefreshControl,
   ScrollView,
   SectionList,
@@ -40,7 +41,6 @@ import { withTransientRemoteRetry } from '@/device-link/remoteRetry';
 import { useRemoteSyncTask } from '@/device-link/remoteSyncTask';
 import {
   automationGroupKey,
-  buildSessionMessagePreviewIndex,
   buildRemoteSessionListContext,
   buildRemoteSessionSections,
   deviceSessionEmptyState,
@@ -81,6 +81,7 @@ import type { SessionSwipeAction } from '@/session/swipeRowRegistry';
 import { useSessionListActions } from '@/session/useSessionListActions';
 import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
 import {
+  RemoteSessionStoreSubscriptionGate,
   remoteSessionStore,
   useRemoteMessageVersion,
   useRemoteSessions,
@@ -95,8 +96,7 @@ import {
   getScheduleIndexInvalidationVersion,
   invalidateOfflineScheduleIndexFailureFor,
   invalidateRunningSessionScheduleEntries,
-  loadSessionScheduleIndex,
-  loadSessionScheduleIndexThrottled,
+  loadSharedSessionScheduleIndex,
 } from '@/session/scheduleIndex';
 import { shouldSuppressRemoteListEmptyState } from '@/session/sessionEmptyState';
 import type { RemoteSession } from '@/session/types';
@@ -115,6 +115,24 @@ const STATUS_FILTERS: Array<{ value: RemoteSessionStatusFilter; labelKey: string
 type RemoteListStatusFilter = Extract<RemoteSessionStatusFilter, 'active' | 'archived' | 'all'>;
 
 export default function DeviceDetailScreen() {
+  const screenFocused = useIsFocused();
+  return (
+    <RemoteSessionStoreSubscriptionGate enabled={screenFocused}>
+      <DeviceDetailScreenContent />
+    </RemoteSessionStoreSubscriptionGate>
+  );
+}
+
+function DeviceDetailScreenContent() {
+  const screenFocused = useIsFocused();
+  const screenFocusedRef = useRef(screenFocused);
+  screenFocusedRef.current = screenFocused;
+  const [appStateActive, setAppStateActive] = useState(AppState.currentState === 'active');
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => setAppStateActive(state === 'active'));
+    return () => subscription.remove();
+  }, []);
+  const canLoadScheduleIndex = useCallback(() => screenFocusedRef.current && AppState.currentState === 'active', []);
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
   const { t, i18n: i18nInstance } = useTranslation();
@@ -279,12 +297,13 @@ export default function DeviceDetailScreen() {
       // 节流缓存与首页共用同一 key(deviceId):两页交替浏览时不重复全量拉取(单飞 + TTL,
       // 拥塞背景见 scheduleIndex 注释)。
       const invalidationVersion = getScheduleIndexInvalidationVersion(deviceId);
-      void loadSessionScheduleIndexThrottled(deviceId, () => loadSessionScheduleIndex(maker, { isDeviceUnresponsive: () => unresponsiveDevicesStore.has(deviceId) }))
+      void loadSharedSessionScheduleIndex(deviceId, maker, canLoadScheduleIndex)
         .then((nextIndex) => {
           if (getScheduleIndexInvalidationVersion(deviceId) !== invalidationVersion) return;
           setScheduleIndex(nextIndex);
         })
         .catch(() => {
+          if (!canLoadScheduleIndex()) return;
           if (getScheduleIndexInvalidationVersion(deviceId) !== invalidationVersion) return;
           setScheduleIndex(new Map());
         });
@@ -294,7 +313,7 @@ export default function DeviceDetailScreen() {
     } finally {
       setLoading(false);
     }
-  }, [automationScopeKey, deviceId, deviceName, invoke, maker, statusFilter, subscribe]);
+  }, [automationScopeKey, canLoadScheduleIndex, deviceId, deviceName, invoke, maker, statusFilter, subscribe]);
   const loadSessions = useRemoteSyncTask(syncSessions);
 
   useEffect(() => {
@@ -310,22 +329,21 @@ export default function DeviceDetailScreen() {
   }, [loadSessions, statusFilter]);
 
   useEffect(() => {
-    if (scheduleEventSnapshot.sessionIndexVersion > 0) void loadSessions();
-  }, [loadSessions, scheduleEventSnapshot.sessionIndexVersion]);
+    if (screenFocused && appStateActive && scheduleEventSnapshot.sessionIndexVersion > 0) void loadSessions();
+  }, [appStateActive, loadSessions, scheduleEventSnapshot.sessionIndexVersion, screenFocused]);
 
-  // schedule 列表变化(changed,含 pause / resume / 改绑)与 read / all-read 都 force
-  // 刷新节流缓存——否则 30s TTL 内会继续显示旧 Pause / 未读状态。依赖专用 version
-  // 计数而非 lastProjection 引用:后者每个事件都换新,会让 fired / deferred 等无关事件
-  // 也重跑本 effect(review P1)。
-  // 上方 loadSessions effect 随 sessionIndexVersion 同步触发,其内部 throttled 调用会
-  // 单飞复用本次 force 拉起的在途 promise,不产生第二次全量拉取。
+  // Once sessions have loaded, visibility alone must resume a cancelled index
+  // even before the first schedule event. Keep the initial list-first ordering.
+  // The event store invalidates once; all visible consumers share its next scan.
   useEffect(() => {
+    if (!screenFocused || !appStateActive) return;
     if (
-      scheduleEventSnapshot.scheduleListVersion === 0
+      lastSyncedAt === null
+      && scheduleEventSnapshot.scheduleListVersion === 0
       && scheduleEventSnapshot.unreadClearVersion === 0
     ) return;
     const invalidationVersion = getScheduleIndexInvalidationVersion(deviceId);
-    void loadSessionScheduleIndexThrottled(deviceId, () => loadSessionScheduleIndex(maker, { isDeviceUnresponsive: () => unresponsiveDevicesStore.has(deviceId) }), { force: true })
+    void loadSharedSessionScheduleIndex(deviceId, maker, canLoadScheduleIndex)
       .then((nextIndex) => {
         if (getScheduleIndexInvalidationVersion(deviceId) !== invalidationVersion) return;
         setScheduleIndex(nextIndex);
@@ -334,20 +352,21 @@ export default function DeviceDetailScreen() {
         // 失败保留旧徽标,与整页 load 的容错口径一致。
       });
   }, [
+    appStateActive,
+    canLoadScheduleIndex,
     deviceId,
     maker,
+    lastSyncedAt,
     scheduleEventSnapshot.scheduleListVersion,
     scheduleEventSnapshot.unreadClearVersion,
+    screenFocused,
   ]);
 
   // 派生索引依赖全局 messageVersion / storeVersion,逐 emit 重建出内容相同的新 Map;
   // useStableValue 在内容未变时保留旧引用,阻断 sections 派生链的无谓全量重建
   // (与首页同款处理,风暴背景见 devices/index.tsx 对应注释)。
   const messagePreviewIndexRaw = useMemo(
-    () => buildSessionMessagePreviewIndex(
-      sessions.map((session) => session.id),
-      (sessionId) => remoteSessionStore.getMessages(sessionId),
-    ),
+    () => remoteSessionStore.getSessionListMessagePreviewIndex(sessions),
     [messageVersion, sessions],
   );
   const messagePreviewIndex = useStableValue(messagePreviewIndexRaw, mapContentEqual);
@@ -655,6 +674,7 @@ export default function DeviceDetailScreen() {
     return (
       <SafeAreaView edges={simpleScreenSafeAreaEdges()} style={styles.safeArea} testID="deviceDetail.screen">
         <SimpleStackHeader
+          syncing={!showConnectionBanner && (loading || status === 'connecting')}
           backTestID="deviceDetail.backButton"
           eyebrow={t('devices.detail.automationScope.eyebrow')}
           onBack={() => goBackGuarded(router)}
@@ -719,6 +739,7 @@ export default function DeviceDetailScreen() {
     return (
       <SafeAreaView edges={simpleScreenSafeAreaEdges()} style={styles.safeArea} testID="deviceDetail.screen">
         <SimpleStackHeader
+          syncing={!showConnectionBanner && (loading || status === 'connecting')}
           action={{
             label: t('devices.common.create'),
             // 在这个项目里建新对话:预填 workingDir。
@@ -790,6 +811,9 @@ export default function DeviceDetailScreen() {
         <SectionList
           sections={displaySections}
           keyExtractor={(item) => item.automationGroup?.key ?? item.session.id}
+          // Fabric can reattach a clipped Swipeable child before its old native parent removes it.
+          // Keep JS virtualization, but avoid the Android native detach/reattach race for this list.
+          removeClippedSubviews={false}
           refreshControl={<RefreshControl refreshing={loading} onRefresh={loadSessions} />}
           stickySectionHeadersEnabled={false}
           renderSectionHeader={() => null}
@@ -838,6 +862,7 @@ export default function DeviceDetailScreen() {
   return (
     <SafeAreaView edges={simpleScreenSafeAreaEdges()} style={styles.safeArea} testID="deviceDetail.screen">
       <SimpleStackHeader
+        syncing={!showConnectionBanner && (loading || status === 'connecting')}
         action={{
           label: t('devices.common.create'),
           onPress: () => guardedPush({
@@ -878,6 +903,11 @@ export default function DeviceDetailScreen() {
         }}
         testID="deviceDetail.summary"
       >
+        <MainWindowActionButton action={{
+          label: t('remoteDesktop.title'),
+          onPress: () => guardedPush({ pathname: '/devices/desktop/[deviceId]', params: { deviceId, deviceName } }),
+          testID: 'deviceDetail.remoteDesktop',
+        }} />
         <View style={[styles.summaryTopRow, { gap: windowLayout.metricGap }]}>
           <MainWindowMetric
             accessibilityLabel={t('devices.detail.metric.activeA11y')}

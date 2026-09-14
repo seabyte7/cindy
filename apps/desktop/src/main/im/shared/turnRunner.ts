@@ -1,3 +1,4 @@
+import { createLocalImSource, type ImContextSnapshot } from '../../../shared/imMessageSource';
 /**
  * main/im/shared/turnRunner.ts
  * ---------------------------------------------------------------------------
@@ -31,8 +32,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
+import { bindRuntimeRecoveryNotice } from './runtimeRecoveryNotice';
 
 /**
  * 群里的授权卡改投宿主私聊时, 加在卡片正文顶部的说明。
@@ -86,7 +87,6 @@ import type {
 } from '@cindy/maker-core';
 import type {
   IMAttachment,
-  IMFinalReplyMirror,
   InteractiveCardSpec,
   StreamingTextHandle,
 } from '@cindy/im';
@@ -112,7 +112,10 @@ import { agentHandoffPending } from '../../maker-ipc/agentHandoffPendingSingleto
 import { prependHandoffToUserMessage, prependNoteToWireUserMessage } from '../../maker-ipc/agentHandoff';
 import { buildPlanReconcileNote, summarizeOpenPlan } from '../../maker-ipc/planReconcile';
 import { listMessagesForAgentHandoff } from '../../localDb/ipc/messages';
-import { enqueueDurableWrite } from '../../messagePersistBroadcaster';
+import {
+  enqueueDurableWrite,
+  redactToolInputForUntrustedBoundary,
+} from '../../messagePersistBroadcaster';
 import {
   cancelPending,
   registerPending,
@@ -184,55 +187,12 @@ function resolveTurnFileRoots(
   return remoteHostId ? [] : [workingDir];
 }
 
-function openRootDirectory(target: string): number {
-  let flags = fs.constants.O_RDONLY;
-  if (fs.constants.O_DIRECTORY) flags |= fs.constants.O_DIRECTORY;
-  return fs.openSync(target, flags);
-}
-
-function pinTurnFileRoots(
-  roots: readonly string[],
-): Array<{ dev: string; ino: string }> {
-  const pinned: Array<{ dev: string; ino: string }> = [];
-  for (const root of roots) {
-    if (!root.trim()) continue;
-    let fd: number | undefined;
-    try {
-      fd = openRootDirectory(root);
-      const st = fs.fstatSync(fd, { bigint: true });
-      if (!st.isDirectory() || st.ino === 0n) continue;
-      pinned.push({ dev: String(st.dev), ino: String(st.ino) });
-    } catch {
-      /* Unresolvable roots are omitted; an empty pin fail-closes file reuse. */
-    } finally {
-      if (fd !== undefined) fs.closeSync(fd);
-    }
-  }
-  return pinned;
-}
-
-function withTurnFileRoots(
-  mirror: IMFinalReplyMirror | undefined,
-  allowedFileRoots: string[],
-): IMFinalReplyMirror | undefined {
-  if (!mirror) return undefined;
-  return {
-    ...mirror,
-    allowedFileRoots,
-    pinnedFileRoots: pinTurnFileRoots(allowedFileRoots),
-  };
-}
-
 interface TurnState {
   /** Stable identity used by the central interaction router for this turn. */
   turnId: string;
   userId: string;
   /** thread = session 模型的会话维度键(slack thread root ts);feishu undefined。 */
   scopeKey?: string;
-  /** Optional secondary presentation target for this turn's terminal output only. */
-  finalReplyMirror?: IMFinalReplyMirror;
-  /** Releases channel-side confirmation retention when this turn leaves the queue/lifecycle. */
-  finalReplyMirrorRelease: (() => void) | null;
   initialMessageText: string;
   /** First text-delta resolves this lazily (avoids creating a card for empty turns). */
   streamingHandle: StreamingTextHandle | null;
@@ -317,6 +277,7 @@ interface TurnState {
  * state.queue(否则会被当成 queue[0] 抢走正在跑的 turn 的事件流)。
  */
 interface QueuedSend {
+  contextSnapshot?: ImContextSnapshot;
   turn: TurnState;
   userMessage: UserMessage;
   rowId: string;
@@ -418,6 +379,7 @@ type DefaultRouteTargetResolution =
   | { target: null; missingAuth: ImAuthRouteStatus & { agentKind: AgentKind; model: string } };
 
 export interface ImRunAgentTurnArgs {
+  contextSnapshot?: ImContextSnapshot;
   botContextId: string;
   userId: string;
   /** 渠道 message id of the user's incoming message — used for emoji ack. */
@@ -426,8 +388,6 @@ export interface ImRunAgentTurnArgs {
   attachments: IMAttachment[];
   /** thread = session 模型的会话维度键(slack);feishu 不传。 */
   scopeKey?: string;
-  /** Secondary destination for this turn's completed answer; never affects routing. */
-  finalReplyMirror?: IMFinalReplyMirror;
   /**
    * 发给 agent 的正文覆盖(群上下文前缀拼装, 见 adapter.prepareAgentTurnText)。
    * 缺省 = text。落库(persistUserMessage)与标题生成恒用 text(渠道原文)。
@@ -768,7 +728,6 @@ export function createTurnRunner(
             ui.agent.apiKeyMissing;
           const consumed = (await args.onEarlyReject?.('missing_auth', text)) ?? false;
           if (!consumed) await replyMissingAuth(userId, created.missingAuth, scopeKey);
-          await mirrorEarlyRejectReply(args.finalReplyMirror, text);
         }
         await discardHandedOverAck(userMessageId, args.ackReactionIdPromise);
         return { kind: 'rejected', reason: 'missing_auth' };
@@ -789,7 +748,6 @@ export function createTurnRunner(
           if (!consumed) {
             await replyMissingAuth(userId, authStatus, scopeKey, target.attached);
           }
-          await mirrorEarlyRejectReply(withTurnFileRoots(args.finalReplyMirror, allowedFileRoots), text);
         }
         await discardHandedOverAck(userMessageId, args.ackReactionIdPromise);
         return { kind: 'rejected', reason: 'missing_auth' };
@@ -844,8 +802,6 @@ export function createTurnRunner(
       turnId: randomUUID(),
       userId,
       scopeKey: target.scopeKey,
-      finalReplyMirror: withTurnFileRoots(args.finalReplyMirror, allowedFileRoots),
-      finalReplyMirrorRelease: null,
       initialMessageText: text,
       streamingHandle: null,
       streamingHandlePromise: null,
@@ -885,7 +841,6 @@ export function createTurnRunner(
           } else {
             await completeTurnCallbackAfterAck(turn);
           }
-          await mirrorEarlyRejectReply(turn.finalReplyMirror, ui.agent.credentialBusy);
         } else {
           await completeTurnCallbackAfterAck(turn);
         }
@@ -947,6 +902,7 @@ export function createTurnRunner(
     }
 
     const item: QueuedSend = {
+      contextSnapshot: args.contextSnapshot,
       turn,
       // contextAttachments 只进模型消息(跟在用户自己附件后面), 不进
       // item.attachments —— persistUserMessage 落库的只有触发用户发的附件。
@@ -983,7 +939,6 @@ export function createTurnRunner(
         await completeTurnCallbackAfterAck(turn);
         return { kind: 'busy', reason: 'session_running' };
       }
-      retainTurnFinalReplyMirror(turn);
       state.sendQueue.push(item);
       log.info(`queued message for session=${row.id.slice(-8)} position=${state.sendQueue.length}`);
       // 本渠道没有未收口的 turn(纯 desktop turn 在跑) → 派发只能靠它的 stray
@@ -997,7 +952,6 @@ export function createTurnRunner(
       return { kind: 'busy', reason: 'queued_internally' };
     }
 
-    retainTurnFinalReplyMirror(turn);
     const dispatch = await dispatchQueuedSend(state, userId, item);
     if (dispatch.kind !== 'accepted') return dispatch;
     return {
@@ -1024,9 +978,10 @@ export function createTurnRunner(
    * 退回队首, 等下一个 done/error 或 retry timer 再派发, 不报错。
    */
   /**
-   * 群护栏取缔(feishu): 渠道通过 turnPolicyOptionalForMode 声明「该权限档下
-   * 强确认策略可选」时, dispatch 前按会话当前权限档决定是否真正挂策略 —
-   * 返回 undefined = 不挂, maker 不再 fail-closed, 按用户显式选择直接执行。
+   * 群护栏取缔: 渠道通过 turnPolicyOptionalForMode 声明「该权限档下本轮
+   * 强确认策略可选」时, dispatch 前按会话当前权限档与具体 policy 决定是否
+   * 真正挂策略 —— 返回 undefined = 不挂, maker 不再 fail-closed, 按用户显式
+   * 选择直接执行。
    * 群上下文的防注入过滤与包裹独立于策略, 照常生效; 查档失败保持挂策略
    * (fail-closed 兜底)。其它渠道不实现该钩子, 行为不变。
    */
@@ -1038,7 +993,10 @@ export function createTurnRunner(
     }
     try {
       const row = await repo.peekSessionById(item.rowId);
-      if (row && adapter.turnPolicyOptionalForMode(row.permissionMode)) {
+      if (
+        row &&
+        adapter.turnPolicyOptionalForMode(row.permissionMode, item.turnPermissionPolicy)
+      ) {
         log.info(
           `turn policy skipped by channel (mode=${row.permissionMode}) session=${item.rowId.slice(-8)}`,
         );
@@ -1126,7 +1084,7 @@ export function createTurnRunner(
           )
         : withHandoff;
 
-      // 群护栏取缔(飞书): 按会话当前权限档决定是否真正挂强确认策略, 见
+      // 群护栏取缔: 按会话当前权限档决定是否真正挂强确认策略, 见
       // resolveEffectiveTurnPolicy。不挂时走与 DM 轮次相同的无策略路径。
       const effectiveTurnPolicy = await resolveEffectiveTurnPolicy(item);
 
@@ -1141,6 +1099,12 @@ export function createTurnRunner(
         },
         ...(effectiveTurnPolicy ? { turnPermissionPolicy: effectiveTurnPolicy } : {}),
         beforeProviderStart: async () => {
+          const noticeSession = state.makerSession;
+          const noticeScope = state.scopeKey;
+          bindRuntimeRecoveryNotice(noticeSession, async (text) => {
+            if (sessionStates.get(rowId)?.makerSession !== noticeSession) return false;
+            return im.sendText(userId, text, { threadTs: noticeScope });
+          }, log);
           // 策略轮持一张 host turn lease:期间 setPermissionMode 切到 agent 声明为
           // turnPermissionPolicy-unsupported 的档位(如 Pi Full Access)会被阻塞到本轮
           // 终态,堵死"热切到 bypass 让 bridge 直接放行、策略连冒泡机会都没有"的绕过。
@@ -1225,25 +1189,29 @@ export function createTurnRunner(
           // 复用那条记录, 不再写第二条。sessionId 必须相符 —— 拼装期间路由若换到
           // 别的 session(/new 重置等), 那份预落库不属于本轮, 照常自己落一条。
           const prePersisted =
-            item.prePersistedUserMessage?.sessionId === rowId
-              ? item.prePersistedUserMessage
-              : null;
+            item.prePersistedUserMessage?.sessionId === rowId ? item.prePersistedUserMessage : null;
           // 受保护群的触发消息不进会话存档 —— 正文与附件都不落。turn 照常跑,
           // agent 拿得到内容; 只是这一轮的输入不留在长期记录里。
           const persisted = item.protectedContent
             ? null
-            : (prePersisted ??
-              (await persistUserMessage({
+            : await persistUserMessage({
                 sessionId: rowId,
                 text: item.text,
                 attachments: item.attachments,
-              })));
+                source: createLocalImSource(
+                  adapter.messageSourceIm?.() ?? channel,
+                  item.text,
+                  item.contextSnapshot,
+                ),
+                existingClientId: prePersisted?.clientId,
+              });
           await adapter.onUserMessagePersisted?.({
             sessionId: rowId,
             userMessageId: item.turn.userMessageId,
             persisted: persisted !== null,
           });
           if (persisted) {
+            item.prePersistedUserMessage = { sessionId: rowId, clientId: persisted.clientId };
             await beginTurnChangeSetAtDispatch(state.makerSession, persisted.clientId);
             turnChangeSetStarted = true;
           }
@@ -1317,13 +1285,11 @@ export function createTurnRunner(
               /* The session is already detaching; reporting remains best-effort. */
             }
           }
-          releaseTurnFinalReplyMirror(item.turn);
           finishDeferredDetachIfIdle(state);
           return { kind: 'busy', reason: 'session_detaching' };
         }
         if (item.queueMode === 'external') {
           await completeTurnCallbackAfterAck(item.turn);
-          releaseTurnFinalReplyMirror(item.turn);
           return { kind: 'busy', reason: 'session_running' };
         }
         state.sendQueue.unshift(item);
@@ -1563,45 +1529,11 @@ export function createTurnRunner(
     }
   }
 
-  async function mirrorEarlyRejectReply(
-    mirror: IMFinalReplyMirror | undefined,
-    text: string,
-  ): Promise<void> {
-    await mirrorTurnFinalReply(mirror, text);
-  }
-
-  async function mirrorTurnFinalReply(
-    mirror: IMFinalReplyMirror | undefined,
-    text: string,
-    opts?: { mediaAbsPaths?: string[] },
-  ): Promise<void> {
-    if (!mirror || output.kind !== 'rich-card') return;
-    try {
-      if (opts) {
-        await output.im.mirrorFinalReply?.(mirror, text, opts);
-      } else {
-        await output.im.mirrorFinalReply?.(mirror, text);
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.warn(`terminal mirror failed (non-fatal): ${msg}`);
-    }
-  }
-
-  /**
-   * Terminal streaming finalize. Parent-chat copies are supplied here — not at
-   * `startStreamingText` — so permission / ask / plan `finalizeActiveStream`
-   * cannot reuse the same card UUID for a fragment.
-   */
   async function finalizeTurnStream(turn: TurnState, finalView: string): Promise<void> {
     const handle = turn.streamingHandle;
     if (!handle) return;
     try {
-      if (turn.finalReplyMirror) {
-        await handle.finalize(finalView, { finalReplyMirror: turn.finalReplyMirror });
-      } else {
-        await handle.finalize(finalView);
-      }
+      await handle.finalize(finalView);
     } catch (err) {
       if (output.kind === 'chunked-text') {
         turn.terminalKind = 'error';
@@ -2595,38 +2527,7 @@ export function createTurnRunner(
     return true;
   }
 
-  function retainTurnFinalReplyMirror(turn: TurnState): void {
-    if (turn.finalReplyMirrorRelease || !turn.finalReplyMirror || output.kind !== 'rich-card') {
-      return;
-    }
-    try {
-      const release = output.im.retainFinalReplyMirror?.(turn.finalReplyMirror);
-      if (typeof release === 'function') turn.finalReplyMirrorRelease = release;
-    } catch (err) {
-      log.warn(
-        `final reply mirror retention failed (non-fatal): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  }
-
-  function releaseTurnFinalReplyMirror(turn: TurnState): void {
-    const release = turn.finalReplyMirrorRelease;
-    turn.finalReplyMirrorRelease = null;
-    try {
-      release?.();
-    } catch (err) {
-      log.warn(
-        `final reply mirror retention release failed (non-fatal): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  }
-
   function settleTurnTerminal(turn: TurnState): void {
-    releaseTurnFinalReplyMirror(turn);
     const resolve = turn.resolveTerminal;
     if (!resolve) return;
     turn.resolveTerminal = null;
@@ -2721,8 +2622,11 @@ export function createTurnRunner(
         // 已由渠道设置显式放行, 实际只剩 acceptEdits)— 给用户能看懂的说法并
         // 指路 /permission + 私聊修复卡, 而不是裸抛策略错误码。
         const policyUnsupported = failure.reason.startsWith('TURN_PERMISSION_POLICY_UNSUPPORTED');
-        const rejectedMode = failure.reason.split(':')[2] ?? '';
-        const unsupportedCopy = adapter.ui.error?.permissionModeUnsupported;
+        const [, unsupportedKind = '', rejectedMode = ''] = failure.reason.split(':');
+        const unsupportedCopy =
+          unsupportedKind === 'agent'
+            ? adapter.ui.error?.agentUnsupported
+            : adapter.ui.error?.permissionModeUnsupported;
         const message =
           policyUnsupported && unsupportedCopy
             ? typeof unsupportedCopy === 'function'
@@ -2749,7 +2653,6 @@ export function createTurnRunner(
             await sendTextClaimingOpener(userId, message, state.scopeKey);
           }
         }
-        await mirrorEarlyRejectReply(failure.turn.finalReplyMirror, message);
         // 群会话「完全访问」档被强确认策略拒绝: 报错文案之外, 再给 owner
         // 私聊发一张一键修复卡(切回 auto)。只对提供 permissionModeFix 文案
         // 的渠道(飞书)与群 lane 生效 — 私聊不挂群策略, 防御性跳过; 卡片
@@ -2788,7 +2691,6 @@ export function createTurnRunner(
         /* 忽略失败：派发失败提示不能再阻塞收口。 */
       }
     }
-    releaseTurnFinalReplyMirror(failure.turn);
     if (finishDeferredDetachIfIdle(state)) return;
     // 一条 pre-dispatch failure 不能卡死后面的排队消息 — 继续放行。
     maybeDispatchNextQueued(state, userId);
@@ -2901,9 +2803,6 @@ export function createTurnRunner(
     // 创建失败集中在此捕获并 resolve null(#2164):调用点全部是 fire-and-forget
     // 的 .then(...),各自补 rejection handler 必然遗漏;失败留下脱敏日志与
     // streamingStartFailed 标记,已生成正文由收口分支一次性降级发送。
-    // Dual-delivery parent-chat copies are armed only by the true terminal
-    // finalize call. Pre-interaction fragments use the same handle contract but
-    // deliberately finalize without finalReplyMirror.
     turn.streamingHandlePromise = (async () => {
       try {
         const handle =
@@ -3053,11 +2952,6 @@ export function createTurnRunner(
           if (!consumed) {
             await sendTextClaimingOpener(userId, '✅ (本轮无文本输出)', state.scopeKey);
           }
-          await mirrorTurnFinalReply(
-            turn.finalReplyMirror,
-            '✅ (本轮无文本输出)',
-            turn.mediaAbsPaths.length > 0 ? { mediaAbsPaths: turn.mediaAbsPaths } : undefined,
-          );
         }
       } catch {
         /* swallow */
@@ -3079,11 +2973,6 @@ export function createTurnRunner(
           });
         } else {
           await output.im.sendText(userId, fallbackText, { threadTs: state.scopeKey });
-          await mirrorTurnFinalReply(
-            turn.finalReplyMirror,
-            fallbackText,
-            turn.mediaAbsPaths.length > 0 ? { mediaAbsPaths: turn.mediaAbsPaths } : undefined,
-          );
         }
         log.info(`[${channel}/turn] streaming surface unavailable — final text delivered via plain send`);
       } catch (err) {
@@ -3172,11 +3061,6 @@ export function createTurnRunner(
           if (!consumed) {
             await sendTextClaimingOpener(userId, errorText, state.scopeKey);
           }
-          await mirrorTurnFinalReply(
-            turn?.finalReplyMirror,
-            errorText,
-            turn && turn.mediaAbsPaths.length > 0 ? { mediaAbsPaths: turn.mediaAbsPaths } : undefined,
-          );
         }
       } catch {
         /* swallow */
@@ -3244,7 +3128,23 @@ export function createTurnRunner(
     scopeKey?: string,
     confirmationTimeoutMs?: number,
   ) {
-    return async (req: InteractionRequest): Promise<InteractionDecision> => {
+    return async (rawReq: InteractionRequest): Promise<InteractionDecision> => {
+      // Redact BEFORE anything channel-facing sees the request. This listener
+      // replaces the Desktop handler, which does its own redaction, so without
+      // this the card builders (interactionCardModel copies `input` verbatim)
+      // would put a credential-bearing `proxyServer` into a Telegram/Feishu
+      // card. The browser tool rejects authenticated proxies later, but the
+      // card has already left the machine by then.
+      const req: InteractionRequest =
+        rawReq.kind === 'permission'
+          ? {
+              ...rawReq,
+              input: redactToolInputForUntrustedBoundary(
+                rawReq.toolName,
+                rawReq.input,
+              ) as Record<string, unknown>,
+            }
+          : rawReq;
       log.info(
         `interaction request kind=${req.kind} requestId=...${req.requestId.slice(-8)} session=...${localSessionId.slice(-8)}`,
       );
@@ -3460,7 +3360,6 @@ export function createTurnRunner(
     const dropped = state.sendQueue.splice(0, state.sendQueue.length);
     log.warn(`dropping ${dropped.length} queued message(s) on cleanup/detach`);
     for (const item of dropped) {
-      releaseTurnFinalReplyMirror(item.turn);
       releaseAttachedImTurnHeadless(item.turn);
       void cancelAckReaction(item.turn);
     }
@@ -3597,6 +3496,7 @@ export function createTurnRunner(
     const persisted = await persistUserMessage({
       sessionId,
       text: args.text,
+      source: createLocalImSource(adapter.messageSourceIm?.() ?? channel, args.text),
       ...(args.attachments ? { attachments: args.attachments } : {}),
     });
     if (!persisted) return null;

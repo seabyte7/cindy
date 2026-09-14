@@ -1,4 +1,6 @@
+import { parseGhostRoutineEvents, type GhostRoutineEvents } from '@cindy/plugin-protocol';
 import {
+  type GhostRecommendation,
   GHOST_LOCALES,
   GHOST_MANIFEST_SUMMARY_MAX_CHARS,
   GHOST_OAUTH_SCOPES_MAX,
@@ -253,6 +255,8 @@ export function isGhostNodeMcpReservedMethod(method: string): boolean {
  * Worker 获得明文后仍可能主动回传或泄露。未声明 entry 时只允许主入口。
  */
 export interface GhostNodeSecretBinding {
+  /** 引用本插件 network.secrets 中的 OAuth key；仅注入短期 access token。 */
+  oauthSecret?: string;
   /** 凭证键(插件内唯一):小写字母开头,允许小写/数字/下划线,1–32。 */
   key: string;
   /** 给用户看的名称(插件详情与设置状态使用)。 */
@@ -1367,6 +1371,8 @@ export function isGhostSetupErrorCode(value: unknown): value is GhostSetupErrorC
 
 /** ghost.json 清单(不变量由 validateGhostManifest 保证)。 */
 export interface GhostManifest {
+  /** Optional v3 extension, validated only when projecting homepage recommendations. */
+  recommendations?: unknown;
   /** 原始清单格式版本；v2 已在解析边界投影成与 v3 相同的直接字段。 */
   schemaVersion: 2 | 3;
   /** 唯一标识,同时是安装目录名与 panelKind 后缀。 */
@@ -1452,6 +1458,8 @@ export interface GhostManifest {
    * hooks 非空时 launch 必须为 'resident'(校验强制)。
    */
   subscribe?: GhostSubscribeNeeds;
+  /** Autonomous publishing of declared events into user-configured routines. */
+  routineEvents?: GhostRoutineEvents;
   /**
    * 网络能力与范围。
    * 域名白名单 + 凭证声明,插件详情逐项展示,运行期主机代发并守门。
@@ -1969,12 +1977,12 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
       const targetEntry = binding.entry ?? manifest.node.entry;
       const stableMethods = [...binding.methods].sort();
       items.unshift({
-        key: `node:secret:${binding.key}:${targetEntry}:${stableMethods.join(',')}`,
+        key: `node:secret:${binding.key}:${targetEntry}:${stableMethods.join(',')}${binding.oauthSecret ? `:oauth:${binding.oauthSecret}` : ''}`,
         kind: 'node',
         labelKey: 'nodeSecret',
         labelArgs: { name: binding.label },
         detailKey: 'nodeSecretDetail',
-        detail: binding.methods.join('\n'),
+        detail: [binding.oauthSecret ? `OAuth: ${binding.oauthSecret}` : '', ...binding.methods].filter(Boolean).join('\n'),
       });
     }
     if (manifest.node.lifecycle === 'resident') {
@@ -2085,7 +2093,8 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
     items.push({ key: 'fs', kind: 'fs', labelKey: 'fsWrite', detailKey: 'fsWriteDetail' });
   }
   // library 能力:持久作品库(用户数据语义,不是临时缓存)。详情页必须讲清
-  // 卸载不删、删除走独立确认,以及会打开系统文件夹/另存为对话框。
+  // 卸载不删、删除走独立确认、会打开系统文件夹/另存为对话框,以及可把 PNG
+  // 位图写入系统剪贴板(无确认框,会覆盖当前剪贴板)。
   if (manifest.library === true) {
     items.push({
       key: 'library',
@@ -2173,6 +2182,9 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
       labelArgs: { title: manifest.mainView.title ?? manifest.name },
       detailKey: 'mainViewDetail',
     });
+  }
+  if (manifest.routineEvents) {
+    items.push({ key: 'routine-events', kind: 'subscribe', labelKey: 'routineEvents', detail: manifest.routineEvents.events.map((event) => `${event.name} (${event.type}: ${event.fields.join(", ")})`).join(', ') });
   }
   if (manifest.subscribe) {
       // 订阅两档分列:旁听(元数据)常规位;拦截是全部槽里权限最重的一档,
@@ -2576,6 +2588,7 @@ export function ghostNodeSecretAuthorizationWithinCap(
     );
     if (
       !cap ||
+      binding.oauthSecret !== cap.oauthSecret ||
       binding.label !== cap.label ||
       !binding.methods.every((method) => cap.methods.includes(method))
     ) {
@@ -2878,6 +2891,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 const GHOST_MANIFEST_KNOWN_TOP_LEVEL_FIELDS = new Set([
+  'routineEvents',
   'schemaVersion',
   'id',
   'name',
@@ -4441,7 +4455,7 @@ export function validateGhostManifest(value: unknown): ManifestValidation {
         }
         const binding = bindingRaw as Record<string, unknown>;
         const unknownBindingField = Object.keys(binding).find(
-          (key) => !['key', 'label', 'methods', 'entry', 'hint', 'url'].includes(key),
+          (key) => !['key', 'label', 'methods', 'entry', 'hint', 'url', 'oauthSecret'].includes(key),
         );
         if (unknownBindingField) {
           return {
@@ -4558,7 +4572,12 @@ export function validateGhostManifest(value: unknown): ManifestValidation {
             };
           }
         }
+        if (binding.oauthSecret !== undefined &&
+          (typeof binding.oauthSecret !== 'string' || !/^[a-z][a-z0-9_]{0,31}$/.test(binding.oauthSecret))) {
+          return { ok: false, reason: 'node.secretBindings[].oauthSecret 必须是本插件 OAuth 凭证键' };
+        }
         nodeSecretBindings.push({
+          ...(binding.oauthSecret !== undefined ? { oauthSecret: binding.oauthSecret as string } : {}),
           key: binding.key,
           label: binding.label,
           methods,
@@ -4809,6 +4828,11 @@ export function validateGhostManifest(value: unknown): ManifestValidation {
   // 订阅槽详单(卡槽①):与 slots 含 'subscribe' 成对(有详单必有槽;有槽
   // 无详单允许装入但零事件,同 cindy 语义)。硬规则:声明了 hooks(拦截)
   // 必须 launch:'resident'——要挡路就得常驻在场,每条消息等冷启动不可接受。
+  if (raw.routineEvents !== undefined && prepared.schemaVersion !== 3) {
+    return { ok: false, reason: 'routineEvents requires schemaVersion 3' };
+  }
+  const routineEvents = raw.routineEvents === undefined ? undefined : parseGhostRoutineEvents(raw.routineEvents);
+  if (routineEvents === null) return { ok: false, reason: 'Invalid routineEvents declaration' };
   let subscribe: GhostSubscribeNeeds | undefined;
   if (raw.subscribe !== undefined) {
     if (!isPlainObject(raw.subscribe)) {
@@ -5778,6 +5802,13 @@ export function validateGhostManifest(value: unknown): ManifestValidation {
   // setup 就绪声明:引用必须指向已声明的凭证/连接(悬空引用在装包期拒,
   // 不留到运行期才发现作者写错);kv 引用要求 settingsHtml(没有设置页
   // 没人填参数);Host 派生源没有用户配置动作,引用它属结构性误解,直接拒装。
+  for (const binding of node?.secretBindings ?? []) {
+    if (binding.oauthSecret === undefined) continue;
+    const source = network?.secrets?.find((secret) => secret.key === binding.oauthSecret);
+    if (source?.source !== 'oauth' || !source.oauth) {
+      return { ok: false, reason: 'node.secretBindings[].oauthSecret 必须引用本插件已声明的 OAuth 凭证' };
+    }
+  }
   let setup: GhostSetupDecl | undefined;
   if (raw.setup !== undefined) {
     if (!isPlainObject(raw.setup)) {
@@ -5811,7 +5842,7 @@ export function validateGhostManifest(value: unknown): ManifestValidation {
             },
           ] as const,
       ),
-      ...(node?.secretBindings ?? []).map((s) => [s.key, { hostDerivedSource: null }] as const),
+      ...(node?.secretBindings ?? []).filter((s) => !s.oauthSecret).map((s) => [s.key, { hostDerivedSource: null }] as const),
     ]);
     const connectionKeys = new Set((network?.connections ?? []).map((c) => c.key));
     const groups: GhostSetupGroup[] = [];
@@ -5988,6 +6019,7 @@ export function validateGhostManifest(value: unknown): ManifestValidation {
         : {}),
       ...(node !== undefined ? { node } : {}),
       ...(subscribe !== undefined ? { subscribe } : {}),
+      ...(routineEvents !== undefined ? { routineEvents } : {}),
       ...(network !== undefined ? { network } : {}),
       ...(preview !== undefined ? { preview } : {}),
       ...(skill !== undefined ? { skill } : {}),
@@ -6217,6 +6249,12 @@ export type GhostPipeHostRequest =
       capability: GhostMediaCapability;
     };
 
+/** Replaces only the calling plugin's catalog; never starts a task. */
+export interface GhostPipeRecommendationsUpdate {
+  type: 'recommendations-update';
+  items: GhostRecommendation[];
+}
+
 /** 插件请求 Agent 新回合时可选的会话处理方式。 */
 export const GHOST_AGENT_RUN_MODES = ['continue', 'fork', 'new'] as const;
 export type GhostAgentRunMode = (typeof GHOST_AGENT_RUN_MODES)[number];
@@ -6396,6 +6434,8 @@ export const GHOST_NODE_REQUEST_MAX_TOTAL_MS = 15 * 60_000;
 /** 上行:main.js 通过主机中继调用随包 Node 工作进程。 */
 export interface GhostPipeNodeRequest {
   type: 'node-request';
+  /** OAuth 注入的本插件账号 id；缺省使用对应 OAuth 槽的默认账号。 */
+  authAccount?: string;
   /** JSON-RPC 方法名；mcp-stdio 时使用 tools/list、tools/call 等 MCP 方法。 */
   method: string;
   params?: unknown;
@@ -8228,6 +8268,7 @@ export type GhostPipeFsResult =
 export const GHOST_LIBRARY_OPS = [
   'open',
   'status',
+  'capabilities',
   'read',
   'write',
   'writeBegin',
@@ -8248,8 +8289,54 @@ export const GHOST_LIBRARY_OPS = [
   'db.userVersion',
   'reveal',
   'saveAs',
+  'clipboardWrite',
 ] as const;
 export type GhostLibraryOp = (typeof GHOST_LIBRARY_OPS)[number];
+
+/** v1 能力清单只表达宿主实现支持,不等于此刻有窗口 / 已授权 / 库可用。 */
+export const GHOST_LIBRARY_CAPABILITY_OPERATIONS = ['clipboardWrite', 'saveAs'] as const;
+export type GhostLibraryCapabilityOperation = (typeof GHOST_LIBRARY_CAPABILITY_OPERATIONS)[number];
+
+export const GHOST_LIBRARY_CAPABILITIES_V1 = {
+  version: 1 as const,
+  operations: GHOST_LIBRARY_CAPABILITY_OPERATIONS,
+};
+
+/** 宿主实际操作的稳定失败类别;TIMEOUT / TRANSPORT_ERROR 由插件查询层本地分类,不从 message 猜测。 */
+export const GHOST_LIBRARY_ERROR_REASONS = [
+  'IMPLEMENTATION_UNSUPPORTED',
+  'NO_VISIBLE_WINDOW',
+  'PERMISSION_DENIED',
+  'LIBRARY_UNAVAILABLE',
+  'INVALID_REQUEST',
+  'CANCELLED',
+] as const;
+export type GhostLibraryErrorReason = (typeof GHOST_LIBRARY_ERROR_REASONS)[number];
+
+/**
+ * 消费 capabilities 结果:仅 version=1 且 operations 为字符串数组才有效。
+ * 额外字段忽略,未知 operation 忽略,已知项保留;有效 v1 缺某项才是 unsupported;
+ * 缺字段 / 错类型 / version 非 1 / 旧宿主 unknown-op 一律 unknown。
+ */
+export function classifyGhostLibraryOperationSupport(
+  result: unknown,
+  operation: GhostLibraryCapabilityOperation,
+): 'supported' | 'unsupported' | 'unknown' {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return 'unknown';
+  const row = result as Record<string, unknown>;
+  if (row.ok !== true || row.op !== 'capabilities') return 'unknown';
+  const caps = row.capabilities;
+  if (!caps || typeof caps !== 'object' || Array.isArray(caps)) return 'unknown';
+  const body = caps as Record<string, unknown>;
+  if (body.version !== 1 || !Array.isArray(body.operations)) return 'unknown';
+  if (!body.operations.every((item) => typeof item === 'string')) return 'unknown';
+  const known = new Set<string>(GHOST_LIBRARY_CAPABILITY_OPERATIONS);
+  const listed = new Set<string>();
+  for (const item of body.operations) {
+    if (known.has(item)) listed.add(item);
+  }
+  return listed.has(operation) ? 'supported' : 'unsupported';
+}
 
 /** 上行:library 请求(cindy.library(req) ≡ send({type:'library-request', …req}))。 */
 export interface GhostPipeLibraryRequest {
@@ -8257,7 +8344,7 @@ export interface GhostPipeLibraryRequest {
   op: GhostLibraryOp;
   /** library 相对路径(段数/总长上限比 fs 宽:32 段/512 字符)。 */
   path?: string;
-  /** write 内容(≤16MiB;更大走 writeBegin 分块流)。 */
+  /** write 内容(≤16MiB;更大走 writeBegin 分块流);clipboardWrite 只收 encoding:'base64' 的 PNG 字节。 */
   content?: string;
   encoding?: 'utf8' | 'base64';
   /** write:排他创建(目标已存在则 ALREADY_EXISTS)。 */
@@ -8308,6 +8395,9 @@ export type GhostPipeLibraryResult =
       softLimitBytes?: number;
       softLimitExceeded?: boolean;
       location?: 'default' | 'custom';
+      authorizedReadonly?: boolean;
+      libraryGeneration?: number;
+      libraryIdentity?: string;
     }
   | {
       ok: true;
@@ -8350,7 +8440,18 @@ export type GhostPipeLibraryResult =
   | { ok: true; op: 'saveAs'; cancelled: true }
   /** saveAs 成功:path 是库内相对键(与请求相同),不是用户另存到的绝对路径。 */
   | { ok: true; op: 'saveAs'; cancelled: false; path: string; bytes: number }
-  | { ok: false; errorCode: string; message: string };
+  /** clipboardWrite 成功:bytes 是写入系统剪贴板的 PNG 位图字节数,不是文件引用。 */
+  | { ok: true; op: 'clipboardWrite'; bytes: number }
+  /** capabilities:无会话只读查询;operations 只表示实现支持。 */
+  | {
+      ok: true;
+      op: 'capabilities';
+      capabilities: {
+        version: 1;
+        operations: GhostLibraryCapabilityOperation[];
+      };
+    }
+  | { ok: false; errorCode: string; message: string; reason?: GhostLibraryErrorReason };
 
 /** Library 概览(ghosts:library-overview IPC 载荷;设置页插件详情消费)。 */
 export interface GhostLibraryOverview {
@@ -8538,3 +8639,8 @@ export const GHOST_CALL_TOOL_NAMES: readonly string[] = [
 export function isGhostCallToolName(name: string | undefined | null): boolean {
   return typeof name === 'string' && GHOST_CALL_TOOL_NAMES.includes(name);
 }
+
+/** Plugin-to-host routine protocol; source identity always comes from the authenticated pipe. */
+export type GhostPipeRoutineRequest =
+  | { type: 'routine-request'; action: 'status'; status: 'listening' | 'disconnected' | 'error' }
+  | { type: 'routine-request'; action: 'publish'; event: import('@cindy/maker-scheduler').RoutineEvent };

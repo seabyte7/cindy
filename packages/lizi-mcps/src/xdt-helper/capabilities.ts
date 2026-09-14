@@ -92,6 +92,7 @@ export const CAPABILITIES: readonly CapabilityEntry[] = [
       'agent 可观察任意本机会话队列与运行状态，并控制自己投递的队列消息、same-turn 插话或请求优雅停止。',
     detail: [
       '【入口】cindy_helper 的 history 类 list_sessions / list_session_queue 提供 queuedCount、队列位置、来源、入队时间、正文摘要与 consuming 状态；control 类提供 update_session_queued_message、cancel_session_queued_message、steer_session、stop_session_turn、get_session_runtime。',
+      '【伙伴入口】伙伴不挂载通用 control 类。只管理自己拥有的后台任务：message_session_task 的 queue / steer / resume 分别表示排队、同轮插话、恢复暂停；stop_session_task 的 cancel / request-stop / pause 分别表示取消任务、请求当前轮停止、保留任务与队列的可恢复暂停。check_session_task 的 control 区分 pausing / paused；requested 或 unconfirmed 不能当作已停。不支持的引擎明确返回失败。',
       '【队列所有权】只能修改或撤回当前调用 session 自己通过 send_to_session 投递、且尚未进入 consuming 的消息；Orca、scheduler、用户或其它 session 的消息都会 fail-closed 拒绝。Orca worker 队列控制与这里复用同一底层生命周期实现。',
       '【插话】steer_session 只对正在运行且支持 same-turn steer 的 session 生效，在 provider 的下一个输入间隙注入当前 turn；若 turn 已结束会明确失败，不会退化成下一 turn。',
       '【停止】stop_session_turn 是请求式优雅停止：当前并行工具全部收尾后才发送 provider 软中断；不关闭 transport、不重建 session、不硬杀进程，超时未确认会返回 unconfirmed。',
@@ -193,11 +194,13 @@ export const CAPABILITIES: readonly CapabilityEntry[] = [
   {
     key: 'feishu-integration',
     title: '飞书集成(基础接入)',
-    oneLiner: '飞书 OAuth 登录、IM 通知、文件上传,以及 agent 可调用的飞书 MCP 工具集。',
+    oneLiner: '飞书 OAuth 登录与 IM 出站通知;飞书数据读写由企业档 xd-feishu 插件经 ghost 网关提供。',
     detail: [
-      `使用飞书 OAuth 登录 ${BRAND_NAME}。任务完成、权限超期等事件通过 IM 推送通知。`,
-      'agent 通过 MCP 工具读写飞书数据:文档(docx_search / read / append_blocks / insert_blocks / update_block)、多维表格(bitable_search / list_tables / list_fields / list_records)、Wiki 知识空间(wiki_search / read / create_node / recent_changes 等)、IM 消息(im_list_chats / read_messages / send_message)、联系人、日程、会议纪要。',
-      '支持上传图片 / 文件到飞书(im_upload_image / im_upload_file),还有跨类型全局搜索 search_and_read。',
+      `使用飞书 OAuth 登录 ${BRAND_NAME}。任务完成、权限超期等事件通过 IM 推送通知;`,
+      '出站通道(cindy_feishu_bot)负责给当前飞书用户发消息 / 发文件 / 发图片,不提供数据读取。',
+      '读写飞书数据(云文档 docx / 多维表格 bitable / Wiki 知识库 / IM 消息搜索阅读 / 联系人 / 日程 / 审批 / 会议纪要)属于企业档 xd-feishu 插件:',
+      '需在侧边栏「插件」安装并启用 xd-feishu、在其详情页连接账号;OAuth 登录成功不等于该插件可用。',
+      '这些操作不注册为顶层 MCP 工具——agent 须经 ghost 网关发现与调用(ghost_info({ghost_id:"xd-feishu"}) 查实时工具清单,再 ghost_call 执行)。',
       '把"接管 desktop session 移动办公"这条独立能力请查 mobile-takeover bucket。',
     ].join(' '),
   },

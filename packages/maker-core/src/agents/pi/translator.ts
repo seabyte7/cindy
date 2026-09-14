@@ -15,6 +15,8 @@
  * message_end 时把该消息全部 text block 拼接发一次 isFinal:true 校准。
  */
 
+import { randomUUID } from 'node:crypto';
+import { parseMessageToolUse } from '@cindy/maker-shared/message-normalize';
 import type { Logger } from '../../interfaces/logger.js';
 import { PI_SUBAGENT_TOOL_NAME, subagentSpawnResultIndicatesRunning } from '@cindy/maker-shared/agent-task';
 import {
@@ -95,6 +97,8 @@ export interface PiTranslateContext {
   getPriceVariant?: () => 'standard' | 'priority';
   /** get_state 拿到的 contextWindow(模型切换时更新)。 */
   contextWindow: number;
+  /** Applied compaction budget; separate from the native request capacity. */
+  workingContextWindow?: number;
   /** turn 内累计 input+output;turn 结束 reset。 */
   turnTokens: number;
   /** turn 内 usage 分量累计(did-turn-end / ghost 订阅上报用);agent_start reset。 */
@@ -121,6 +125,8 @@ export interface PiTranslateContext {
   /** 当前 turn 内尚未被终态消费的 Host 主动停止请求。 */
   hostAbortRequestGeneration: number | null;
   hostAbortRequestTokens: Set<symbol>;
+  /** Runtime-local namespace: persisted thinking IDs must not collide after context recreation. */
+  thinkingIdPrefix: string;
   /** thinking 块序号(blockId 生成)。 */
   thinkingSeq: number;
   /** contentIndex → 当前消息内的 thinking block 状态。 */
@@ -144,6 +150,12 @@ export interface PiTranslateContext {
    * 暂存到 agent_settled 再终态上报，避免一次可恢复错误提前收口整个 turn。
    */
   pendingAssistantError: PiPendingAssistantError | null;
+  /**
+   * A terminal provider error already emitted before agent_settled (currently
+   * exhausted native auto-retry). The later empty settled frame is closure,
+   * not a silent assistant stop that the Host should continue automatically.
+   */
+  terminalAssistantErrorEmitted: boolean;
   /** 整轮 wall-clock 起点；只用于诊断，不参与 TPS。 */
   turnWallClockStartedAt: number;
   generationDurationMs: number;
@@ -203,6 +215,7 @@ export function createPiTranslateContext(logger: Logger): PiTranslateContext {
     pendingHostTurnStartToken: null,
     hostAbortRequestGeneration: null,
     hostAbortRequestTokens: new Set(),
+    thinkingIdPrefix: `pi-think-${randomUUID()}`,
     thinkingSeq: 0,
     thinkingBlocks: new Map(),
     streamStopTokenByIndex: new Map(),
@@ -221,6 +234,7 @@ export function createPiTranslateContext(logger: Logger): PiTranslateContext {
     subagentToolCalls: new Map(),
     toolNamesByCallId: new Map(),
     pendingAssistantError: null,
+    terminalAssistantErrorEmitted: false,
     compactTurnScope: null,
   };
 }
@@ -276,7 +290,7 @@ export function rollbackPiHostAbortRequest(
   if (ctx.hostAbortRequestTokens.size === 0) ctx.hostAbortRequestGeneration = null;
 }
 
-function isCurrentTurnHostAbortRequested(ctx: PiTranslateContext): boolean {
+export function isCurrentTurnHostAbortRequested(ctx: PiTranslateContext): boolean {
   return ctx.hostAbortRequestGeneration === ctx.turnGeneration
     && ctx.hostAbortRequestTokens.size > 0;
 }
@@ -303,6 +317,7 @@ export function disposePiTranslateContext(ctx: PiTranslateContext): void {
   ctx.pendingHostTurnStartToken = null;
   clearPiHostAbortRequests(ctx);
   ctx.pendingAssistantError = null;
+  ctx.terminalAssistantErrorEmitted = false;
   ctx.compactTurnScope = null;
   ctx.subagentToolCalls.clear();
   ctx.toolNamesByCallId.clear();
@@ -334,12 +349,14 @@ export function usageSnapshotOf(ctx: PiTranslateContext): UsageSnapshot {
     {
       tokenUsage: ctx.turnTokens,
       contextTokens: ctx.contextTokens,
-      contextWindow: ctx.contextWindow,
+      contextWindow: ctx.workingContextWindow && ctx.workingContextWindow > 0
+        ? Math.min(ctx.workingContextWindow, ctx.contextWindow) : ctx.contextWindow,
       costUsd: ctx.costUsd,
     },
     {
       outputTokens: ctx.turnOutput,
-      closedDurationMs: ctx.generationDurationMs,
+      // Pi reports output only at message_end, alongside the closed duration.
+      durationMs: ctx.generationDurationMs,
       openStartedAt: ctx.generationOpenAt > 0 ? ctx.generationOpenAt : null,
       reliable: ctx.generationTimingReliable && ctx.generationHeartbeatReliable,
     },
@@ -529,6 +546,11 @@ function assistantTextOf(message: PiAssistantMessage): string {
   return parts.join('\n\n');
 }
 
+/** Pi's explicit request failure, distinct from a bare or Host-requested abort. */
+function isPiAbortedRequest(error: string): boolean {
+  return /^Request was aborted[.!]?$/i.test(error.trim());
+}
+
 function piAssistantErrorOf(rawError: string): PiPendingAssistantError {
   const signals = extractNonSecretErrorSignals(rawError);
   const redactedError = redactSensitiveText(rawError);
@@ -539,7 +561,7 @@ function piAssistantErrorOf(rawError: string): PiPendingAssistantError {
     ...(signals.usageLimit ? { usageLimit: true } : {}),
     ...(isContextOverflowErrorMessage(redactedError)
       ? { reason: CONTEXT_OVERFLOW_REASON }
-      : isStreamInterruptedErrorMessage(redactedError)
+      : isStreamInterruptedErrorMessage(redactedError) || isPiAbortedRequest(redactedError)
         ? { reason: UPSTREAM_STREAM_INTERRUPTED_REASON }
         : {}),
   };
@@ -552,6 +574,7 @@ function isPiTransientAssistantFailure(message: PiAssistantMessage): boolean {
   return errorMessage.length > 0 && (
     isNetworkishErrorMessage(errorMessage)
     || isStreamInterruptedErrorMessage(errorMessage)
+    || isPiAbortedRequest(errorMessage)
   );
 }
 
@@ -649,6 +672,7 @@ export function translatePiEvent(
       ctx.finalAssistantText = '';
       ctx.finalAssistantStopReason = null;
       ctx.pendingAssistantError = null;
+      ctx.terminalAssistantErrorEmitted = false;
       ctx.turnWallClockStartedAt = Date.now();
       ctx.generationDurationMs = 0;
       ctx.generationTimingReliable = true;
@@ -675,8 +699,7 @@ export function translatePiEvent(
       const bridgedPriceVariant = priceVariantFromServiceTier(message?.usage?.service_tier);
       ctx.pendingPriceVariants.push(bridgedPriceVariant ?? ctx.getPriceVariant?.() ?? 'standard');
       startPiGenerationHeartbeat(ctx);
-      // Tell the UI generation is active so it can tick the TPS denominator
-      // locally between sparse message_end usage reports.
+      // Activity may advance before usage; the rate retains the last completed sample.
       pushStatus(queue, ctx, 'Working…', true);
       return;
     }
@@ -760,8 +783,11 @@ export function translatePiEvent(
         type: 'tool_use',
         data: {
           toolUseId,
-          toolName,
-          input: toolArgs,
+          ...parseMessageToolUse({
+            role: 'tool_use',
+            content: { toolName, input: toolArgs },
+            toolUseId,
+          }),
         },
         source: 'pi',
       });
@@ -815,10 +841,16 @@ export function translatePiEvent(
       const progress = parsePiSubagentProgress(event.partialResult);
       if (progress) {
         const previousUpdate = ctx.subagentToolCalls.get(progress.update.taskId);
+        // Legacy progress frames name the role (e.g. scout). Keep the task
+        // title chosen at spawn across progress and terminal events.
+        const update = {
+          ...progress.update,
+          ...(previousUpdate?.title ? { title: previousUpdate.title } : {}),
+        };
         if (previousUpdate) {
           ctx.subagentToolCalls.set(progress.update.taskId, {
             ...previousUpdate,
-            ...progress.update,
+            ...update,
           });
         }
         // 委派用量并进本 turn 的记账。子代理是独立 pi 进程,它的请求不走父进程的 usage 流,
@@ -830,7 +862,7 @@ export function translatePiEvent(
           progress.delegatedUsage,
           progress.delegatedUsageSegments,
         );
-        queue.push({ type: 'agent_task_update', data: progress.update, source: 'pi' });
+        queue.push({ type: 'agent_task_update', data: update, source: 'pi' });
       }
       return;
     }
@@ -907,21 +939,63 @@ export function translatePiEvent(
       stopPiGenerationHeartbeat(ctx);
       const hostAbortRequested = isCurrentTurnHostAbortRequested(ctx);
       const pendingAssistantError = hostAbortRequested ? null : ctx.pendingAssistantError;
-      const outcome = pendingAssistantError
+      // Classify the final assistant message at settlement, after native retries
+      // and continuations have had a chance to recover. A host Stop still wins.
+      const outputLimited = !hostAbortRequested
+        && !ctx.terminalAssistantErrorEmitted
+        && ctx.finalAssistantStopReason === 'length';
+      const usage = {
+        inputTokens: ctx.turnInput,
+        outputTokens: ctx.turnOutput,
+        cacheReadTokens: ctx.turnCacheRead,
+        cacheCreationTokens: ctx.turnCacheWrite,
+        segments: ctx.turnUsageSegments.map((segment) => ({ ...segment })),
+        segmentsComplete: ctx.turnUsageSegmentsComplete,
+        // durationMs is deliberately generation-only. If Pi does not report a
+        // per-assistant generation duration, omit it instead of charging tool
+        // execution / user waits to TPS.
+        ...(ctx.generationTimingReliable && ctx.generationDurationMs > 0
+          ? { durationMs: ctx.generationDurationMs }
+          : {}),
+        ...(ctx.turnWallClockStartedAt > 0
+          ? { turnDurationMs: Math.max(0, Date.now() - ctx.turnWallClockStartedAt) }
+          : {}),
+      };
+      const terminalError = pendingAssistantError ?? (outputLimited ? {
+        message: 'Pi reached the model output limit. The response may be incomplete.',
+        sdkError: 'Pi response stopped at the model output limit',
+        reason: 'output-limit',
+        // Consumers may settle on this error and ignore the paired done.
+        result: ctx.finalAssistantText,
+        usage,
+      } : null);
+      const outcome = terminalError
         ? 'failed'
         : hostAbortRequested || ctx.finalAssistantStopReason === 'aborted'
           ? 'cancelled'
           : 'completed';
       ctx.pendingAssistantError = null;
       clearPiHostAbortRequests(ctx);
-      if (pendingAssistantError) {
+      if (terminalError) {
         queue.push({
           type: 'error',
           data: {
-            ...pendingAssistantError,
+            ...terminalError,
             isTerminal: true,
           },
           source: 'pi',
+        });
+      }
+      const silentStop = outcome === 'completed'
+        && !hostAbortRequested
+        && pendingAssistantError === null
+        && !ctx.terminalAssistantErrorEmitted
+        && ctx.finalAssistantText.trim().length === 0;
+      if (silentStop) {
+        ctx.logger.warn('pi turn settled without a user-facing assistant reply', {
+          turnGeneration: ctx.turnGeneration,
+          inputTokens: ctx.turnInput,
+          outputTokens: ctx.turnOutput,
         });
       }
       queue.push({
@@ -931,27 +1005,15 @@ export function translatePiEvent(
           // 本 turn 最终 assistant 回复文本。与 CC/Codex 的 done.data.result 对齐:
           // register.ts 的 will-assistant-message 出口钩子与 Orca worker 终态 finalText
           // 都读 done.data.result,不带上就会对 Pi 静默跳过这些钩子(codex review P1)。
-          result: outcome === 'completed' ? ctx.finalAssistantText : '',
+          result: outputLimited || outcome === 'completed' ? ctx.finalAssistantText : '',
           status: outcome,
+          // Reuse the host's bounded silent-stop continuation guard. This
+          // continues the same conversation after completed tools; it does not
+          // replay the original user request or its side effects.
+          ...(silentStop ? { silentStop: true } : {}),
           // ghost 订阅 did-turn-end 的 usage 上报(subscriptionGateway.normalizeTurnUsage
           // 认 camelCase);与 CC/Codex 的 done.usage 对齐,让插件能显示 pi turn 的用量。
-          usage: {
-            inputTokens: ctx.turnInput,
-            outputTokens: ctx.turnOutput,
-            cacheReadTokens: ctx.turnCacheRead,
-            cacheCreationTokens: ctx.turnCacheWrite,
-            segments: ctx.turnUsageSegments.map((segment) => ({ ...segment })),
-            segmentsComplete: ctx.turnUsageSegmentsComplete,
-            // durationMs is deliberately generation-only. If Pi does not report a
-            // per-assistant generation duration, omit it instead of charging tool
-            // execution / user waits to TPS.
-            ...(ctx.generationTimingReliable && ctx.generationDurationMs > 0
-              ? { durationMs: ctx.generationDurationMs }
-              : {}),
-            ...(ctx.turnWallClockStartedAt > 0
-              ? { turnDurationMs: Math.max(0, Date.now() - ctx.turnWallClockStartedAt) }
-              : {}),
-          },
+          usage,
         },
         source: 'pi',
       });
@@ -1033,6 +1095,7 @@ export function translatePiEvent(
         ? piAssistantErrorOf(rawFinalError)
         : ctx.pendingAssistantError ?? piAssistantErrorOf('pi auto-retry failed');
       ctx.pendingAssistantError = null;
+      ctx.terminalAssistantErrorEmitted = true;
       // 只有 Pi 自己的 retry budget 用尽，才挡住 Host 续跑。首次 aborted 半截流
       // 没有 auto_retry_*，必须保持无 reason，好让 Host 按网络类接走。
       const exhaustedReason = !finalError.reason && isNetworkishErrorMessage(finalError.message)
@@ -1092,14 +1155,14 @@ export function translatePiEvent(
       return;
     }
 
+    // Pi v0.84.3 extension telemetry. If it ever leaks onto the RPC stream,
+    // ignore it: compaction_end already carries aborted/errorMessage.
     case 'queue_update':
     case 'thinking_level_changed':
     case 'summarization_retry_scheduled':
     case 'summarization_retry_attempt_start':
     case 'summarization_retry_finished':
     case 'bash_execution_update':
-    // Pi v0.84.3 extension telemetry. If it ever leaks onto the RPC stream,
-    // ignore it: compaction_end already carries aborted/errorMessage.
     case 'session_compact_failed':
       return;
 
@@ -1221,7 +1284,7 @@ function ensureThinkingBlock(
   const existing = ctx.thinkingBlocks.get(contentIndex);
   if (existing) return existing;
   const block = {
-    blockId: `pi-think-${++ctx.thinkingSeq}`,
+    blockId: `${ctx.thinkingIdPrefix}-${++ctx.thinkingSeq}`,
     startedAt: Date.now(),
     redacted,
   };

@@ -24,8 +24,10 @@ import {
   collectDeleteAnchorClientIds,
   collectStableLocalFileRefs,
   collectTurnFinalAssistantClientIds,
+  hasBotAssistantOutputInCurrentTurn,
   isGeneratedFilesTurnSealed,
   findRestorableViewportItemIdx,
+  renderItemContainsClientId,
   groupWorkRuns,
   insertForkOriginItem,
   isScrollNavigationKey,
@@ -33,6 +35,7 @@ import {
   isPlanCardVisibleInViewport,
   planSessionBelongsToLatestUserTurn,
   reuseGeneratedFilesRenderItems,
+  simplifyBotRenderItems,
   shouldBlockAssistantFork,
   type RenderItem,
 } from '../components/chat/MessageStream';
@@ -53,6 +56,93 @@ const mkAssistant = (id: string, content = 'ok'): ChatMessage => ({
   clientId: id,
   role: 'assistant',
   content,
+});
+
+it('keeps modal-only Cindy Make cards out of the message timeline', () => {
+  const built = buildRenderItems([
+    mkUser('u1', '之前的消息'),
+    {
+      ...mkAssistant('make-card'),
+      systemCardType: 'cindy-make',
+      systemCardData: { modalOnly: true, report: { runId: 'run-1' } },
+    },
+  ]).items;
+  expect(built.some((item) => item.type === 'message' && item.message.clientId === 'make-card')).toBe(
+    false,
+  );
+});
+
+describe('Bot 流式正文呈现', () => {
+  it('运行中隐藏工作卡，但从首字开始保留 assistant 正文', () => {
+    const messages = [
+      mkUser('u1'),
+      mkTool('t1', 'Bash'),
+      mkResult('r1', 'tu-t1'),
+      { ...mkAssistant('a1', '正在逐字输出'), isStreaming: true },
+    ];
+    const built = buildRenderItems(messages).items;
+    const visible = simplifyBotRenderItems(groupWorkRuns(built, true), true);
+
+    expect(
+      visible.flatMap((item) => (item.type === 'message' ? [item.message.clientId] : [])),
+    ).toEqual(['u1', 'a1']);
+    expect(visible.some((item) => item.type === 'work_group')).toBe(false);
+  });
+
+  it('正文开始前显示思考，正文出现后立即让位，隐藏行不误触发', () => {
+    const user = mkUser('u1');
+    const hiddenSubagent = {
+      ...mkAssistant('sub', '内部结果'),
+      parentToolUseId: 'toolu_01J00000000000000000000000',
+    };
+    const systemCard = { ...mkAssistant('card', '系统状态'), systemCardType: 'status' as const };
+
+    expect(hasBotAssistantOutputInCurrentTurn([user, hiddenSubagent, systemCard])).toBe(false);
+    expect(
+      hasBotAssistantOutputInCurrentTurn([
+        user,
+        hiddenSubagent,
+        systemCard,
+        mkAssistant('a1', '首字'),
+      ]),
+    ).toBe(true);
+    expect(
+      hasBotAssistantOutputInCurrentTurn([user, mkAssistant('a1', '上一轮正文'), mkUser('u2')]),
+    ).toBe(false);
+  });
+
+  it('伙伴私聊往返期间持续保留双方消息戳', () => {
+    const directMessageStamp = (id: string, direction: 'sent' | 'received'): ChatMessage => ({
+      ...mkAssistant(id, ''),
+      systemCardType: 'bot-direct-message',
+      systemCardData: {
+        v: 1,
+        threadId: 'thread-1',
+        viewerBotId: 'bot-a',
+        peerBotId: 'bot-b',
+        peerBotName: '开发Bot',
+        direction,
+        sequence: direction === 'sent' ? 1 : 2,
+        preview: 'hello',
+      },
+    });
+    const messages = [
+      mkUser('u1'),
+      directMessageStamp('dm-sent', 'sent'),
+      { ...mkUser('dm-trigger'), isSyntheticTrigger: true },
+      directMessageStamp('dm-received', 'received'),
+      { ...mkAssistant('a1', '正在回复'), isStreaming: true },
+    ];
+
+    const visible = simplifyBotRenderItems(
+      groupWorkRuns(buildRenderItems(messages).items, true),
+      true,
+    );
+
+    expect(
+      visible.flatMap((item) => (item.type === 'message' ? [item.message.clientId] : [])),
+    ).toEqual(['u1', 'dm-sent', 'dm-received', 'a1']);
+  });
 });
 
 const mkCompactBoundary = (id: string): ChatMessage => ({
@@ -445,6 +535,48 @@ describe('buildRenderItems — key stability', () => {
     expect(items.indexOf(cards[0])).toBeGreaterThan(items.findIndex((item) => item.key === 'msg-a1'));
   });
 
+  it('places the preceding turn changes before an appended Cindy Make card', () => {
+    const firstUser = mkUser('u1');
+    const makeCard = {
+      ...mkAssistant('make-card', ''),
+      systemCardType: 'cindy-make' as const,
+    };
+    const changeSet: TurnChangeSetSummary = {
+      id: 'cs-before-make',
+      sessionId: 's1',
+      anchorClientId: 'u1',
+      provider: 'codex',
+      providerTurnId: 'turn-1',
+      cwd: 'C:/work',
+      state: 'complete',
+      workspaceState: 'applied',
+      isReversible: true,
+      incompleteReasons: [],
+      createdAt: 1,
+      completedAt: 2,
+      files: [{
+        id: 'turn-1:a.ts',
+        path: 'a.ts',
+        oldPath: null,
+        status: 'modified',
+        additions: 1,
+        deletions: 0,
+      }],
+      fileCount: 1,
+      additions: 1,
+      deletions: 0,
+    };
+
+    const { items } = buildRenderItems([firstUser, mkAssistant('a1'), makeCard], undefined, undefined, {
+      turnChangeSets: [changeSet],
+    });
+    const changeIndex = items.findIndex((item) => item.type === 'turn_changes');
+    const cardIndex = items.findIndex((item) => item.key === 'msg-make-card');
+
+    expect(changeIndex).toBeGreaterThanOrEqual(0);
+    expect(cardIndex).toBeGreaterThan(changeIndex);
+  });
+
   it('hides all zero-file change cards because they have no reviewable content', () => {
     const base: TurnChangeSetSummary = {
       id: 'cs-base',
@@ -546,6 +678,86 @@ describe('buildRenderItems — key stability', () => {
       turnChangeSets: [exactFile],
     }).items.filter((item): item is Extract<RenderItem, { type: 'generated_files' }> => item.type === 'generated_files');
     expect(deduped).toHaveLength(0);
+  });
+
+  // 真机验收:伙伴对话里只看到工程 diff 卡「已更改 1 个文件 +137 −0 撤销/审查」,
+  // 交付物卡一次都没出现。根因就在这里 —— changeSet 把本轮文件从产出候选里排它
+  // 剔除,再自己渲染成 turn_changes。伙伴会话的方向是反的。
+  describe('bot sessions hand the turn over to deliverables', () => {
+    const messages = [
+      mkUser('u1'),
+      mkTool('bash-1', 'Bash', { command: 'make report' }),
+      mkResult('bash-result', 'tu-bash-1'),
+      mkUser('u2'),
+    ];
+    const changeSet: TurnChangeSetSummary = {
+      id: 'cs-bot',
+      sessionId: 's1',
+      anchorClientId: 'u1',
+      provider: 'claude-code',
+      providerTurnId: null,
+      cwd: 'C:/work',
+      state: 'complete',
+      workspaceState: 'applied',
+      isReversible: true,
+      incompleteReasons: [],
+      createdAt: 1,
+      completedAt: 2,
+      files: [
+        {
+          id: 'turn-1:out/report.pdf',
+          path: 'out/report.pdf',
+          oldPath: null,
+          status: 'added',
+          additions: 137,
+          deletions: 0,
+        },
+        {
+          id: 'turn-1:src/main.ts',
+          path: 'src/main.ts',
+          oldPath: null,
+          status: 'modified',
+          additions: 3,
+          deletions: 1,
+        },
+      ],
+      fileCount: 2,
+      additions: 140,
+      deletions: 1,
+    };
+    const build = (botSessionId?: string) =>
+      buildRenderItems(messages, undefined, undefined, {
+        workingDir: 'C:/work',
+        turnChangeSets: [changeSet],
+        ...(botSessionId ? { botSessionId } : {}),
+      }).items;
+
+    it('drops the engineering diff card and promotes changeSet creates to deliverables', () => {
+      const items = build('sess-bot');
+      expect(items.filter((item) => item.type === 'turn_changes')).toEqual([]);
+      const generated = items.filter(
+        (item): item is Extract<RenderItem, { type: 'generated_files' }> =>
+          item.type === 'generated_files',
+      );
+      expect(generated).toHaveLength(1);
+      expect(generated[0]?.files.map((file) => file.name)).toEqual(['report.pdf']);
+      // checkpoint 的新建是结构化实锤,与文件工具新建同级(不降级成 command 候选)。
+      expect(generated[0]?.files[0]?.source).toBe('tool');
+    });
+
+    it('never turns an edited file into a deliverable', () => {
+      const generated = build('sess-bot').filter(
+        (item): item is Extract<RenderItem, { type: 'generated_files' }> =>
+          item.type === 'generated_files',
+      );
+      expect(generated[0]?.files.some((file) => file.name === 'main.ts')).toBe(false);
+    });
+
+    it('leaves ordinary tasks on the diff card, unchanged', () => {
+      const items = build();
+      expect(items.filter((item) => item.type === 'turn_changes')).toHaveLength(1);
+      expect(items.filter((item) => item.type === 'generated_files')).toEqual([]);
+    });
   });
 
   it('reuses the generated-files item when only unrelated messages change', () => {
@@ -1411,6 +1623,61 @@ describe('groupWorkRuns — work-group collapsing', () => {
     expect(findRestorableViewportItemIdx(visibleItems, 'seg-t1')).toBe(0);
   });
 
+  it('restores a completed group after an older activity joins the same turn', () => {
+    const tail = [mkAssistant('draft', 'Reading.'), mkTool('tool-later', 'Read'), mkAssistant('final', 'Done.')];
+    const previous = build([mkUser('user'), ...tail], false).find((item) => item.type === 'work_group')!;
+    const expanded = build([mkUser('user'), mkTool('tool-earlier', 'Bash'), ...tail], false);
+    expect(previous.key).toBe('work-summary-tool-later');
+    const index = findRestorableViewportItemIdx(expanded, previous.key);
+    expect(index).toBe(1);
+    expect(expanded[index].key).toBe('work-summary-tool-earlier');
+  });
+
+  it('restores an anchor to a nested deferred group without requiring loaded children', () => {
+    const group = build(
+      [mkUser('user'), mkTool('tool-earlier', 'Bash'), mkAssistant('final', 'Done.')], false,
+    ).find((item): item is Extract<RenderItem, { type: 'work_group' }> => item.type === 'work_group')!;
+    const deferred = { ...group, key: 'work-tool-later', children: [] };
+    const regrouped = { ...group, children: [deferred] };
+    expect(findRestorableViewportItemIdx([regrouped], 'work-summary-tool-later')).toBe(0);
+    expect(findRestorableViewportItemIdx([regrouped], 'work-summary-missing')).toBe(-1);
+  });
+
+  it.each(['work-rs_old-anchor', 'work-earlier|work-rs_old-anchor', 'work-summary-rs_old-anchor'])(
+    'restores a remote summary through its retained deferred identity: %s',
+    (key) => {
+      const group = build(
+        [mkUser('user'), mkTool('new-anchor', 'Bash'), mkAssistant('final', 'Done.')],
+        false,
+      ).find((item): item is Extract<RenderItem, { type: 'work_group' }> => item.type === 'work_group')!;
+      const child = {
+        ...group,
+        children: [],
+        deferred: {
+          key, expanded: false, loading: false, failed: false,
+          toggle: () => { throw new Error('Recovery must not load details'); },
+          retry: () => { throw new Error('Recovery must not load details'); },
+        },
+      };
+      const items = [{ ...group, children: [child] }];
+      expect(findRestorableViewportItemIdx(items, 'work-summary-rs_old-anchor')).toBe(0);
+      expect(findRestorableViewportItemIdx(items, 'work-rs_old-anchor')).toBe(0);
+      expect(findRestorableViewportItemIdx(items, 'work-summary-anchor')).toBe(-1);
+      expect(findRestorableViewportItemIdx(items, 'work-summary-missing')).toBe(-1);
+      // The same identity must survive the deletion guard, even while its
+      // exact child is unloaded. Near-suffix matches are not identities.
+      expect(renderItemContainsClientId(items[0], 'rs_old-anchor')).toBe(true);
+      expect(renderItemContainsClientId(items[0], 'anchor')).toBe(false);
+      expect(renderItemContainsClientId(items[0], 'missing')).toBe(false);
+      const deleted = {
+        ...items[0],
+        children: [{ ...child, key: 'work-rs_old-anchor', deferred: undefined }],
+      };
+      // A stale group key alone must not keep a genuinely deleted child alive.
+      expect(renderItemContainsClientId(deleted, 'rs_old-anchor')).toBe(false);
+    },
+  );
+
   it('keeps completed prior turns folded while a later turn streams', () => {
     const items = build(
       [
@@ -1900,4 +2167,25 @@ describe('focus scroll takeover keys', () => {
     expect(shouldHandleNavigationKey('PageUp', null)).toBe(true);
     expect(shouldHandleNavigationKey('Enter', null)).toBe(false);
   });
+});
+
+it('places the same Bot task card after its introduction and keeps it through streaming completion replies', () => {
+  const task: ChatMessage = { ...mkAssistant('task-card', ''), systemCardType: 'bot-session-task' };
+  const messages = [mkUser('start'), task, mkAssistant('intro', 'Started'),
+    { ...mkUser('finished-trigger'), isSyntheticTrigger: true }, mkAssistant('done', 'Done')];
+  const project = (streaming: boolean) => simplifyBotRenderItems(
+    buildRenderItems(messages, undefined, undefined, { botSessionId: 'bot' }).items, streaming,
+  ).flatMap((item) => item.type === 'message' ? [item.message.clientId] : []);
+  expect(project(true)).toEqual(['start', 'intro', 'task-card', 'done']);
+  expect(project(false).filter((id) => id !== 'finished-trigger')).toEqual(['start', 'intro', 'task-card', 'done']);
+});
+
+it.each(['steer', 'new', 'completion'])('keeps task introduction pairing within the actual turn: %s', (kind) => {
+  const task: ChatMessage = { ...mkAssistant('task-card', ''), systemCardType: 'bot-session-task' };
+  const interruption = { ...mkUser('interruption'), ...(kind === 'steer' ? { delivery: 'steer' as const } : {}),
+    ...(kind === 'completion' ? { isSyntheticTrigger: true } : {}) };
+  const items = buildRenderItems([mkUser('start'), task, interruption, mkAssistant('intro', 'Started')],
+    undefined, undefined, { botSessionId: 'bot' }).items;
+  const ids = items.flatMap((item) => item.type === 'message' ? [item.message.clientId] : []);
+  expect(ids.indexOf('task-card') > ids.indexOf('intro')).toBe(kind === 'steer');
 });

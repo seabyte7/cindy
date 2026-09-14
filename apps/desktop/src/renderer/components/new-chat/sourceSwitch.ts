@@ -62,6 +62,7 @@ export const CATEGORY_LABEL_KEY: Record<ModelCategory, string> = {
   ungrouped: 'newChat.modelSelector.category.ungrouped',
   image: 'newChat.modelSelector.category.image',
   video: 'newChat.modelSelector.category.video',
+  audio: 'newChat.modelSelector.category.audio',
   tts: 'newChat.modelSelector.category.tts',
   stt: 'newChat.modelSelector.category.stt',
   realtime: 'newChat.modelSelector.category.realtime',
@@ -170,6 +171,7 @@ export function resolveSourceSwitch(args: {
 export {
   resolveEffort,
   resolveRequestedEffort,
+  composeAtomicModelSelection,
   resolveIntentReselectEffort,
   resolveProviderSwitchEffort,
 } from '@cindy/model-providers';
