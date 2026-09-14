@@ -60,6 +60,20 @@ describe("buildUserProvider (per-runtime)", () => {
     expect(p.models["claude-code"]).toBeUndefined();
   });
 
+  it('exposes a DSH-only configuration without creating a fake model route', () => {
+    const provider = buildUserProvider({
+      id: 'dsh-local',
+      name: 'DSH Local',
+      runtimes: {
+        dsh: { baseUrl: 'https://adapter.example/v1', models: [] },
+      },
+    });
+
+    expect(provider.agents).toEqual(['dsh']);
+    expect(provider.models.dsh).toEqual([]);
+    expect(provider.routing.dsh).toBeUndefined();
+  });
+
   it("generates api-key-header routing with that runtime baseUrl, no key", () => {
     const p = buildUserProvider(codexOnly);
     expect(p.routing.codex).toEqual({

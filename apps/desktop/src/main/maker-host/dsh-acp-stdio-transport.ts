@@ -8,6 +8,7 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { closeSync, openSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 
 import type { DshAcpTransport } from '@cindy/maker-core';
@@ -17,6 +18,9 @@ import {
   DSH_IMPLICIT_BOOKMARK_DESCRIPTOR_FD,
   encodeDshImplicitBookmarkHandoff,
   type DshImplicitBookmarkHandoff,
+  DSH_WORKSPACE_BOOKMARK_DESCRIPTOR_FD,
+  encodeDshWorkspaceBookmarkHandoff,
+  type DshWorkspaceBookmarkHandoff,
 } from '../dsh-host/implicit-bookmark-handoff.js';
 
 const FORCE_KILL_GRACE_MS = 3_000;
@@ -246,6 +250,12 @@ export interface DshAcpStdioLaunchOptions {
    * Home pathname is accepted here.
    */
   implicitHomeBookmark?: DshImplicitBookmarkHandoff;
+  /**
+   * Task-only workspace authority. This is independent from the optional
+   * existing-Home descriptor and reaches only fd 4 before the fixed runtime
+   * begins; it is never a path or a normal IPC field.
+   */
+  workspaceBookmark?: DshWorkspaceBookmarkHandoff;
   /** Test-only shortening of the graceful EOF interval. */
   forceKillGraceMs?: number;
 }
@@ -259,10 +269,11 @@ export function assertDshAcpStdioLaunchOptions(options: DshAcpStdioLaunchOptions
       throw new Error('DSH existing Home bookmark launch must not carry DSH_HOME in its environment');
     }
     encodeDshImplicitBookmarkHandoff(options.implicitHomeBookmark);
-    return;
-  }
-  if (typeof home !== 'string' || !isAbsolute(home)) {
+  } else if (typeof home !== 'string' || !isAbsolute(home)) {
     throw new Error('DSH ACP requires an absolute Main-managed DSH_HOME');
+  }
+  if (options.workspaceBookmark) {
+    encodeDshWorkspaceBookmarkHandoff(options.workspaceBookmark);
   }
 }
 
@@ -293,17 +304,40 @@ export function createDshAcpStdioTransport(options: DshAcpStdioLaunchOptions): D
   const implicitBookmarkFrame = options.implicitHomeBookmark
     ? encodeDshImplicitBookmarkHandoff(options.implicitHomeBookmark)
     : null;
-  const child = spawn(options.binaryPath, ['--profile', 'acp'], {
-    cwd: options.launcherCwd,
-    env: options.env,
-    shell: false,
-    windowsHide: true,
-    // The Helper reads fd 3 once before it launches the fixed ACP runtime.
-    // Managed launches use `ignore`, which becomes no open fd at the native
-    // boundary; no ambient descriptor can opt a launch into existing-Home.
-    stdio: implicitBookmarkFrame ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe', 'ignore'],
-    detached: true,
-  });
+  const workspaceBookmarkFrame = options.workspaceBookmark
+    ? encodeDshWorkspaceBookmarkHandoff(options.workspaceBookmark)
+    : null;
+  const privateDescriptorCount = workspaceBookmarkFrame ? 5 : implicitBookmarkFrame ? 4 : 3;
+  const stdio: ('pipe' | 'ignore' | number)[] = ['pipe', 'pipe', 'pipe'];
+  for (let index = 3; index < privateDescriptorCount; index += 1) {
+    stdio.push(index === DSH_IMPLICIT_BOOKMARK_DESCRIPTOR_FD && implicitBookmarkFrame ? 'pipe' : 'ignore');
+  }
+  if (workspaceBookmarkFrame) stdio[DSH_WORKSPACE_BOOKMARK_DESCRIPTOR_FD] = 'pipe';
+  // Supplying only fd 4 makes Node's array `ignore` entry at fd 3 a FIFO on
+  // macOS. That is indistinguishable from a real private handoff to the
+  // Supervisor. Bind the unused slot to /dev/null explicitly instead, then
+  // close our duplicate as soon as spawn has inherited it.
+  const ignoredHomeDescriptor = workspaceBookmarkFrame && !implicitBookmarkFrame
+    ? openSync('/dev/null', 'r')
+    : null;
+  if (ignoredHomeDescriptor !== null) stdio[DSH_IMPLICIT_BOOKMARK_DESCRIPTOR_FD] = ignoredHomeDescriptor;
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(options.binaryPath, ['--profile', 'acp'], {
+      cwd: options.launcherCwd,
+      env: options.env,
+      shell: false,
+      windowsHide: true,
+      // The Helper reads fd 3 once before it launches the fixed ACP runtime.
+      // A workspace-only launch has an explicit /dev/null fd 3, which the
+      // signed Helper treats as absent; a private pipe/socket is required for
+      // either bookmark handoff.
+      stdio,
+      detached: true,
+    });
+  } finally {
+    if (ignoredHomeDescriptor !== null) closeSync(ignoredHomeDescriptor);
+  }
   const stdioChild = child as ChildProcessWithoutNullStreams;
   const lineHandlers = new Set<(line: string) => void>();
   const closeHandlers = new Set<(info: { reason: string }) => void>();
@@ -343,25 +377,32 @@ export function createDshAcpStdioTransport(options: DshAcpStdioLaunchOptions): D
     );
   };
 
-  if (implicitBookmarkFrame) {
-    const descriptor = child.stdio[DSH_IMPLICIT_BOOKMARK_DESCRIPTOR_FD] as NodeJS.WritableStream | null;
+  const transferPrivateDescriptor = (
+    descriptorFd: number,
+    frame: Buffer | null,
+    label: string,
+  ): void => {
+    if (!frame) return;
+    const descriptor = child.stdio[descriptorFd] as NodeJS.WritableStream | null;
     if (!descriptor || typeof descriptor.end !== 'function') {
-      finish('DSH existing Home private descriptor was not created');
-      ensurePhysicalTermination('existing Home private descriptor was unavailable after spawn');
-    } else {
-      let handoffFailed = false;
-      const failHandoff = (): void => {
-        if (handoffFailed) return;
-        handoffFailed = true;
-        finish('DSH existing Home private descriptor transfer failed');
-        ensurePhysicalTermination('existing Home private descriptor transfer failed');
-      };
-      descriptor.once('error', failHandoff);
-      descriptor.end(implicitBookmarkFrame, (error?: Error | null) => {
-        if (error) failHandoff();
-      });
+      finish(`DSH ${label} private descriptor was not created`);
+      ensurePhysicalTermination(`${label} private descriptor was unavailable after spawn`);
+      return;
     }
-  }
+    let handoffFailed = false;
+    const failHandoff = (): void => {
+      if (handoffFailed) return;
+      handoffFailed = true;
+      finish(`DSH ${label} private descriptor transfer failed`);
+      ensurePhysicalTermination(`${label} private descriptor transfer failed`);
+    };
+    descriptor.once('error', failHandoff);
+    descriptor.end(frame, (error?: Error | null) => {
+      if (error) failHandoff();
+    });
+  };
+  transferPrivateDescriptor(DSH_IMPLICIT_BOOKMARK_DESCRIPTOR_FD, implicitBookmarkFrame, 'existing Home');
+  transferPrivateDescriptor(DSH_WORKSPACE_BOOKMARK_DESCRIPTOR_FD, workspaceBookmarkFrame, 'workspace');
 
   const stdout = createDshAcpStdoutFrameDecoder({
     onLine: (line) => {

@@ -23,6 +23,7 @@ import {
   type DshBridgePermissionRequest,
   type DshBridgePermissionResolver,
   type DshBridgePort,
+  type DshBridgePromptContent,
   type DshBridgePromptReceipt,
   type DshBridgePromptStopReason,
   type DshBridgeReceiptId,
@@ -131,6 +132,17 @@ export interface DshAcpCapabilitySnapshot {
   agentName: string;
   agentVersion: string;
   sessionCapabilities: Readonly<Record<'close' | 'list' | 'resume', true>>;
+  /** True only when this exact ACP handshake admitted inline image blocks. */
+  inlineImagePromptSupported: boolean;
+}
+
+/** Main-only prompt admission; it owns all local filesystem reads and copies. */
+export interface DshPromptContentAdmission {
+  prepare(input: {
+    cindySessionId: string;
+    content: readonly DshBridgePromptContent[];
+    inlineImagePromptSupported: boolean;
+  }): Promise<readonly unknown[]>;
 }
 
 export interface DshControlPlaneOptions {
@@ -174,6 +186,8 @@ export interface DshControlPlaneOptions {
    * require the fresh Maker instance nonce and mount its lease before ACP.
    */
   internalMcpLeaseFactory?: DshInternalMcpLeaseFactory;
+  /** Optional in F0 tests; production injects the Main-owned prompt stager. */
+  promptContentAdmission?: DshPromptContentAdmission;
 }
 
 interface LiveBindingState {
@@ -437,6 +451,7 @@ export class DshControlPlane implements DshBridgePort {
   private readonly projectionCoordinator: DshFollowProjectionCoordinator | undefined;
   private readonly sessionActivity: DshSessionActivityCoordinator | undefined;
   private readonly internalMcpLeaseFactory: DshInternalMcpLeaseFactory | undefined;
+  private readonly promptContentAdmission: DshPromptContentAdmission | undefined;
   private durableBinding: DshDurableBindingOptions | null;
   private readonly byCindySession = new Map<string, LiveBindingState>();
   /**
@@ -466,6 +481,7 @@ export class DshControlPlane implements DshBridgePort {
     this.projectionCoordinator = options.projectionCoordinator;
     this.sessionActivity = options.sessionActivity;
     this.internalMcpLeaseFactory = options.internalMcpLeaseFactory;
+    this.promptContentAdmission = options.promptContentAdmission;
     this.durableBinding = null;
     if (!Number.isSafeInteger(this.operationTimeoutMs) || this.operationTimeoutMs <= 0) {
       throw new Error('DSH bridge operationTimeoutMs must be a positive safe integer');
@@ -529,6 +545,7 @@ export class DshControlPlane implements DshBridgePort {
         agentName: assertCapabilityIdentityText(initialized.agentInfo.name, 'agent name'),
         agentVersion: assertCapabilityIdentityText(initialized.agentInfo.version, 'agent version'),
         sessionCapabilities: Object.freeze({ close: true, list: true, resume: true }),
+        inlineImagePromptSupported: initialized.agentCapabilities.promptCapabilities?.image === true,
       });
       this.initialized = true;
     } catch (error) {
@@ -926,8 +943,11 @@ export class DshControlPlane implements DshBridgePort {
     };
   }
 
+  async prompt(input: DshControlPlaneSessionRef & { content: readonly DshBridgePromptContent[] }): Promise<DshBridgePromptReceipt>;
+  /** Backward-compatible F0 fixture input; production Maker uses content. */
+  async prompt(input: DshControlPlaneSessionRef & { text: string }): Promise<DshBridgePromptReceipt>;
   async prompt(
-    input: DshControlPlaneSessionRef & { text: string },
+    input: DshControlPlaneSessionRef & ({ content: readonly DshBridgePromptContent[] } | { text: string }),
   ): Promise<DshBridgePromptReceipt> {
     this.assertReady();
     const state = this.requireBridgeSession(input);
@@ -936,12 +956,21 @@ export class DshControlPlane implements DshBridgePort {
       throw new Error('DSH bridge cannot prompt while runtime configuration is changing');
     }
     if (state.promptInFlight) throw new Error('DSH bridge already has a prompt in flight');
-    assertNonEmpty(input.text, 'prompt text');
-    if (Buffer.byteLength(input.text, 'utf8') > DSH_BRIDGE_MAX_PROMPT_BYTES) {
+    const content = 'content' in input ? input.content : [{ type: 'text' as const, text: input.text }];
+    const textBytes = content.reduce(
+      (total, block) => total + (block.type === 'text' ? Buffer.byteLength(block.text, 'utf8') : 0),
+      0,
+    );
+    if (textBytes > DSH_BRIDGE_MAX_PROMPT_BYTES) {
       throw new Error(`DSH bridge prompt text exceeds ${DSH_BRIDGE_MAX_PROMPT_BYTES} UTF-8 bytes`);
     }
+    if (!content.length) throw new Error('DSH bridge prompt content is required');
+    // Attachment staging performs async filesystem work. Hold the same turn
+    // lease before it begins so a configuration change cannot slip between
+    // its user-approved content and the ensuing ACP prompt.
+    state.promptInFlight = true;
     try {
-      state.promptInFlight = true;
+      const prompt = await this.admitPromptContent(input.cindySessionId, content);
       const receiptId = this.newReceiptId();
       assertNonEmpty(receiptId, 'prompt receiptId');
       const acceptedAt = this.now().toISOString();
@@ -952,7 +981,7 @@ export class DshControlPlane implements DshBridgePort {
           'prompt',
           this.client.prompt({
             sessionId: state.binding.runtimeSessionId,
-            prompt: [{ type: 'text', text: input.text }],
+            prompt,
           }),
         );
       } catch {
@@ -971,6 +1000,33 @@ export class DshControlPlane implements DshBridgePort {
     } finally {
       state.promptInFlight = false;
     }
+  }
+
+  private async admitPromptContent(
+    cindySessionId: string,
+    content: readonly DshBridgePromptContent[],
+  ): Promise<readonly unknown[]> {
+    const admission = this.promptContentAdmission;
+    if (!admission) {
+      if (content.some((block) => block.type !== 'text')) {
+        throw new Error('DSH bridge local attachment admission is not configured');
+      }
+      const prompt = content.map((block) => {
+        if (block.type !== 'text') {
+          throw new Error('DSH bridge local attachment admission is not configured');
+        }
+        return { type: 'text' as const, text: block.text };
+      });
+      if (!prompt.some((block) => block.text.trim())) {
+        throw new Error('DSH bridge prompt text is required');
+      }
+      return prompt;
+    }
+    return await admission.prepare({
+      cindySessionId,
+      content,
+      inlineImagePromptSupported: this.capabilitySnapshot?.inlineImagePromptSupported === true,
+    });
   }
 
   async cancel(input: DshControlPlaneSessionRef): Promise<DshBridgeAgentReceipt<'cancel'>> {

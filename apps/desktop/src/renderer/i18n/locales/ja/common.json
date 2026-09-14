@@ -1512,11 +1512,35 @@
           "label": "DeepSeek Harness",
           "description": "任意です。DeepSeek Harness 専用の HTTPS エンドポイントと API キーを設定します。他のランタイムの認証情報を再利用することはありません。",
           "endpoint": "DSH エンドポイント",
-          "endpointPlaceholder": "https://adapter.example.com/v1",
+          "endpointPlaceholder": "https://api.deepseek.com",
           "apiKey": "DSH API キー",
           "apiKeyPlaceholder": "DSH API キー",
           "apiKeyHelp": "エンドポイントが未変更なら空欄のままでローカル保存済みのキーを保持します。変更時は新しいキーが必要です。",
-          "authRequired": "DeepSeek Harness には API キー認証が必要です。"
+          "authRequired": "DeepSeek Harness には API キー認証が必要です。",
+          "runtimeStatus": {
+            "title": "ランタイムの状態",
+            "retry": "再試行",
+            "loading": "ローカル DSH の状態を読み込んでいます…",
+            "unavailable": "ローカル DSH の状態を取得できません。もう一度お試しください。",
+            "configuration": {
+              "ready": "設定済みのソース: {{provider}}。",
+              "not-configured": "DeepSeek Harness のソースが設定されていません。",
+              "multiple-configured": "複数の DeepSeek Harness ソースが設定されています。使用前に 1 つ選択してください。",
+              "auth-not-api-key": "選択したソースには API キー認証が必要です。",
+              "invalid-runtime-shape": "DeepSeek Harness の設定に未対応のランタイム項目があります。",
+              "invalid-route": "DeepSeek Harness のエンドポイントが無効です。",
+              "missing-api-key": "DeepSeek Harness の API キーがありません。",
+              "unavailable": "DeepSeek Harness の設定を利用できません。"
+            },
+            "registration": {
+              "not-registered": "DSH タスクファクトリーはまだ準備できていません。",
+              "registering": "ローカル DSH タスクファクトリーを準備しています…",
+              "task-factory-ready": "ローカル DSH タスクを作成できます。",
+              "reconfiguration-pending": "DSH の設定が変更され、影響するタスクが閉じるのを待っています。"
+            },
+            "closeTasks": "新しい設定を有効にするには、アクティブな DSH タスクを {{count}} 件閉じてください。",
+            "evidence": "モデル接続、コマンド、ファイルツール、添付、承認は最終署名済み App での検証が必要です。"
+          }
         },
         "wireProtocol": {
           "responses": "OpenAI Responses（ネイティブ）",
@@ -6811,8 +6835,7 @@
   "newChat": {
     "dsh": {
       "managedRuntime": "管理対象の DSH ランタイム",
-      "managedRuntimeDetails": "管理対象の DSH ランタイムでローカル実行されます。テキスト入力のみ対応しています。再起動後は、検証済みのローカル紐付けが利用できる場合に限り、この同じタスクを続行できます。",
-      "textOnlyInput": "DSH は現在テキスト入力のみをサポートしています。"
+      "managedRuntimeDetails": "管理対象の DSH ランタイムでローカル実行されます。ファイルと画像はこのタスク専用の制限付き添付領域へコピーされ、ツール実行ごとに確認が必要です。再起動後は、検証済みのローカル紐付けが利用できる場合に限り、この同じタスクを続行できます。"
     },
     "noProvider": {
       "title": "このモデルに利用可能なソースがありません",

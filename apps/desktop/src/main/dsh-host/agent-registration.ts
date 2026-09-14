@@ -15,6 +15,7 @@ import {
   type DshProviderConfigurationResult,
   type ReadDshProviderKey,
 } from './provider-config.js';
+import type { DshChildSecret } from './scope.js';
 
 export interface DshRegistrationOwnerScope {
   readonly ownerId: string | null;
@@ -130,20 +131,25 @@ export async function registerDshAgentForCurrentOwner<
     return { status: 'configuration-unavailable', reason: configuration.reason };
   }
 
-  // The resolver intentionally loads a key at child-launch time. Wrap that
-  // exact loader so the post-handshake check compares against what reached the
-  // supervised child, rather than a later reread of a mutable secret store.
-  let launchedSecret: Readonly<{ name: string; value: string }> | null = null;
+  // A task-scoped bridge deliberately does not start its supervised child at
+  // agent-registration time.  Capture the exact current secret here instead:
+  // otherwise the old "bridge startup must read the key" invariant would mark
+  // every lazy task factory as stale before it can be registered.  The sealed
+  // loader is Main-only and lets every later task prove that its configuration
+  // still equals this registration generation before launch or prompt.
+  let launchedSecret: Readonly<DshChildSecret>;
+  try {
+    const secrets = configuration.loadSecrets();
+    if (secrets.length !== 1 || !secrets[0]) {
+      return { status: 'configuration-unavailable', reason: 'missing-api-key' };
+    }
+    launchedSecret = Object.freeze({ name: secrets[0].name, value: secrets[0].value });
+  } catch {
+    return { status: 'configuration-unavailable', reason: 'missing-api-key' };
+  }
   const launchConfiguration = Object.freeze({
     ...configuration,
-    loadSecrets: () => {
-      const secrets = configuration.loadSecrets();
-      if (secrets.length !== 1 || !secrets[0]) {
-        throw new Error('DSH provider launch secret shape is invalid');
-      }
-      launchedSecret = Object.freeze({ name: secrets[0].name, value: secrets[0].value });
-      return secrets;
-    },
+    loadSecrets: () => Object.freeze([launchedSecret] as const),
   });
 
   let bridge: TBridge;

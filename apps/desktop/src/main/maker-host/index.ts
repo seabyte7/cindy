@@ -8,7 +8,8 @@
  * 这样可以确保 localDb.ensureReady(userId) 已经完成才能用 SessionStorage。
  */
 
-import { app, BrowserWindow, safeStorage } from 'electron';
+import { app, BrowserWindow, dialog, safeStorage } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 
 import {
@@ -96,8 +97,22 @@ import {
   registerDshAgentForCurrentOwner,
   type DshAgentRegistrationResult,
 } from '../dsh-host/agent-registration.js';
-import { resolveDshProviderConfiguration } from '../dsh-host/provider-config.js';
+import {
+  projectDshProviderAvailability,
+  resolveDshProviderConfiguration,
+} from '../dsh-host/provider-config.js';
+import type { DshProviderAvailability } from '../dsh-host/provider-config.js';
+import { projectDshRuntimeStatus } from '../dsh-host/runtime-status.js';
+import type {
+  DshRuntimeRegistrationStatus,
+  DshRuntimeStatus,
+} from '../../shared/dshRuntimeStatus.js';
 import { createDshSessionCwdAdmission } from '../dsh-host/session-cwd-admission.js';
+import { selectDshTaskWorkspaceBookmarkFromMain } from '../dsh-host/workspace-bookmark-grant.js';
+import {
+  createDshTaskBridgeRouter,
+  type DshTaskBridgeRouter,
+} from '../dsh-host/task-bridge-router.js';
 import { validateHandoffWorkingDir } from '../maker-ipc/handoffWorkingDir.js';
 import { createVisionBridge } from '../vision-bridge/vision-bridge.js';
 import {
@@ -308,9 +323,48 @@ let _maker: Maker | null = null;
 let _registerPiAgent: (() => boolean) | null = null;
 let _registerDshAgent: (() => Promise<DshAgentRegistrationResult>) | null = null;
 let _dshRegistrationInFlight: Promise<DshAgentRegistrationResult> | null = null;
-let _dshRuntimeConfigurationBridge: (MacosSupervisedDshBridge & {
+/** The only DSH adapter instance that the current Maker is permitted to retire. */
+let _dshRegisteredAgent: DshAgent | null = null;
+/** A provider mutation found a stale DSH generation while one of its tasks was still alive. */
+let _dshReplacementPending = false;
+let _removeDshMakerLifecycleListener: (() => void) | null = null;
+let _dshRuntimeRegistrationStatus: DshRuntimeRegistrationStatus = 'not-registered';
+let _dshRuntimeStatusRevision = 0;
+type DshTaskRouterHost = {
+  readonly bridge: DshTaskBridgeRouter;
+  readonly scopeId: string;
+  readonly binaryPath: string;
+  readonly adapterAdmission: Readonly<{
+    committedFollowProjection: true;
+    promptReceiptLedger: true;
+  }>;
+  close(reason: string): Promise<void>;
+  assertCurrentConfiguration(): Promise<void>;
+};
+
+let _dshRuntimeConfigurationBridge: (DshTaskRouterHost & {
   assertCurrentConfiguration(): Promise<void>;
 }) | null = null;
+
+function setDshRuntimeRegistrationStatus(status: DshRuntimeRegistrationStatus): void {
+  if (_dshRuntimeRegistrationStatus === status) return;
+  _dshRuntimeRegistrationStatus = status;
+  _dshRuntimeStatusRevision += 1;
+}
+
+function broadcastDshAgentAvailabilityChanged(): void {
+  _dshRuntimeStatusRevision += 1;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send(MAKER_PUSH.AGENTS_CHANGED);
+    } catch {
+      // Window teardown may race a DSH generation replacement. Other windows
+      // still receive the broadcast below.
+    }
+  }
+  tapWindowBroadcast(MAKER_PUSH.AGENTS_CHANGED, {});
+}
 // This accessor deliberately stays lazy. Cindy must not probe safeStorage or
 // create the protected override directory for the default managed-Home path.
 let _dshExistingHomeSettingsStore: DshExistingHomeSettingsStore | null = null;
@@ -2226,7 +2280,35 @@ export function getMaker(): Maker {
               throw new Error(`DSH local working directory is unavailable: ${validated.message}`);
             }
             opts.workingDir = validated.dir;
-            dshSessionCwdAdmission.reserve(sessionId, validated.dir);
+            const ownerIdAtWorkspaceSelection = getActiveAppSession().dataOwnerId;
+            const ownerScopeAtWorkspaceSelection = activeOwnerScopeKey();
+            // A valid local path is not enough for the separately-signed
+            // sandbox Helper. This explicit task-start action asks macOS for
+            // the exact selected workspace and converts the picker bookmark
+            // inside Main into a one-launch descriptor. The raw path and
+            // persistent bookmark never enter Maker, ACP, or SQLite.
+            const workspaceBookmark = await selectDshTaskWorkspaceBookmarkFromMain({
+              cindySessionId: sessionId,
+              cwd: validated.dir,
+              picker: {
+                showOpenDialog: (options) =>
+                  dialog.showOpenDialog({
+                    title: options.title,
+                    buttonLabel: options.buttonLabel,
+                    defaultPath: options.defaultPath,
+                    properties: options.properties.filter(
+                      (property): property is 'openDirectory' => property === 'openDirectory',
+                    ),
+                    securityScopedBookmarks: options.properties.includes('securityScopedBookmarks'),
+                  }),
+              },
+              bridge: loadMacosDshMainBookmarkBridge({ resourcesPath: process.resourcesPath }),
+              isTaskCurrent: () =>
+                !isAppSessionBoundaryPending() &&
+                getActiveAppSession().dataOwnerId === ownerIdAtWorkspaceSelection &&
+                activeOwnerScopeKey() === ownerScopeAtWorkspaceSelection,
+            });
+            dshSessionCwdAdmission.reserve(sessionId, validated.dir, workspaceBookmark);
           }
           await preparePersistedOrcaSessionStart(sessionId, opts as MakerSessionCreateOpts);
           if (opts.agentKind === 'pi' && opts.thinkingEnabled === undefined) {
@@ -2250,6 +2332,8 @@ export function getMaker(): Maker {
             };
           }
         },
+        reserveSessionMetadata: async (meta) =>
+          await desktopSessionStorage.reserveDshSessionMetadata(meta),
         onBeforeStart: async ({ agentKind, workingDir, remoteHostId }) => {
           // 延迟记忆重启 pending 时,本地 Codex 新会话加入 shared host 前先尝试
           // 兑现(其它会话全空闲才会真的重启;仍 busy 则放行,残余窗口见
@@ -2318,12 +2402,11 @@ export function getMaker(): Maker {
     _registerDshAgent = async () => {
       const maker = _maker;
       if (!maker) return { status: 'owner-unavailable' };
-      let candidateBridge: (MacosSupervisedDshBridge & {
-        assertCurrentConfiguration(): Promise<void>;
-      }) | null = null;
+      let candidateBridge: DshTaskRouterHost | null = null;
+      let candidateAgent: DshAgent | null = null;
       const registration = await registerDshAgentForCurrentOwner<
         DshAgent,
-        MacosSupervisedDshBridge & { assertCurrentConfiguration(): Promise<void> }
+        DshTaskRouterHost
       >({
         readOwnerScope: () => {
           const session = getActiveAppSession();
@@ -2344,89 +2427,118 @@ export function getMaker(): Maker {
             resourcesPath: process.resourcesPath,
             homePath: app.getPath('home'),
           });
-          const homeLaunch = resolveDshExistingHomeLaunch({
-            accountId: ownerId,
-            store: getDshExistingHomeSettingsStore(),
-            createImplicitBookmark: (persistentBookmark) =>
-              createDshImplicitBookmarkHandoff({
-                persistentBookmark,
-                bridge: loadMacosDshMainBookmarkBridge({ resourcesPath: process.resourcesPath }),
-              }),
-          });
-          // Binding, receipt and projection updates are one coherent local
-          // transaction boundary. Capture the current owner-scoped database
-          // client once instead of permitting three independently-read
-          // pointers to straddle an account reset.
-          const dbClient = getDbClient();
-          let launchedApiKey: string | null = null;
-          const bridgeHost = await startMacosSupervisedDshBridge(
-            {
-              resourcesPath: process.resourcesPath,
-              homePath: app.getPath('home'),
-              logger: desktopMakerLogger.child('dsh-host'),
-              loadSecrets: () => {
-                const secrets = configuration.loadSecrets();
-                const apiKey = secrets[0]?.value;
-                if (secrets.length !== 1 || !apiKey) {
-                  throw new Error('DSH provider launch secret shape is invalid');
-                }
-                launchedApiKey = apiKey;
-                return secrets;
-              },
-              providerRoute: configuration.route,
-              assertAuthorizedCwd: dshSessionCwdAdmission.assertAndConsume,
-              bindingStore: createDshSessionBindingStore(dbClient),
-              promptReceiptStore: createDshPromptReceiptStore(dbClient),
-              projectionJournal: createDshProjectionJournal(dbClient),
-              activitySnapshotStore: createDshActivitySnapshotStore(dbClient),
-              implicitHomeBookmark: homeLaunch.implicitHomeBookmark,
-            },
-            {
-              accountId: ownerId,
-              releaseId: runtime.runtime.releaseId,
-              homeMode: homeLaunch.homeMode,
-            },
-          );
-          if (!launchedApiKey) {
-            await bridgeHost.close('DSH bridge started without a provider API key');
-            throw new Error('DSH provider launch did not materialize an API key');
-          }
           const providerId = configuration.provider.id;
           const routeBaseUrl = configuration.route.baseUrl;
           const routeOrigin = configuration.route.origin;
-          const expectedApiKey = launchedApiKey;
-          try {
-            homeLaunch.assertStillCurrent();
-          } catch (error) {
-            await bridgeHost.close('DSH Home selection changed during bridge startup');
-            throw error;
+          const registeredSecrets = configuration.loadSecrets();
+          const registeredApiKey = registeredSecrets[0]?.value;
+          if (registeredSecrets.length !== 1 || !registeredApiKey) {
+            throw new Error('DSH provider registration secret shape is invalid');
           }
-          return {
-            ...bridgeHost,
-            assertCurrentConfiguration: async () => {
-              homeLaunch.assertStillCurrent();
-              const current = resolveDshProviderConfiguration(
-                await listCustomProviders(),
-                readCustomProviderKey,
-              );
-              if (
-                current.status !== 'ready' ||
-                current.provider.id !== providerId ||
-                current.route.baseUrl !== routeBaseUrl ||
-                current.route.origin !== routeOrigin
-              ) {
-                throw new Error('DSH provider configuration is no longer current');
+          const assertCurrentConfiguration = async (): Promise<void> => {
+            const current = resolveDshProviderConfiguration(
+              await listCustomProviders(),
+              readCustomProviderKey,
+            );
+            if (
+              current.status !== 'ready' ||
+              current.provider.id !== providerId ||
+              current.route.baseUrl !== routeBaseUrl ||
+              current.route.origin !== routeOrigin
+            ) {
+              throw new Error('DSH provider configuration is no longer current');
+            }
+            const currentSecrets = current.loadSecrets();
+            if (
+              currentSecrets.length !== 1 ||
+              currentSecrets[0]?.name !== registeredSecrets[0]?.name ||
+              currentSecrets[0]?.value !== registeredApiKey
+            ) {
+              throw new Error('DSH provider credential is no longer current');
+            }
+          };
+          const toolPath = ['/usr/bin', '/bin', '/usr/local/bin', '/opt/homebrew/bin']
+            .filter((candidate, index, values) => values.indexOf(candidate) === index)
+            .filter((candidate) => {
+              try {
+                const stat = fs.lstatSync(candidate);
+                return stat.isDirectory() && !stat.isSymbolicLink() && fs.realpathSync(candidate) === candidate;
+              } catch {
+                return false;
               }
-              const currentApiKey = current.loadSecrets()[0]?.value;
-              if (!currentApiKey || currentApiKey !== expectedApiKey) {
-                throw new Error('DSH provider credential is no longer current');
+            })
+            .join(':');
+          const router = createDshTaskBridgeRouter({
+            claimWorkspaceBookmark: dshSessionCwdAdmission.consumeWorkspaceBookmark,
+            onStartupFailure: ({ cindySessionId, stage }) => {
+              desktopMakerLogger.warn('DSH task startup failed', { cindySessionId, stage });
+            },
+            startTaskBridge: async ({ cindySessionId, cwd, workspaceBookmark }) => {
+              await assertCurrentConfiguration();
+              const homeLaunch = resolveDshExistingHomeLaunch({
+                accountId: ownerId,
+                store: getDshExistingHomeSettingsStore(),
+                createImplicitBookmark: (persistentBookmark) =>
+                  createDshImplicitBookmarkHandoff({
+                    persistentBookmark,
+                    bridge: loadMacosDshMainBookmarkBridge({ resourcesPath: process.resourcesPath }),
+                  }),
+              });
+              const dbClient = getDbClient();
+              const launchedSecrets = configuration.loadSecrets();
+              const launchedApiKey = launchedSecrets[0]?.value;
+              if (launchedSecrets.length !== 1 || !launchedApiKey) {
+                throw new Error('DSH provider launch secret shape is invalid');
+              }
+              const bridgeHost = await startMacosSupervisedDshBridge(
+                {
+                  resourcesPath: process.resourcesPath,
+                  homePath: app.getPath('home'),
+                  logger: desktopMakerLogger.child('dsh-host'),
+                  loadSecrets: () => launchedSecrets,
+                  providerRoute: configuration.route,
+                  assertAuthorizedCwd: (authorizedCwd, authorizedSessionId) => {
+                    if (authorizedCwd !== cwd || authorizedSessionId !== cindySessionId) {
+                      throw new Error('DSH task bridge cwd is not authorized for this task');
+                    }
+                  },
+                  bindingStore: createDshSessionBindingStore(dbClient),
+                  promptReceiptStore: createDshPromptReceiptStore(dbClient),
+                  projectionJournal: createDshProjectionJournal(dbClient),
+                  activitySnapshotStore: createDshActivitySnapshotStore(dbClient),
+                  implicitHomeBookmark: homeLaunch.implicitHomeBookmark,
+                  workspaceBookmark,
+                  toolPath,
+                },
+                {
+                  accountId: ownerId,
+                  releaseId: runtime.runtime.releaseId,
+                  homeMode: homeLaunch.homeMode,
+                  taskScopeId: cindySessionId,
+                },
+              );
+              try {
+                homeLaunch.assertStillCurrent();
+                await assertCurrentConfiguration();
+                return bridgeHost;
+              } catch (error) {
+                await bridgeHost.close('DSH task bridge configuration changed during startup');
+                throw error;
               }
             },
+          });
+          return {
+            bridge: router,
+            scopeId: router.scopeId,
+            binaryPath: runtime.supervisorPath,
+            adapterAdmission: Object.freeze({ committedFollowProjection: true, promptReceiptLedger: true }),
+            close: async (reason) => await router.closeAll(reason),
+            assertCurrentConfiguration,
           };
         },
         createAgent: (bridgeHost) => {
           candidateBridge = bridgeHost;
-          return new DshAgent(
+          candidateAgent = new DshAgent(
             {
               binaryPath: bridgeHost.binaryPath,
               logger: desktopMakerLogger.child('dsh'),
@@ -2448,11 +2560,15 @@ export function getMaker(): Maker {
               assertCurrentConfiguration: bridgeHost.assertCurrentConfiguration,
             },
           );
+          return candidateAgent;
         },
         registerAgent: (agent) => maker.registerAgent('dsh', agent),
       });
-      if (registration.status === 'registered' && candidateBridge) {
+      if (registration.status === 'registered' && candidateBridge && candidateAgent) {
         _dshRuntimeConfigurationBridge = candidateBridge;
+        _dshRegisteredAgent = candidateAgent;
+        _dshReplacementPending = false;
+        setDshRuntimeRegistrationStatus('task-factory-ready');
       }
       if (registration.status === 'bridge-start-failed') {
         desktopMakerLogger.warn('DSH runtime was not registered after managed startup failed', {
@@ -2473,6 +2589,19 @@ export function getMaker(): Maker {
     // 为 false —— 一次性调用会被 skipped-unauthed 白白消费掉唯一机会。授权就绪后的重试
     // 由 codex auth 事件驱动(见下方 requestCodexModelBackfill 的调用点)。
     const makerRef = _maker;
+    _removeDshMakerLifecycleListener?.();
+    _removeDshMakerLifecycleListener = makerRef.on((event) => {
+      if (
+        event.type === 'session:closed' &&
+        event.session.agentKind === 'dsh' &&
+        _dshReplacementPending
+      ) {
+        // A provider edit never silently interrupts a live DSH task. Once the
+        // user has closed the final affected task, reconcile the deferred
+        // runtime generation through the same Main-only admission gate.
+        void registerDshAgentIfAvailable();
+      }
+    });
     _codexModelBackfill = createCodexModelBackfillCoordinator({
       hasCodexLogin: () => desktopCodexAuthAdapter.hasCodexOAuthLogin(),
       hasCodexModels: () =>
@@ -2558,29 +2687,73 @@ export function registerPiAgentIfAvailable(): boolean {
  * agent credential can cause a DSH subprocess to appear.
  */
 export async function registerDshAgentIfAvailable(): Promise<boolean> {
-  if (_maker?.listAvailableAgents().includes('dsh')) return true;
+  const maker = _maker;
+  const registeredAgent = _dshRegisteredAgent;
+  const registeredBridge = _dshRuntimeConfigurationBridge;
+  if (maker?.listAvailableAgents().includes('dsh') && registeredAgent && registeredBridge) {
+    try {
+      // An unrelated provider display/name/model edit leaves this exact Main
+      // snapshot valid and must not restart DSH. Route/key/provider drift is
+      // detected without projecting any sensitive value to Renderer.
+      await registeredBridge.assertCurrentConfiguration();
+      setDshRuntimeRegistrationStatus('task-factory-ready');
+      return true;
+    } catch {
+      _dshReplacementPending = true;
+      setDshRuntimeRegistrationStatus('reconfiguration-pending');
+      // Existing tasks keep their current adapter and records until the user
+      // closes them. The adapter's same assertion fail-closes new prompts, so
+      // a changed provider cannot be used by an old generation in the gap.
+      if (maker.listActiveSessions().some((session) => session.agentKind === 'dsh')) {
+        broadcastDshAgentAvailabilityChanged();
+        return false;
+      }
+      // Maker checks expected identity plus active and pre-publication
+      // sessions. A concurrent task create therefore wins over replacement;
+      // its normal close event will retry this deferred reconciliation.
+      if (!maker.unregisterAgent('dsh', registeredAgent)) {
+        broadcastDshAgentAvailabilityChanged();
+        return false;
+      }
+      _dshRegisteredAgent = null;
+      _dshRuntimeConfigurationBridge = null;
+      try {
+        await registeredAgent.dispose();
+      } catch (error) {
+        desktopMakerLogger.warn('stale DSH agent disposal failed after provider change', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      broadcastDshAgentAvailabilityChanged();
+    }
+  } else if (maker?.listAvailableAgents().includes('dsh')) {
+    // A partial in-memory state must fail closed. Do not assume an adapter
+    // registered by an older composition can safely serve this provider.
+    _dshReplacementPending = true;
+    setDshRuntimeRegistrationStatus('reconfiguration-pending');
+    return false;
+  }
   const register = _registerDshAgent;
   if (!register) return false;
   if (_dshRegistrationInFlight) {
     const result = await _dshRegistrationInFlight;
     return result.status === 'registered' || result.status === 'already-registered';
   }
+  setDshRuntimeRegistrationStatus('registering');
   const attempt = register();
   _dshRegistrationInFlight = attempt;
   try {
     const result = await attempt;
-    if (result.status !== 'registered') return result.status === 'already-registered';
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (win.isDestroyed()) continue;
-      try {
-        win.webContents.send(MAKER_PUSH.AGENTS_CHANGED);
-      } catch {
-        // Window teardown may race the optional agent registration.
-      }
+    if (result.status !== 'registered') {
+      setDshRuntimeRegistrationStatus(
+        result.status === 'already-registered' ? 'task-factory-ready' : 'not-registered',
+      );
+      return result.status === 'already-registered';
     }
-    tapWindowBroadcast(MAKER_PUSH.AGENTS_CHANGED, {});
+    broadcastDshAgentAvailabilityChanged();
     return true;
   } catch (error) {
+    setDshRuntimeRegistrationStatus('not-registered');
     desktopMakerLogger.warn('DSH agent registration failed', {
       error: error instanceof Error ? error.message : String(error),
     });
@@ -2588,6 +2761,40 @@ export async function registerDshAgentIfAvailable(): Promise<boolean> {
   } finally {
     if (_dshRegistrationInFlight === attempt) _dshRegistrationInFlight = null;
   }
+}
+
+/** Safe Settings projection; it never starts a child or invokes a model. */
+export async function getDshRuntimeStatusForCurrentOwner(): Promise<DshRuntimeStatus> {
+  let provider: DshProviderAvailability | Readonly<{ available: false; reason: 'unavailable' }>;
+  const ownerAtReadStart = getActiveAppSession().dataOwnerId;
+  const scopeAtReadStart = activeOwnerScopeKey();
+  const isSameOwnerScope = (): boolean =>
+    !isAppSessionBoundaryPending() &&
+    ownerAtReadStart !== null &&
+    getActiveAppSession().dataOwnerId === ownerAtReadStart &&
+    activeOwnerScopeKey() === scopeAtReadStart;
+  try {
+    if (!isSameOwnerScope()) throw new Error('DSH owner scope is unavailable');
+    const providers = await listCustomProviders();
+    if (!isSameOwnerScope()) throw new Error('DSH owner scope changed during status read');
+    provider = projectDshProviderAvailability(resolveDshProviderConfiguration(providers, readCustomProviderKey));
+  } catch {
+    provider = { available: false as const, reason: 'unavailable' as const };
+  }
+  const currentScope = isSameOwnerScope();
+  return projectDshRuntimeStatus({
+    revision: _dshRuntimeStatusRevision,
+    provider,
+    registration: currentScope ? _dshRuntimeRegistrationStatus : 'not-registered',
+    activeTaskCount: currentScope
+      ? (_maker?.listActiveSessions() ?? []).filter((session) => session.agentKind === 'dsh').length
+      : 0,
+  });
+}
+
+export async function retryDshRuntimeRegistration(): Promise<DshRuntimeStatus> {
+  await registerDshAgentIfAvailable();
+  return await getDshRuntimeStatusForCurrentOwner();
 }
 
 /**
@@ -2625,11 +2832,17 @@ export function getDshRuntimeConfigurationControl(): {
 export function resetMaker(): void {
   cancelCodexAuthModeChange();
   dshSessionCwdAdmission.clearAll();
+  void _dshRuntimeConfigurationBridge?.close('DSH maker reset');
+  _removeDshMakerLifecycleListener?.();
+  _removeDshMakerLifecycleListener = null;
   _maker = null;
   _registerPiAgent = null;
   _registerDshAgent = null;
   _dshRegistrationInFlight = null;
   _dshRuntimeConfigurationBridge = null;
+  _dshRegisteredAgent = null;
+  _dshReplacementPending = false;
+  setDshRuntimeRegistrationStatus('not-registered');
   _codexAgent = null;
   // coordinator 闭包捕获了刚作废的那个 maker —— 不清掉的话,换账号窗口期内到达的 auth
   // 事件会拿旧实例去拉模型清单(串号)。下次 getMaker() 会带着干净记账重建它。

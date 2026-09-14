@@ -1493,14 +1493,12 @@ export function ChatInput({
   addFilesRef.current = addFiles;
   const addFolderPathRef = useRef(addFolderPath);
   addFolderPathRef.current = addFolderPath;
-  const localAttachmentPickerEnabled =
-    !isDshManagedRuntime &&
-    canUseLocalAttachmentPicker({
-      sessionId,
-      runtimeAgentKind,
-      remoteHostId,
-      deviceLinkDeviceId,
-    });
+  const localAttachmentPickerEnabled = canUseLocalAttachmentPicker({
+    sessionId,
+    runtimeAgentKind,
+    remoteHostId,
+    deviceLinkDeviceId,
+  });
   const suggestionFileInputRef = useRef<HTMLInputElement>(null);
 
   // ── 「+」合成打开统一建议面板(Codex 模式)────────────────────────────
@@ -2174,7 +2172,7 @@ export function ChatInput({
         //      getPathForFile; no base64 read in renderer)
         //   3. Bitmap on clipboard with no backing file (screenshot, web
         //      "Copy image") → addClipboardImage
-        const items = isDshManagedRuntime ? undefined : event.clipboardData?.items;
+        const items = event.clipboardData?.items;
         if (items && items.length > 0) {
           const filesWithPath: File[] = [];
           let handledAny = false;
@@ -5154,13 +5152,6 @@ export function ChatInput({
         // (截图在下方并入 filesToSend,与文本块里的 "attached as a labeled image"
         // caption 对应)。
         const text = formatBrowserCommentsForSend(commentsForSend, editorText);
-        if (
-          isDshManagedRuntime &&
-          (attachmentsForSend.length > 0 || commentsForSend.length > 0)
-        ) {
-          toast.warning(t('newChat.dsh.textOnlyInput'));
-          return;
-        }
         // Allow send if there is text, attachments, or a host-capability chip
         // (host-capability chips carry routing metadata but no visible text).
         if (!text && attachmentsForSend.length === 0 && !hostCapability) return;
@@ -7943,7 +7934,6 @@ export function ChatInput({
               setIsDragOver(false);
               if (composerMutationLocked) return;
               onComposerDropHandled?.();
-              if (isDshManagedRuntime) return;
               // .cindy / .cshare 已被窗口级 capture 接管(装入 / 导入链路),
               // 这里只清理拖拽 UI 状态,不当附件消费。
               if (isGlobalDropIntercepted(e.nativeEvent)) {

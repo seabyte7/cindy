@@ -9,9 +9,11 @@
 > source-runtime／SQLite E2E 均通过。F5a 已接入 Main 的受监督注册、创建 transaction、会话绑定 cwd
 > 授权和 provider-snapshot fail-closed；F5c 仅验证了同一本机 Cindy task 在已 settle receipt、同一
 > managed Home 和 fresh `session/list` 一致时可跨进程 resume；它仍没有 history replay、完整 selector/UI 或
-> cross-device claim。当前 ACP MVP capability floor 禁用 tool-bash / permission：签名包的真实 escalated-tool fixture
-> 未产生 `session/request_permission` 且目标文件未写入。未封装 runtime 的显式 read-only fixture 已证明 Main capability-bound
-> resolver 只会回 `reject-once`；两者都不是用户可用 approval flow。Main-only provider route
+> cross-device claim。build.11 已删除 ACP MVP capability floor，并从固定 DeepSeek tag/Node/pnpm 输入重建。
+> 同一签名 Helper 的 local-loopback fixture 已真实收到 `session/request_permission`，经 Main-owned
+> generic interaction resolver 收窄为一次 `allow-once` 后执行安全 `bash` `pwd`，并验证 provider key/base URL
+> 不进入 shell 子进程。该证明只覆盖 Helper container 内的 test-only workspace，既不是持久批准，也不是用户项目
+> bookmark、文件搜索、附件/图像、并发/取消或跨端产品验收。Main-only provider route
 > 加 Helper outbound-network entitlement 的严格 signed-Helper prompt E2E 已通过：Main canonical adapter base
 > 会移除 root terminal `/`，使 sealed adapter 的固定 `/chat/completions` 拼接与 source-runtime path 相同。实测
 > 通过两轮 exact loopback request、committed text/usage projection、public cancel、durable receipt 和 no-leak
@@ -60,6 +62,18 @@
 > 已成功执行且 packaged App 通过已列的 E2E，**不**解除 capability floor，也不是 installer、发布、跨平台或生产 endpoint
 > 结论。
 
+> **build.11 工具 profile / 签名审计（2026-09-11）**：固定 tag
+> `dsh-v0.1.2-alpha.3` commit `dd6322d604e00eec1ba5e0c8541159906a21094a` 的本机 source build
+> 使用 Node `v24.20.0` / pnpm `11.7.0`，archive SHA-256 为
+> `62dd87fa43af718d019f2f14ca6b3fd9318c80c36f7d008fdd9bb7e198914162`。capability-floor adaptation
+> 已移除；sealed native cache 的 `sharp`、`koffi`、`node-pty` 动态加载不再因 local ad-hoc 签名缺少
+> Team ID 而被 Hardened Runtime library validation 拒绝。例外必须严格限制于 DSH SEA runtime 的
+> inherit entitlement `com.apple.security.cs.disable-library-validation`；**不得**赋给 Cindy Main 或
+> Supervisor，且必须保留 sealed-cache 的 manifest、regular-file、non-symlink、realpath 与摘要校验。
+> staging 必须 post-sign 断言此 exception 仅在 runtime 存在。重新打包的 Cindy.app 已通过
+> `codesign --verify --deep --strict` 和 8/8 signed-Helper loopback E2E；这不构成 installer、发布、
+> notarization、真实 provider、真实用户工作目录或全量工具验收结论。
+>
 > **受监督 provider 路径审计（2026-09-04）**：用户已授权为 macOS Helper 添加
 > `com.apple.security.network.client`；该 entitlement 允许的是通用出站连接，**不是** loopback-only
 > 防火墙。故 `provider-route.ts` 只接受本 Main 进程创建的 capability object：生产 route 必须是
@@ -349,7 +363,7 @@ ACP 扩展能力。
   local pin，缺失/失败必须只让 dsh unavailable，不能阻塞 Cindy 或回退到系统下载器。
 - 受监督 source runtime 的本机基础使用独立的
   `tools/dsh/macos-supervised-source-release.json`（当前定义为
-  `cindy-dsh-0.1.2-alpha.3-build.9-macos-supervised`）。它只产出 `darwin-arm64` archive，记录
+  `cindy-dsh-0.1.2-alpha.3-build.11-macos-supervised`）。它只产出 `darwin-arm64` archive，记录
   source/build/adaptation digest；除 bootstrap addon 的 `requiredNativeAddons` 外，还将最小
   `pkgNativeCache` 整树纳入 archive manifest。构建时从刚 deploy 的 closure 选出实际 Darwin `sharp`、
   `koffi` 与 `node-pty` 文件，按 native module SHA-256 写到 `pkg/<hash>/…`，绝不读取或复制用户 Home cache。
@@ -369,10 +383,11 @@ ACP 扩展能力。
   也不得让 headless pnpm 进入替换确认。随后用临时 HOME 中的已验证 Node SEA cache、已验证 pnpm CLI 和受控 shim
   PATH（其中只有 Cindy pnpm wrapper、当前 host-verified Node 的 shim，以及仅允许 `npm run` 映射到该 pnpm wrapper 的兼容 shim）完成构建。依赖安装前，已验 pnpm 只可基于已验证的冻结 lockfile，以 `fetch --frozen-lockfile --ignore-scripts` 写入新的私有临时 store；这是受 lockfile integrity
   约束的入站依赖准备，不是远端构建、不会上传、不会执行 install script，且发生在 adaptations 修改 source checkout 前。随后环境级 `npm_config_offline=true` 及 wrapper 在每个依赖物化命令（`install` / `deploy`，包括上游的 `pnpm --filter … deploy`）前注入的 `--offline` 必须覆盖所有后续依赖准备；`pnpm exec` 不支持该 CLI flag，但继承环境级 guard。只有该最初的直接 `fetch` 临时设为 false。install、deploy 和 build 只可使用此私有 store，绝不读取用户 Home cache。上游 deploy 通过 review-bound adaptation 改为 lockfile-bound closure；pnpm 对唯一工作区 `file:` 依赖写入 deployment lockfile 时会将其转换为绝对 file URL，因此 runner 只在 disposable checkout 的 `pnpm-workspace.yaml` 中临时插入由该 checkout realpath 计算出的**唯一** allowBuild entry。该 entry 必须在 source build 的 `finally` 中还原，并再次通过 adaptation postimage 验证；它不得改成包名级、通配或 `dangerouslyAllowAllBuilds` 放行。输出目录必须不存在，避免覆盖旧证据；它不会 Git fetch、clone 或联系 source remote，也不构建非 `darwin-arm64` 目标。任一缺失／不匹配输入都必须在源码修改前失败。
-- 当前 sealed ACP MVP capability floor 显式关闭 `attachment-local`、`subprocess`、`sandbox`、
-  `bash-sandbox`、`permission`、`tool-bash` 与 `tool-fs-search`。原因是 `sharp`/`koffi` 的动态 addon
-  cache 与未进入闭包的 `node-pty` 不能在 App Sandbox 的签名边界内安全加载；这些能力在产品接入前
-  必须诚实投影为 `not-implemented`，不得以 fallback 或可写提取绕过。
+- build.11 不再用 Cindy adaptation 静态关闭 `attachment-local`、`subprocess`、`sandbox`、
+  `bash-sandbox`、`permission`、`tool-bash` 或 `tool-fs-search`。这不等于把它们无条件标为已验收：
+  只有 native closure、runtime-only library-validation exception、sealed-cache checks 和同一签名
+  Helper 的对应功能用例全部通过，某项能力才能在状态/UI 中转正。不得用 fallback、系统全局 runtime、
+  可写提取或 Main/Supervisor 的 library-validation 例外绕过该边界。
 - staging 在 `Cindy DSH Supervisor.app/Contents/Resources` 写入受签名的
   `cindy-dsh-supervised-runtime.json`。它只是 Main 的 identity/availability record，不是 launcher
   input：记录唯一 target、release/version、父/Helper bundle identity、固定 supervisor/runtime/sidecar
@@ -450,13 +465,17 @@ DSH profile 和 patch 是可执行配置：上游可从 home / invocation direct
 只等待该 binding 已排队的 durable projection tail 在总超时内完成；它绝不从未提交 raw event
 生成审批上下文。`DshAgent` 只把已脱敏的 opaque `toolUseId`、工具名和 record-shaped input 交给 Cindy
 既有 interaction resolver，并把 `allow` / 其余结果严格收窄为 `allow-once` / `reject-once`，忽略
-`updatedInput` 与持久 `permissionUpdates`。本地未封装 `darwin-arm64` runtime 的 loopback fixture 在
-显式 `DSH_PERMISSION_MODE=read-only` 下已实测一条 `bash` 请求经该链路返回 `reject-once`，临时写目标
-不存在。
+`updatedInput` 与持久 `permissionUpdates`。历史未封装 `darwin-arm64` 的 loopback fixture 曾在
+显式 `DSH_PERMISSION_MODE=read-only` 下证明 `reject-once`；当前 build.11 的**同一签名 Helper**
+fixture 则已证明真实 ACP request 经该链路到达 generic interaction listener、返回 `allow-once`，并在
+test-only Helper container workspace 完成一个无写入 `bash` 命令。fixture 同时证明 provider key/base URL
+不进入该 tool 子进程。
 
-这不开放产品权限：当前签名包仍由 capability floor 禁用 permission 与工具，所以不会发出该请求；
-`DshAgent` 仍未注册，且没有 DSH 专属 IPC/preload/renderer 卡片、持久批准、自动批准、scheduler、remote 或
-Mobile 路径。未先单独完成原生 addon 闭包与签名包 E2E，不得把 `ask`、工具或写入标为产品可用。
+这不等于开放持久或无限制权限：每次 request 仍只能 allow-once/reject-once，任务 close/EOF 会撤销
+resolver 和 pending tool mapping；现有 Main 条件注册只在 current owner、唯一 DSH configuration、封装
+Helper、bookmark admission 与 binding/receipt/journal 都有效时启用 DSH。真实用户项目目录需要 picker 取得
+task-scoped fd 4 bookmark；文件搜索、附件/图像、拒绝/超时/重复回包、并发/取消、scheduler、remote 和 Mobile
+仍未获得本机产品验收，状态/UI 不得把它们显示为已完成。
 
 - `session/request_permission` 是**逐工具调用**的一次性审批，不是 sandbox 范围升级。
   request 本身只带 `toolCallId`，工具名与参数在此前的 `tool_call` update 里；服务端在发

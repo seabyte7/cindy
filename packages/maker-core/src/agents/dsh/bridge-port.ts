@@ -46,6 +46,17 @@ export type DshBridgeAgentResumeReceipt = DshBridgeAgentReceipt<'resume'>;
 /** A deliberately small, protocol-validated terminal outcome for one prompt turn. */
 export type DshBridgePromptStopReason = 'end_turn' | 'cancelled';
 
+/**
+ * A Renderer-originated content reference after generic Maker has validated
+ * only its shape. Desktop Main remains solely responsible for authorizing,
+ * staging and serializing local bytes into ACP prompt blocks.
+ */
+export type DshBridgePromptContent =
+  | { type: 'text'; text: string }
+  | { type: 'image'; path: string; mimeType?: string }
+  | { type: 'file'; path: string; mimeType?: string }
+  | { type: 'mention'; name: string; path: string; kind?: 'file' | 'dir' | 'agent' };
+
 export interface DshBridgePromptReceipt {
   contractVersion: typeof DSH_BRIDGE_CONTRACT_VERSION;
   operation: 'prompt';
@@ -117,7 +128,9 @@ export interface DshBridgePort {
     input: DshBridgeAgentSessionRef,
     resolver: DshBridgePermissionResolver,
   ): () => void;
-  prompt(input: DshBridgeAgentSessionRef & { text: string }): Promise<DshBridgePromptReceipt>;
+  prompt(input: DshBridgeAgentSessionRef & {
+    content: readonly DshBridgePromptContent[];
+  }): Promise<DshBridgePromptReceipt>;
   cancel(input: DshBridgeAgentSessionRef): Promise<DshBridgeAgentReceipt<'cancel'>>;
   close(input: DshBridgeAgentSessionRef): Promise<DshBridgeAgentReceipt<'close'>>;
 }

@@ -1483,9 +1483,9 @@ describe('Shared create project picker', () => {
     );
     const body = guard.slice(0, guard.indexOf('}, ['));
     // 本机草稿零开销:直接返回原对象,不包装。
-    expect(body).toContain('if (!isDeviceLinkDraft && !isDshDraft) return attachmentState;');
-    expect(body).toContain('if (isDshDraft) {');
-    expect(body).toContain("t('newChat.dsh.textOnlyInput')");
+    expect(body).toContain('if (!isDeviceLinkDraft) return attachmentState;');
+    expect(body).not.toContain('if (isDshDraft) {');
+    expect(body).not.toContain("t('newChat.dsh.textOnlyInput')");
     // 判据必须与下游**同口径**(第 29 轮 P1):useAttachments 的分类完全不看 MIME —— 先按扩展名
     // categorizeFile,认不出来才 peekFileHeader 按魔数推断。原来这里用 `f.type.startsWith('image/')`,
     // 于是 Electron 给空 / 通用 File.type 时(某些平台与拖拽源如此,重命名过的图片更是必然),
@@ -1514,7 +1514,7 @@ describe('Shared create project picker', () => {
 
   // #807 review 第二十二轮:ExtraDirsButton 开的是控制端原生目录对话框,选出来的本机路径发到对端
   // 会被静默丢掉、或撞上对端同名的无关目录 —— chip 显示的并不是真实授予的上下文。
-  it('hides the reference-directory picker on remote and DSH text-only drafts', () => {
+  it('hides the reference-directory picker on remote and DSH restricted-workspace drafts', () => {
     expect(newMakerDraftRouteSource).toContain(
       'isDeviceLinkDraft || isDshDraft ? undefined : handleExtraDirsChange',
     );

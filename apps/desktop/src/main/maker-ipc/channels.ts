@@ -132,6 +132,12 @@ export const MAKER_INVOKE = {
   DSH_RUNTIME_CONFIGURATION_GET: 'maker:dsh-runtime-configuration:get',
   DSH_RUNTIME_CONFIGURATION_SET: 'maker:dsh-runtime-configuration:set',
   /**
+   * Status/retry for the Main-owned DSH task factory. This is deliberately
+   * separate from per-task model/effort controls and accepts no route/key.
+   */
+  DSH_RUNTIME_STATUS_GET: 'maker:dsh-runtime-status:get',
+  DSH_RUNTIME_STATUS_RETRY: 'maker:dsh-runtime-status:retry',
+  /**
    * Display-safe, Main-owned existing DSH Home selection. These handlers never
    * accept or return a pathname, bookmark, account id, or generic filesystem
    * capability; the native picker is opened only by the Main process.

@@ -106,12 +106,59 @@ static napi_value create_implicit_bookmark(napi_env environment,
   return result;
 }
 
+/*
+ * Electron exposes `securityScopedBookmarks` only for MAS builds.  Cindy's
+ * Global package must nevertheless make the user-selected, exact directory a
+ * real macOS bookmark before handing a one-shot implicit descriptor to its
+ * separately signed Helper.  This function is Main-only; its caller has
+ * already checked picker origin, account/task freshness and canonical path.
+ */
+static napi_value create_persistent_bookmark_for_path(napi_env environment,
+                                                       napi_callback_info info) {
+  char *raw_path = NULL;
+  size_t raw_path_length = 0;
+  if (!get_base64_argument(environment, info, &raw_path, &raw_path_length)) {
+    return throw_failure(environment);
+  }
+
+  napi_value result = NULL;
+  @autoreleasepool {
+    NSString *path = [[NSString alloc] initWithBytes:raw_path
+                                                length:raw_path_length
+                                              encoding:NSUTF8StringEncoding];
+    NSURL *location = path == nil || !path.isAbsolutePath
+        ? nil
+        : [NSURL fileURLWithPath:path isDirectory:YES];
+    NSError *bookmark_error = nil;
+    NSData *persistent = location == nil
+        ? nil
+        : [location bookmarkDataWithOptions:NSURLBookmarkCreationWithSecurityScope
+              includingResourceValuesForKeys:nil
+                               relativeToURL:nil
+                                       error:&bookmark_error];
+    NSString *output = persistent == nil ? nil : [persistent base64EncodedStringWithOptions:0];
+    if (output == nil || output.length == 0 || output.length > kMaximumBookmarkBytes ||
+        napi_create_string_utf8(environment, output.UTF8String, NAPI_AUTO_LENGTH,
+                                &result) != napi_ok) {
+      free(raw_path);
+      return throw_failure(environment);
+    }
+  }
+  free(raw_path);
+  return result;
+}
+
 NAPI_MODULE_INIT() {
   napi_property_descriptor descriptor = {};
   descriptor.utf8name = "createImplicitBookmark";
   descriptor.method = create_implicit_bookmark;
   descriptor.attributes = napi_default;
-  if (napi_define_properties(env, exports, 1, &descriptor) != napi_ok) {
+  napi_property_descriptor persistent_descriptor = {};
+  persistent_descriptor.utf8name = "createPersistentBookmarkForPath";
+  persistent_descriptor.method = create_persistent_bookmark_for_path;
+  persistent_descriptor.attributes = napi_default;
+  napi_property_descriptor descriptors[] = { descriptor, persistent_descriptor };
+  if (napi_define_properties(env, exports, 2, descriptors) != napi_ok) {
     return throw_failure(env);
   }
   return exports;

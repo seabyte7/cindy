@@ -52,6 +52,7 @@ static const char *const kPkgNativeCacheRelativePath =
 static const unsigned int kProcessGroupGraceAttempts = 100;
 static const long kProcessGroupPollNanoseconds = 10L * 1000L * 1000L;
 static const int kImplicitBookmarkDescriptor = 3;
+static const int kWorkspaceBookmarkDescriptor = 4;
 static const size_t kMaxImplicitBookmarkBytes = 1024U * 1024U;
 static const int kImplicitBookmarkReadTimeoutMilliseconds = 5000;
 static volatile sig_atomic_t child_process_group = -1;
@@ -73,6 +74,7 @@ static bool is_allowed_environment_name(const char *name) {
       strcmp(name, "TMPDIR") == 0 || strcmp(name, "PATH") == 0 ||
       strcmp(name, "LANG") == 0 || strcmp(name, "LC_ALL") == 0 ||
       strcmp(name, "DSH_TELEMETRY_DISABLED") == 0 ||
+      strcmp(name, "CINDY_DSH_TOOL_PATH") == 0 ||
       strcmp(name, "CINDY_DSH_PROVIDER_BASE_URL") == 0 ||
       strcmp(name, "CINDY_DSH_PROVIDER_API_KEY") == 0;
 }
@@ -97,15 +99,62 @@ static bool is_absolute_directory_value(const char *value) {
       !S_ISLNK(metadata.st_mode);
 }
 
-static bool descriptor_is_open(int descriptor, bool *is_open) {
+static bool is_canonical_tool_path(const char *value) {
+  if (value == NULL || value[0] == '\0' || strlen(value) > 16 * 1024) {
+    return false;
+  }
+  const char *segment = value;
+  while (*segment != '\0') {
+    const char *separator = strchr(segment, ':');
+    const size_t length = separator == NULL ? strlen(segment)
+                                             : (size_t)(separator - segment);
+    if (length == 0 || length >= PATH_MAX) return false;
+    char candidate[PATH_MAX];
+    memcpy(candidate, segment, length);
+    candidate[length] = '\0';
+    char resolved[PATH_MAX];
+    struct stat metadata;
+    if (candidate[0] != '/' || realpath(candidate, resolved) == NULL ||
+        strcmp(candidate, resolved) != 0 || lstat(candidate, &metadata) != 0 ||
+        !S_ISDIR(metadata.st_mode) || S_ISLNK(metadata.st_mode)) {
+      return false;
+    }
+    if (separator == NULL) break;
+    segment = separator + 1;
+  }
+  return true;
+}
+
+/*
+ * Node implements a supplied `stdio: 'pipe'` descriptor as a socketpair on
+ * macOS. In contrast, an unused slot expressed as `stdio: 'ignore'` is
+ * inherited as /dev/null, so fcntl(F_GETFD) alone cannot tell the two apart:
+ * both descriptor numbers are open in the Helper. Only the private transport
+ * endpoint may opt a launch into bookmark handling; /dev/null means that the
+ * corresponding handoff is absent.
+ */
+static bool descriptor_is_private_handoff_or_absent(int descriptor,
+                                                    bool *is_present) {
   errno = 0;
   const int flags = fcntl(descriptor, F_GETFD);
   if (flags >= 0) {
-    *is_open = true;
-    return true;
+    struct stat metadata;
+    if (fstat(descriptor, &metadata) != 0) return false;
+    // Keep FIFO support for an equivalent Node implementation, but do not
+    // accept a regular file or arbitrary inherited descriptor as a handoff.
+    if (S_ISSOCK(metadata.st_mode) || S_ISFIFO(metadata.st_mode)) {
+      *is_present = true;
+      return true;
+    }
+    if (S_ISCHR(metadata.st_mode)) {
+      *is_present = false;
+      return true;
+    }
+    errno = EINVAL;
+    return false;
   }
   if (errno == EBADF) {
-    *is_open = false;
+    *is_present = false;
     return true;
   }
   return false;
@@ -160,6 +209,47 @@ static bool read_implicit_bookmark_descriptor(int descriptor, char **bookmark) {
   const size_t length = ((size_t)length_bytes[0] << 24) |
       ((size_t)length_bytes[1] << 16) |
       ((size_t)length_bytes[2] << 8) | (size_t)length_bytes[3];
+  if (length == 0 || length > kMaxImplicitBookmarkBytes) return false;
+  char *value = calloc(length + 1, sizeof(*value));
+  if (value == NULL || !read_descriptor_exact(descriptor, (unsigned char *)value, length)) {
+    free(value);
+    return false;
+  }
+  for (size_t index = 0; index < length; ++index) {
+    if (!is_base64_character((unsigned char)value[index])) {
+      free(value);
+      return false;
+    }
+  }
+  if (!wait_for_descriptor_read(descriptor)) {
+    free(value);
+    return false;
+  }
+  unsigned char trailing = 0;
+  ssize_t read_count = 0;
+  do {
+    read_count = read(descriptor, &trailing, sizeof(trailing));
+  } while (read_count < 0 && errno == EINTR);
+  if (read_count != 0) {
+    free(value);
+    return false;
+  }
+  *bookmark = value;
+  return true;
+}
+
+/**
+ * Workspace authority is a separate, versioned private descriptor.  Unlike
+ * the legacy Home handoff, it includes a fixed purpose byte so fd 4 can never
+ * silently become a generic bookmark transport.
+ */
+static bool read_workspace_bookmark_descriptor(int descriptor, char **bookmark) {
+  unsigned char header[6];
+  if (!read_descriptor_exact(descriptor, header, sizeof(header))) return false;
+  if (header[0] != 1 || header[1] != 1) return false;
+  const size_t length = ((size_t)header[2] << 24) |
+      ((size_t)header[3] << 16) | ((size_t)header[4] << 8) |
+      (size_t)header[5];
   if (length == 0 || length > kMaxImplicitBookmarkBytes) return false;
   char *value = calloc(length + 1, sizeof(*value));
   if (value == NULL || !read_descriptor_exact(descriptor, (unsigned char *)value, length)) {
@@ -328,6 +418,7 @@ static bool build_child_environment(const char *native_addon_cache,
       environment_value(saved, "CINDY_DSH_PROVIDER_BASE_URL");
   const char *provider_api_key =
       environment_value(saved, "CINDY_DSH_PROVIDER_API_KEY");
+  const char *tool_path = environment_value(saved, "CINDY_DSH_TOOL_PATH");
   if (path == NULL || strcmp(path, "/usr/bin:/bin") != 0 ||
       !is_absolute_directory_value(environment_value(saved, "HOME")) ||
       !is_absolute_directory_value(environment_value(saved, "DSH_HOME")) ||
@@ -335,6 +426,7 @@ static bool build_child_environment(const char *native_addon_cache,
       !is_absolute_directory_value(
           environment_value(saved, "CINDY_DSH_SEALED_PKG_CACHE_DIR")) ||
       telemetry_disabled == NULL || strcmp(telemetry_disabled, "1") != 0 ||
+      (tool_path != NULL && !is_canonical_tool_path(tool_path)) ||
       ((provider_base_url == NULL) != (provider_api_key == NULL)) ||
       (provider_base_url != NULL &&
        (provider_base_url[0] == '\0' || provider_api_key[0] == '\0'))) {
@@ -597,9 +689,15 @@ int main(int argc, char *const argv[]) {
     return 64;
   }
   bool has_implicit_bookmark_descriptor = false;
-  if (!descriptor_is_open(kImplicitBookmarkDescriptor,
-                          &has_implicit_bookmark_descriptor)) {
+  bool has_workspace_bookmark_descriptor = false;
+  if (!descriptor_is_private_handoff_or_absent(
+          kImplicitBookmarkDescriptor, &has_implicit_bookmark_descriptor)) {
     report_error("could not inspect the private DSH Home descriptor");
+    return 64;
+  }
+  if (!descriptor_is_private_handoff_or_absent(
+          kWorkspaceBookmarkDescriptor, &has_workspace_bookmark_descriptor)) {
+    report_error("could not inspect the private DSH workspace descriptor");
     return 64;
   }
   if (has_implicit_bookmark_descriptor &&
@@ -609,6 +707,7 @@ int main(int argc, char *const argv[]) {
     return 64;
   }
   CindyDshImplicitBookmarkAccess implicit_access = {0};
+  CindyDshImplicitBookmarkAccess workspace_access = {0};
   if (has_implicit_bookmark_descriptor) {
     char *bookmark = NULL;
     const bool received = read_implicit_bookmark_descriptor(
@@ -623,14 +722,36 @@ int main(int argc, char *const argv[]) {
       return 68;
     }
   }
+  if (has_workspace_bookmark_descriptor) {
+    if (!(argc == 3 && strcmp(argv[1], "--profile") == 0 &&
+          strcmp(argv[2], "acp") == 0)) {
+      report_error("the private DSH workspace descriptor is valid only for ACP");
+      return 64;
+    }
+    char *bookmark = NULL;
+    const bool received = read_workspace_bookmark_descriptor(
+        kWorkspaceBookmarkDescriptor, &bookmark);
+    (void)close(kWorkspaceBookmarkDescriptor);
+    const bool resolved = received && cindy_dsh_resolve_implicit_bookmark(
+        bookmark, strlen(bookmark), &workspace_access);
+    free(bookmark);
+    if (!resolved) {
+      cindy_dsh_release_implicit_bookmark(&workspace_access);
+      cindy_dsh_release_implicit_bookmark(&implicit_access);
+      report_error("the private DSH workspace descriptor is invalid");
+      return 68;
+    }
+  }
   char bundle[PATH_MAX];
   if (!resolve_bundle_root(argv[0], bundle)) {
+    cindy_dsh_release_implicit_bookmark(&workspace_access);
     cindy_dsh_release_implicit_bookmark(&implicit_access);
     report_error("the supervisor is not running from a sealed app bundle");
     return 65;
   }
   char runtime[PATH_MAX];
   if (!resolve_bundle_resource_path(bundle, kRuntimeRelativePath, true, runtime)) {
+    cindy_dsh_release_implicit_bookmark(&workspace_access);
     cindy_dsh_release_implicit_bookmark(&implicit_access);
     report_error("the bundled DSH runtime is invalid");
     return 66;
@@ -638,6 +759,7 @@ int main(int argc, char *const argv[]) {
   char native_addon_cache[PATH_MAX];
   if (!resolve_bundle_resource_path(bundle, kNativeAddonCacheRelativePath,
                                     false, native_addon_cache)) {
+    cindy_dsh_release_implicit_bookmark(&workspace_access);
     cindy_dsh_release_implicit_bookmark(&implicit_access);
     report_error("the bundled native addon cache is invalid");
     return 67;
@@ -645,6 +767,7 @@ int main(int argc, char *const argv[]) {
   char pkg_native_cache[PATH_MAX];
   if (!resolve_bundle_resource_path(bundle, kPkgNativeCacheRelativePath,
                                     false, pkg_native_cache)) {
+    cindy_dsh_release_implicit_bookmark(&workspace_access);
     cindy_dsh_release_implicit_bookmark(&implicit_access);
     report_error("the bundled pkg native cache is invalid");
     return 67;
@@ -655,6 +778,7 @@ int main(int argc, char *const argv[]) {
                                    ? implicit_access.directory
                                    : NULL,
                                &child_environment)) {
+    cindy_dsh_release_implicit_bookmark(&workspace_access);
     cindy_dsh_release_implicit_bookmark(&implicit_access);
     report_error("the managed DSH environment is invalid");
     return 68;
@@ -668,6 +792,7 @@ int main(int argc, char *const argv[]) {
   if (actions_result != 0 || attributes_result != 0) {
     if (actions_result == 0) (void)posix_spawn_file_actions_destroy(&actions);
     free_environment(child_environment);
+    cindy_dsh_release_implicit_bookmark(&workspace_access);
     cindy_dsh_release_implicit_bookmark(&implicit_access);
     report_error("could not initialize the native launch boundary");
     return 69;
@@ -679,6 +804,7 @@ int main(int argc, char *const argv[]) {
     (void)posix_spawn_file_actions_destroy(&actions);
     (void)posix_spawnattr_destroy(&attributes);
     free_environment(child_environment);
+    cindy_dsh_release_implicit_bookmark(&workspace_access);
     cindy_dsh_release_implicit_bookmark(&implicit_access);
     report_error("could not configure the native launch boundary");
     return 70;
@@ -690,6 +816,7 @@ int main(int argc, char *const argv[]) {
   (void)posix_spawnattr_destroy(&attributes);
   free_environment(child_environment);
   if (spawn_result != 0) {
+    cindy_dsh_release_implicit_bookmark(&workspace_access);
     cindy_dsh_release_implicit_bookmark(&implicit_access);
     report_error("could not launch the bundled DSH runtime");
     return 71;
@@ -733,11 +860,13 @@ int main(int argc, char *const argv[]) {
   child_process_group = -1;
   if (!child_reaped) {
     (void)drain_child_process_group(group, child);
+    cindy_dsh_release_implicit_bookmark(&workspace_access);
     cindy_dsh_release_implicit_bookmark(&implicit_access);
     report_error("could not wait for the bundled DSH runtime");
     return 72;
   }
   if (!group_drained) {
+    cindy_dsh_release_implicit_bookmark(&workspace_access);
     cindy_dsh_release_implicit_bookmark(&implicit_access);
     report_error("could not confirm the bundled DSH runtime process group exited");
     return 73;
@@ -746,5 +875,6 @@ int main(int argc, char *const argv[]) {
       : WIFEXITED(status) ? WEXITSTATUS(status)
       : WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 74;
   cindy_dsh_release_implicit_bookmark(&implicit_access);
+  cindy_dsh_release_implicit_bookmark(&workspace_access);
   return result;
 }

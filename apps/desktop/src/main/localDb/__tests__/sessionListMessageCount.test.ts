@@ -71,11 +71,16 @@ function createMigratedDb(): { db: Database.Database; cleanup: () => void } {
   };
 }
 
-function insertSession(db: Database.Database, id: string, updatedAt: number): void {
+function insertSession(
+  db: Database.Database,
+  id: string,
+  updatedAt: number,
+  startupState: 'ready' | 'starting' | 'needs_reconcile' = 'ready',
+): void {
   db.prepare(
-    `INSERT INTO sessions (id, title, status, source, agent_kind, created_at, updated_at)
-     VALUES (?, ?, 'active', 'desktop', 'cc', ?, ?)`,
-  ).run(id, id, updatedAt, updatedAt);
+    `INSERT INTO sessions (id, title, status, source, agent_kind, startup_state, created_at, updated_at)
+     VALUES (?, ?, 'active', 'desktop', 'cc', ?, ?, ?)`,
+  ).run(id, id, startupState, updatedAt, updatedAt);
 }
 
 function insertMessage(db: Database.Database, sessionId: string, seq: number): void {
@@ -90,7 +95,7 @@ function listSql(countExpr: string, limit = 1000): string {
   return `
     SELECT s.id AS id, count(${countExpr}) AS message_count
     FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
-    WHERE s.status != 'deleted'
+    WHERE s.status != 'deleted' AND s.startup_state = 'ready'
     GROUP BY s.id
     ORDER BY s.updated_at DESC
     LIMIT ${limit}
@@ -102,7 +107,7 @@ function twoPhaseSql(limit = 1000): string {
   return `
     WITH picked AS (
       SELECT id FROM sessions
-      WHERE status != 'deleted'
+      WHERE status != 'deleted' AND startup_state = 'ready'
       ORDER BY updated_at DESC
       LIMIT ${limit}
     )
@@ -180,6 +185,21 @@ describeWithDb('sessions:list messageCount', () => {
     }
   });
 
+  it('does not return an unpublished DSH reservation or a quarantined startup', () => {
+    const { db, cleanup } = createMigratedDb();
+    try {
+      insertSession(db, 'published', 300);
+      insertSession(db, 'dsh-starting', 500, 'starting');
+      insertSession(db, 'dsh-needs-reconcile', 400, 'needs_reconcile');
+
+      expect(db.prepare(twoPhaseSql()).all()).toEqual([
+        { id: 'published', message_count: 0 },
+      ]);
+    } finally {
+      cleanup();
+    }
+  });
+
   it('uses a covering index for the count, unlike the count(messages.id) shape', () => {
     const { db, cleanup } = createMigratedDb();
     try {
@@ -208,6 +228,8 @@ describe('sessions:list messageCount source', () => {
 
     // list / get / update 都走同一条标量子查询，不再 LEFT JOIN 该会话全部消息。
     expect(source).toMatch(/messageCount: SESSION_MESSAGE_COUNT_SQL,/);
+    expect(source).toMatch(/const startupStateFilter = eq\(sessions\.startupState, 'ready'\);/);
+    expect(source).toMatch(/and\(sourceFilter, startupStateFilter, statusWhere\(\)\)/);
     expect(source).not.toMatch(/leftJoin\(messages/);
     expect(source).not.toMatch(/MESSAGE_COUNT_COL/);
     // 已回填时短路缓存列；未回填时 count(*) 是精确总数。

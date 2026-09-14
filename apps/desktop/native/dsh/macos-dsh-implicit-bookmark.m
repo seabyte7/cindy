@@ -47,7 +47,14 @@ bool cindy_dsh_resolve_implicit_bookmark(const char *base64,
                                      relativeToURL:nil
                                bookmarkDataIsStale:&stale
                                              error:&error];
-    if (url == nil || stale || !url.isFileURL || ![url startAccessingSecurityScopedResource]) {
+    // Foundation's stale flag is a bookmark-metadata refresh advisory, not an
+    // authorization verdict. Even a freshly minted Main bookmark can resolve
+    // stale in this separately sandboxed Helper (while its scope is valid).
+    // This private handoff is consumed once and never stored/reused, so there
+    // is no persisted copy to refresh. Require the actual security scope and
+    // directory validation below; do not reject solely on the advisory flag.
+    // The Main-side persisted app-scoped bookmark policy is unchanged.
+    if (url == nil || !url.isFileURL || ![url startAccessingSecurityScopedResource]) {
       return false;
     }
 

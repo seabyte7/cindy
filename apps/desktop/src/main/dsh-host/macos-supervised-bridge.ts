@@ -17,6 +17,7 @@ import {
   type DshAcpCapabilitySnapshot,
   type DshDurableRuntimeIdentity,
 } from '../maker-host/dsh-control-plane.js';
+import { createDshPromptContentAdmission } from './prompt-content-admission.js';
 import type { DshSessionBindingStore } from '../localDb/dshSessionBindings.js';
 import type { DshPromptReceiptStore } from '../localDb/dshPromptReceipts.js';
 import type { DshProjectionJournal } from '../localDb/dshProjectionJournal.js';
@@ -43,6 +44,7 @@ import {
 } from './macos-supervised-runtime.js';
 import type { DshInternalMcpLeaseFactory } from './internal-mcp-lease.js';
 import type { DshImplicitBookmarkHandoff } from './implicit-bookmark-handoff.js';
+import type { DshWorkspaceBookmarkHandoff } from './implicit-bookmark-handoff.js';
 
 export interface StartMacosSupervisedDshBridgeOptions extends ResolveMacosSupervisedDshRuntimeOptions {
   logger: Logger;
@@ -74,6 +76,10 @@ export interface StartMacosSupervisedDshBridgeOptions extends ResolveMacosSuperv
    * spawned.  It never contains a filesystem pathname.
    */
   implicitHomeBookmark?: DshImplicitBookmarkHandoff;
+  /** Task-scoped authority; tool-capable sessions never borrow another task's grant. */
+  workspaceBookmark?: DshWorkspaceBookmarkHandoff;
+  /** Main-resolved tool path, intentionally distinct from the fixed runtime PATH. */
+  toolPath?: string;
 }
 
 export interface MacosSupervisedDshBridge {
@@ -100,6 +106,7 @@ function capabilityFingerprint(snapshot: DshAcpCapabilitySnapshot): string {
     agentName: snapshot.agentName,
     agentVersion: snapshot.agentVersion,
     sessionCapabilities: Object.keys(snapshot.sessionCapabilities).sort(),
+    inlineImagePromptSupported: snapshot.inlineImagePromptSupported,
   });
   return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
 }
@@ -149,6 +156,7 @@ export async function startMacosSupervisedDshBridge(
     const env = buildDshChildEnvironment({
       paths,
       providerRoute: options.providerRoute,
+      toolPath: options.toolPath,
       // Do not read a credential unless Main has admitted a route for this
       // exact contained spawn. A bare initialize cannot need a model key.
       secrets: options.providerRoute ? options.loadSecrets(scope) : [],
@@ -161,12 +169,14 @@ export async function startMacosSupervisedDshBridge(
           launcherCwd: paths.launcherCwd,
           env,
           implicitHomeBookmark: options.implicitHomeBookmark,
+          workspaceBookmark: options.workspaceBookmark,
         }),
     });
     const bridge = new DshControlPlane({
       scopeId: paths.scopeId,
       client,
       assertAuthorizedCwd: options.assertAuthorizedCwd,
+      promptContentAdmission: createDshPromptContentAdmission({ stagingRoot: paths.processHome }),
       internalMcpLeaseFactory: options.internalMcpLeaseFactory,
       projectionCoordinator: createDshFollowProjectionCoordinator(options.projectionJournal),
       sessionActivity: options.activitySnapshotStore

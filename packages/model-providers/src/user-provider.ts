@@ -15,6 +15,7 @@ import type {
   CatalogModel,
   CustomProviderConfig,
   Effort,
+  AgentKind,
   Provider,
   ProviderRuntimeModelConfig,
   ProviderWireProtocol,
@@ -281,9 +282,9 @@ export function buildUserProvider(
   const isOAuth = oauth !== undefined;
   const noAuth = config.auth?.method === "none";
   const strategy = isOAuth ? "oauth-token" : noAuth ? "none" : "api-key-header";
-  const routing: Partial<Record<ModelProviderAgentKind, RoutingDescriptor>> = {};
-  const models: Partial<Record<ModelProviderAgentKind, CatalogModel[]>> = {};
-  const agents: ModelProviderAgentKind[] = [];
+  const routing: Partial<Record<AgentKind, RoutingDescriptor>> = {};
+  const models: Partial<Record<AgentKind, CatalogModel[]>> = {};
+  const agents: AgentKind[] = [];
   for (const agent of AGENT_ORDER) {
     const rt = config.runtimes[agent];
     if (!rt) continue;
@@ -302,6 +303,13 @@ export function buildUserProvider(
     models[agent] = rt.models.map((m) =>
       toCatalogModel(m, config.id, agent, options.modelRegistry),
     );
+  }
+  // DSH is a harness runtime, not an inference-model route. Expose a
+  // DSH-only user provider to Settings without inventing a model catalog or
+  // allowing the generic provider router to proxy its ACP traffic.
+  if (config.runtimes.dsh) {
+    agents.push('dsh');
+    models.dsh = [];
   }
   return {
     id: runtimeProviderId,

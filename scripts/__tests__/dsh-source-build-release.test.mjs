@@ -73,7 +73,7 @@ test('checked-in source release schema is valid and declares the user-approved i
 
 test('macOS supervised source release seals bootstrap and pkg native-cache inputs', () => {
   const release = readSourceRelease(supervisedReleasePath);
-  assert.equal(release.releaseId, 'cindy-dsh-0.1.2-alpha.3-build.9-macos-supervised');
+  assert.equal(release.releaseId, 'cindy-dsh-0.1.2-alpha.3-build.11-macos-supervised');
   assert.equal(release.source.adaptations.length, 6);
   assert.equal(release.source.adaptations[1].files[0].afterSha256, '24f669441b20804bd77c604199726309abd38de9507b55ee7ab5fdcca65d2f8b');
   assert.equal(release.source.adaptations[2].files[0].afterSha256, 'd642e64042b88820baf4a510299a8c4d3362fdf52a9d4616c29f8ba0bade2526');
@@ -82,8 +82,12 @@ test('macOS supervised source release seals bootstrap and pkg native-cache input
     release.source.adaptations[4].files.map((file) => [file.path, file.afterSha256]),
     [['scripts/build-exe-for-python-sdk.ts', '12c35d322a35bc2742479ab1973afb60702bf0fefc2fbe2bedec7e21e5f6f8e9']],
   );
-  assert.equal(release.source.adaptations[5].files[0].path, 'packages/bundle/acp-app/cordis.patch.yml');
-  assert.equal(release.source.adaptations[5].files[0].afterSha256, '30beac85e1da985ccc3ed3ce8543ec3291ee3a09060ae3b67243554380831e6a');
+  assert.equal(
+    release.source.adaptations.some((adaptation) =>
+      adaptation.files.some((file) => file.path === 'packages/bundle/acp-app/cordis.patch.yml'),
+    ),
+    false,
+  );
   assert.deepEqual(release.targets['darwin-arm64'].nativeAddons, [
     {
       sourcePath: 'node/node_modules/node-addon-require-builtin-darwin-arm64/prebuilt/darwin-arm64-napi-v9.node',
@@ -94,6 +98,13 @@ test('macOS supervised source release seals bootstrap and pkg native-cache input
     sourceDirectory: 'pkg-native-cache',
     cacheDirectory: 'pkg',
   });
+  assert.deepEqual(
+    release.source.adaptations[5].files.map((file) => [file.path, file.afterSha256]),
+    [
+      ['packages/subprocess/subprocess/src/index.ts', '243d09b87dc67c8d2326494c4373882158e430c57291cd3cb255d0bde0cb8c60'],
+      ['packages/subprocess/subprocess-local/tests/spawn.spec.ts', 'd774f5d7fe7a95d43619a91771ed813d35d14d118a0a3a4513d7884991c466bb'],
+    ],
+  );
 });
 
 test('checked-in pkg build-tool closure is digest-bound and declares the pinned package integrity', () => {

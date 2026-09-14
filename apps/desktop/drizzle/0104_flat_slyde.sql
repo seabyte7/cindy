@@ -1,0 +1,1 @@
+ALTER TABLE `sessions` ADD `startup_state` text DEFAULT 'ready' NOT NULL;

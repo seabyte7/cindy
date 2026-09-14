@@ -4821,6 +4821,9 @@ interface ElectronAPI {
       controlId: import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationId,
       choiceId: string,
     ) => Promise<import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationSnapshot>;
+    /** Display-safe status for the Main-owned DSH task factory. */
+    getDshRuntimeStatus: () => Promise<import('../shared/dshRuntimeStatus').DshRuntimeStatus>;
+    retryDshRuntimeRegistration: () => Promise<import('../shared/dshRuntimeStatus').DshRuntimeStatus>;
     /** Display-safe state only: no local pathname or bookmark crosses this API. */
     getDshExistingHome: () => Promise<import('../shared/dshExistingHome').DshExistingHomeProjection>;
     selectDshExistingHome: () => Promise<import('../shared/dshExistingHome').DshExistingHomeProjection>;
@@ -5249,8 +5252,9 @@ interface ElectronAPI {
     createSession: (opts: {
       /** 可选: 复用外部 sessionId(本端 chat 用 local-db:sessions:create 拿到的 id) */
       id?: string;
-      agentKind: 'claude-code' | 'codex' | 'pi';
+      agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh';
       workingDir: string;
+      workspaceKind?: 'project' | 'dialogue';
       model: string;
       title?: string;
       parentSessionId?: string;

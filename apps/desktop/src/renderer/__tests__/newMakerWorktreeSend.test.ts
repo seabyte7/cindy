@@ -17,7 +17,7 @@ describe('NewMakerDraftRoute worktree send flow', () => {
   it('enters a real session before creating the worktree in the background', () => {
     // 发送门已保证用户勾选时资格就绪；副作用分支仍以勾选 + baseRepo 双重防御。
     const worktreeBranch = source.indexOf(
-      'if (!isRemoteProjectDraft && wt.enabled && wt.baseRepo) {',
+      'if (!isDshDraft && !isRemoteProjectDraft && wt.enabled && wt.baseRepo) {',
     );
     const createSession = source.indexOf('const newSession = await createSession', worktreeBranch);
     const touchUserSend = source.indexOf('sessionService.touchUserSend', createSession);

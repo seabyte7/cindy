@@ -26,6 +26,7 @@ import type {
   DshBridgeCommittedFollowEvent,
   DshBridgePermissionRequest,
   DshBridgePort,
+  DshBridgePromptContent,
   DshBridgePromptStopReason,
 } from './bridge-port.js';
 import { createAsyncQueue, type AsyncQueue } from '../shared/async-queue.js';
@@ -53,16 +54,11 @@ const CAPABILITIES: Capabilities = {
   },
   multimodal: {
     text: { supported: true },
-    image: {
-      supported: false,
-      reason: 'not-implemented',
-      message: 'DSH image input is not yet available in Cindy.',
-    },
-    file: {
-      supported: false,
-      reason: 'not-implemented',
-      message: 'DSH file input is not yet available in Cindy.',
-    },
+    // Main stages every local reference and adds an inline ACP image only
+    // when this runtime handshake advertises it. A file reference remains
+    // useful to DSH even where the current model has no vision support.
+    image: { supported: true },
+    file: { supported: true },
   },
   fork: {
     supported: false,
@@ -236,16 +232,31 @@ async function resolveDshPermission(
   }
 }
 
-function textFromUserMessage(message: UserMessage): string {
-  if (typeof message.content === 'string') return message.content;
-  let text = '';
+function contentFromUserMessage(message: UserMessage): readonly DshBridgePromptContent[] {
+  if (typeof message.content === 'string') return [{ type: 'text', text: message.content }];
+  const content: DshBridgePromptContent[] = [];
   for (const block of message.content) {
-    if (block.type !== 'text') {
-      throw new TurnDispatchRejectedError('DSH accepts text-only input in this Cindy release');
+    switch (block.type) {
+      case 'text':
+        content.push({ type: 'text', text: block.text });
+        break;
+      case 'image':
+        content.push({ type: 'image', path: block.path, mimeType: block.mimeType });
+        break;
+      case 'file':
+        content.push({ type: 'file', path: block.path, mimeType: block.mimeType });
+        break;
+      case 'mention':
+        content.push({
+          type: 'mention',
+          name: block.name,
+          path: block.path,
+          kind: block.kind,
+        });
+        break;
     }
-    text += block.text;
   }
-  return text;
+  return content;
 }
 
 function isUsageStatus(data: unknown): data is UsageSnapshot {
@@ -507,9 +518,9 @@ export class DshAgent extends BaseAgent {
         if (sendOpts?.signal?.aborted) {
           throw new TurnDispatchRejectedError('DSH prompt was cancelled before dispatch');
         }
-        const text = textFromUserMessage(message);
-        if (!text.trim()) {
-          throw new TurnDispatchRejectedError('DSH requires non-empty text input');
+        const content = contentFromUserMessage(message);
+        if (!content.length || !content.some((block) => block.type !== 'text' || block.text.trim())) {
+          throw new TurnDispatchRejectedError('DSH requires text or a local attachment');
         }
         promptInFlight = true;
         queue.push({
@@ -518,7 +529,7 @@ export class DshAgent extends BaseAgent {
           source: 'dsh',
         });
 
-        const completion = bridge.prompt({ ...reference, text })
+        const completion = bridge.prompt({ ...reference, content })
           .then((receipt) => {
             const stopReason = assertPromptReceipt(receipt);
             queue.push({

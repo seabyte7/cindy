@@ -10,7 +10,16 @@
 
 import path from 'node:path';
 
+import type { DshWorkspaceBookmarkHandoff } from './implicit-bookmark-handoff.js';
+
 interface PendingCwdAdmission {
+  readonly cwd: string;
+  readonly workspaceBookmark: DshWorkspaceBookmarkHandoff;
+}
+
+/** Named fields prevent two string-valued authority coordinates being swapped at wiring sites. */
+export interface DshWorkspaceBookmarkClaim {
+  readonly cindySessionId: string;
   readonly cwd: string;
 }
 
@@ -45,9 +54,11 @@ export interface DshSessionCwdAdmission {
    * ticket, so a fail-closed pre-create error can retry without widening the
    * authorization to another session or directory.
    */
-  reserve(cindySessionId: string, cwd: string): void;
+  reserve(cindySessionId: string, cwd: string, workspaceBookmark: DshWorkspaceBookmarkHandoff): void;
   /** Consume the reservation immediately before the native ACP lifecycle request. */
   assertAndConsume(cwd: string, cindySessionId: string): void;
+  /** Consume the Main-issued sandbox handoff only after the same cwd check. */
+  consumeWorkspaceBookmark(claim: DshWorkspaceBookmarkClaim): DshWorkspaceBookmarkHandoff;
   /** Discard an unconsumed startup reservation during an owner/runtime reset. */
   clear(cindySessionId: string): void;
   /** Account boundary cleanup; no old startup may authorize a new owner. */
@@ -58,10 +69,17 @@ export function createDshSessionCwdAdmission(): DshSessionCwdAdmission {
   const pendingBySessionId = new Map<string, PendingCwdAdmission>();
 
   return {
-    reserve(cindySessionId, cwd) {
+    reserve(cindySessionId, cwd, workspaceBookmark) {
       assertSessionId(cindySessionId);
       assertCanonicalCwd(cwd);
-      pendingBySessionId.set(cindySessionId, { cwd });
+      if (
+        workspaceBookmark?.kind !== 'dsh-task-workspace-implicit-bookmark' ||
+        typeof workspaceBookmark.bookmark !== 'string' ||
+        workspaceBookmark.bookmark.length === 0
+      ) {
+        throw new Error('DSH workspace bookmark admission is invalid');
+      }
+      pendingBySessionId.set(cindySessionId, { cwd, workspaceBookmark });
     },
     assertAndConsume(cwd, cindySessionId) {
       assertSessionId(cindySessionId);
@@ -73,6 +91,16 @@ export function createDshSessionCwdAdmission(): DshSessionCwdAdmission {
       if (!pending || pending.cwd !== cwd) {
         throw new Error('DSH bridge cwd is not authorized for this Cindy session');
       }
+    },
+    consumeWorkspaceBookmark({ cwd, cindySessionId }) {
+      assertSessionId(cindySessionId);
+      assertCanonicalCwd(cwd);
+      const pending = pendingBySessionId.get(cindySessionId);
+      pendingBySessionId.delete(cindySessionId);
+      if (!pending || pending.cwd !== cwd) {
+        throw new Error('DSH workspace is not authorized for this Cindy session');
+      }
+      return pending.workspaceBookmark;
     },
     clear(cindySessionId) {
       assertSessionId(cindySessionId);

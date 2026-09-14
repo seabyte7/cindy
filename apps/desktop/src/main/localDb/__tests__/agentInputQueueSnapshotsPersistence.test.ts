@@ -27,7 +27,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function queued(text = 'queued', clientId = `client-${text}`): AgentInputQueuedMessage {
+function queued(
+  text = 'queued',
+  clientId = `client-${text}`,
+  agentKind: 'pi' | 'dsh' = 'pi',
+): AgentInputQueuedMessage {
   return {
     clientId,
     text,
@@ -38,7 +42,7 @@ function queued(text = 'queued', clientId = `client-${text}`): AgentInputQueuedM
     workingDir: '/tmp/cindy-test',
     chatMessage: { clientId, role: 'user' as const, content: text },
     createOpts: {
-      agentKind: 'pi' as const,
+      agentKind,
       model: 'test-model',
       effort: 'medium',
       permissionMode: 'default',
@@ -171,6 +175,10 @@ describe('agent input queue snapshot durability boundary', () => {
       ...queued('waiting', 'client-waiting'),
       hostAcceptedAtMs: 301,
     };
+    const dshWaiting = {
+      ...queued('dsh waiting', 'client-dsh-waiting', 'dsh'),
+      hostAcceptedAtMs: 301,
+    };
     const staleScheduler = {
       ...queued('stale scheduler', 'client-stale-scheduler'),
       hostAcceptedAtMs: 301,
@@ -193,6 +201,7 @@ describe('agent input queue snapshot durability boundary', () => {
         beforeClear,
         missingReceipt,
         waiting,
+        dshWaiting,
         staleScheduler,
         'malformed legacy row',
       ]),
@@ -209,7 +218,7 @@ describe('agent input queue snapshot durability boundary', () => {
     try {
       await expect(
         loadAgentInputQueueSnapshotCounts(['session-crash-window']),
-      ).resolves.toEqual({ 'session-crash-window': 1 });
+      ).resolves.toEqual({ 'session-crash-window': 2 });
       expect(query.mock.calls[0]?.[0]).toContain('NOT EXISTS');
       expect(query.mock.calls[0]?.[0]).toContain('FROM messages');
       expect(query.mock.calls[0]?.[0]).toContain('session.cleared_at');

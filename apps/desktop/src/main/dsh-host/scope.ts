@@ -25,6 +25,12 @@ export interface DshHostScopeInput {
   accountId: string;
   releaseId: string;
   homeMode: DshHomeMode;
+  /**
+   * New tool-capable launches are per Cindy task. Older text bindings omit
+   * this field and retain their historical shared-scope identity for explicit
+   * reconciliation rather than being silently moved to a new DSH Home.
+   */
+  taskScopeId?: string;
 }
 
 export interface DshHostScopePaths {
@@ -152,6 +158,9 @@ export function createDshHostScopeId(input: DshHostScopeInput): {
   assertNoLegacyExistingHomePath(input);
   assertSafeIdentity(input.accountId, 'DSH account identity');
   assertSafeIdentity(input.releaseId, 'DSH release identity');
+  if (input.taskScopeId !== undefined) {
+    assertSafeIdentity(input.taskScopeId, 'DSH task scope identity');
+  }
   if (input.homeMode !== 'cindy-managed' && input.homeMode !== 'existing-dsh-home') {
     throw new Error('DSH home mode is invalid');
   }
@@ -162,6 +171,7 @@ export function createDshHostScopeId(input: DshHostScopeInput): {
       releaseId: input.releaseId,
       executionLocation: 'local',
       homeMode: input.homeMode,
+      taskScopeId: input.taskScopeId ?? null,
     }),
   ).slice(0, 32);
   return { scopeId: `dsh-${scopeId}`, accountScopeId: `account-${accountScopeId}` };
@@ -262,6 +272,12 @@ export function buildDshChildEnvironment(input: {
   /** Omitted for no-credential lifecycle admission; never supplied by Renderer. */
   providerRoute?: DshProviderRoute;
   secrets?: readonly DshChildSecret[];
+  /**
+   * Main-resolved command search path for DSH tools. Runtime startup keeps a
+   * fixed PATH; the source-built tool adapter must consume only this separate
+   * value after stripping provider secrets from a child tool environment.
+   */
+  toolPath?: string;
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     PATH: '/usr/bin:/bin',
@@ -274,6 +290,16 @@ export function buildDshChildEnvironment(input: {
   };
   if (input.paths.homeMode === 'cindy-managed') {
     env.DSH_HOME = input.paths.dshHome;
+  }
+  if (input.toolPath !== undefined) {
+    if (
+      input.toolPath.length === 0 ||
+      input.toolPath.length > 16 * 1024 ||
+      input.toolPath.split(':').some((entry) => !path.isAbsolute(entry) || entry !== path.normalize(entry))
+    ) {
+      throw new Error('DSH tool PATH must contain only canonical absolute directories');
+    }
+    env.CINDY_DSH_TOOL_PATH = input.toolPath;
   }
   const secrets = input.secrets ?? [];
   if (!input.providerRoute) {

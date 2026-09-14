@@ -3,7 +3,7 @@
  * skipped until a local macOS evidence run supplies that exact test App and
  * its owning user's home directory. It never falls back to a PATH runtime.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -41,6 +41,9 @@ import {
 import { startMacosSupervisedDshBridge } from '../macos-supervised-bridge.js';
 import { createLoopbackE2eDshProviderRoute } from '../provider-route.js';
 import { createDshInternalMcpLeaseFactory } from '../internal-mcp-lease.js';
+import { loadMacosDshMainBookmarkBridge, createDshWorkspaceBookmarkHandoff } from '../main-bookmark-bridge.js';
+import { createDshSessionCwdAdmission } from '../session-cwd-admission.js';
+import { createDshTaskBridgeRouter } from '../task-bridge-router.js';
 
 const appPath = process.env.CINDY_DSH_E2E_APP;
 const homePath = process.env.CINDY_DSH_E2E_HOME;
@@ -93,6 +96,16 @@ interface LoopbackProvider {
 interface LoopbackProviderOptions {
   /** Leave only the second completion response open for session/cancel proof. */
   keepSecondResponseOpen?: boolean;
+  /**
+   * Make the first provider completion invoke one real DSH tool.  The second
+   * request is the model's post-tool continuation.  This stays local-only:
+   * callers must provide a harmless command and the fixture never records a
+   * request body or authorization value.
+   */
+  toolCall?: Readonly<{
+    arguments: Readonly<Record<string, unknown>>;
+    finalText: string;
+  }>;
 }
 
 async function createLoopbackProvider(
@@ -147,6 +160,52 @@ async function createLoopbackProvider(
       response.once('close', () => {
         openResponses.delete(response);
       });
+      if (options.toolCall) {
+        if (acceptedRequests === 1) {
+          const argumentsText = JSON.stringify(options.toolCall.arguments);
+          const midpoint = Math.max(1, Math.floor(argumentsText.length / 2));
+          response.end(
+            [
+              `data: ${JSON.stringify({ choices: [{
+                delta: {
+                  tool_calls: [{
+                    index: 0,
+                    id: 'cindy-dsh-supervised-e2e-tool-call',
+                    type: 'function',
+                    function: { name: 'bash', arguments: argumentsText.slice(0, midpoint) },
+                  }],
+                },
+                index: 0,
+                finish_reason: null,
+              }] })}`,
+              `data: ${JSON.stringify({ choices: [{
+                delta: {
+                  tool_calls: [{ index: 0, function: { arguments: argumentsText.slice(midpoint) } }],
+                },
+                index: 0,
+                finish_reason: null,
+              }] })}`,
+              `data: ${JSON.stringify({ choices: [{ delta: {}, index: 0, finish_reason: 'tool_calls' }] })}`,
+              'data: [DONE]',
+              '',
+            ].join('\n\n'),
+          );
+          return;
+        }
+        response.end(
+          [
+            `data: ${JSON.stringify({ choices: [{
+              delta: { role: 'assistant', content: options.toolCall.finalText },
+              index: 0,
+              finish_reason: null,
+            }] })}`,
+            `data: ${JSON.stringify({ choices: [{ delta: {}, index: 0, finish_reason: 'stop' }] })}`,
+            'data: [DONE]',
+            '',
+          ].join('\n\n'),
+        );
+        return;
+      }
       if (options.keepSecondResponseOpen && acceptedRequests === 2) {
         // This exact response is completed only by the runtime's public
         // session/cancel path (or the fixture teardown), never by a timeout.
@@ -323,7 +382,7 @@ async function createInternalMcpFixture(): Promise<InternalMcpFixture> {
   };
 }
 
-function createPromptPersistence(cindySessionId: string): {
+function createPromptPersistence(cindySessionId: string, options: { seedParent?: boolean } = {}): {
   rawDb: Database.Database;
   activitySnapshotStore: ReturnType<typeof createDshActivitySnapshotStore>;
   bindingStore: ReturnType<typeof createDshSessionBindingStore>;
@@ -383,7 +442,9 @@ function createPromptPersistence(cindySessionId: string): {
     CREATE INDEX idx_dsh_prompt_receipts_session_state_created
       ON dsh_prompt_receipts (cindy_session_id, state, created_at);
   `);
-  rawDb.prepare('INSERT INTO sessions (id) VALUES (?)').run(cindySessionId);
+  if (options.seedParent !== false) {
+    rawDb.prepare('INSERT INTO sessions (id) VALUES (?)').run(cindySessionId);
+  }
   const client = {
     drizzle: drizzle(rawDb, { schema }),
     tx: async (name: string, args: unknown) => runDbTx(rawDb, { name, args }),
@@ -398,10 +459,10 @@ function createPromptPersistence(cindySessionId: string): {
 }
 
 /**
- * Product-Maker E2E uses the same ordering as Desktop: the DSH bridge creates
- * its durable binding before Maker writes its normal session metadata. The
- * binding fixture above therefore pre-creates only the foreign-key parent;
- * this storage is deliberately memory-only and contains no native identity.
+ * Most direct bridge fixtures pre-create only the foreign-key parent. Product
+ * Maker evidence can opt out and exercise the production reservation ordering
+ * instead; this storage is deliberately memory-only and contains no native
+ * identity.
  */
 function createMakerSessionStorage(): SessionStorage {
   const rows = new Map<string, SessionMeta>();
@@ -452,6 +513,57 @@ function dshAgentDeps(binaryPath: string): AgentDeps {
 }
 
 describeRuntime('packaged macOS supervised DSH host integration', () => {
+  it('routes an actual Main-issued workspace bookmark through admission and fd 4 on create and resume', async () => {
+    const evidence = runtimeEvidence!;
+    const resourcesPath = join(evidence.appPath, 'Contents', 'Resources');
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'cindy-dsh-external-workspace-')));
+    const cindySessionId = `workspace-e2e-${process.pid}-${Date.now()}`;
+    const scopeInput = {
+      accountId: cindySessionId, releaseId: evidence.releaseId,
+      homeMode: 'cindy-managed' as const, taskScopeId: cindySessionId,
+    };
+    const layout = resolveMacosSupervisedDshRuntime({ resourcesPath, homePath: evidence.homePath });
+    const managedScopeRoot = join(layout.helperContainerDataPath, 'dsh-agent-home', createDshHostScopeId(scopeInput).scopeId);
+    const persistence = createPromptPersistence(cindySessionId);
+    const native = loadMacosDshMainBookmarkBridge({ resourcesPath });
+    const admission = createDshSessionCwdAdmission();
+    const router = createDshTaskBridgeRouter({
+      claimWorkspaceBookmark: admission.consumeWorkspaceBookmark,
+      startTaskBridge: async ({ cindySessionId: requestedTask, cwd: requestedCwd, workspaceBookmark }) => {
+        expect({ cindySessionId: requestedTask, cwd: requestedCwd }).toEqual({ cindySessionId, cwd });
+        return await startMacosSupervisedDshBridge({
+          resourcesPath, homePath: evidence.homePath,
+          logger: createConsoleLogger('dsh-workspace-router-e2e'),
+          loadSecrets: () => [],
+          assertAuthorizedCwd: (actualCwd, actualTask) => {
+            expect({ cwd: actualCwd, cindySessionId: actualTask }).toEqual({ cwd, cindySessionId });
+          },
+          bindingStore: persistence.bindingStore,
+          promptReceiptStore: persistence.promptReceiptStore,
+          projectionJournal: persistence.projectionJournal,
+          workspaceBookmark,
+        }, scopeInput);
+      },
+    });
+    try {
+      for (const operation of ['create', 'resumeForAdapter'] as const) {
+        // Only a newly created fixture directory is granted; no picker, real
+        // project, user credential or production endpoint participates here.
+        const persistentBookmark = native.createPersistentBookmarkForPath!(cwd);
+        admission.reserve(cindySessionId, cwd, createDshWorkspaceBookmarkHandoff({ persistentBookmark, bridge: native }));
+        const receipt = await router[operation]({ cindySessionId, cwd });
+        expect(receipt.operation).toBe(operation === 'create' ? 'create' : 'resume');
+        expect(() => admission.consumeWorkspaceBookmark({ cindySessionId, cwd })).toThrow('not authorized');
+        await router.close(receipt);
+      }
+    } finally {
+      await router.closeAll('workspace handoff fixture complete');
+      persistence.rawDb.close();
+      rmSync(cwd, { recursive: true, force: true });
+      if (existsSync(managedScopeRoot)) rmSync(managedScopeRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('starts and tears down ACP through the fixed Helper.app while keeping all scope state in its sandbox container', async () => {
     const evidence = runtimeEvidence!;
     const resourcesPath = join(evidence.appPath, 'Contents', 'Resources');
@@ -820,6 +932,139 @@ describeRuntime('packaged macOS supervised DSH host integration', () => {
 });
 
 describePromptRuntime('packaged macOS supervised DSH prompt integration', () => {
+  it('executes a signed Helper bash tool after one Main-owned approval without leaking provider credentials', async () => {
+    const evidence = runtimeEvidence!;
+    const resourcesPath = join(evidence.appPath, 'Contents', 'Resources');
+    const accountId = `supervised-tool-e2e-${process.pid}-${Date.now()}`;
+    const cindySessionId = `supervised-tool-cindy-${process.pid}-${Date.now()}`;
+    const input = { accountId, releaseId: evidence.releaseId, homeMode: 'cindy-managed' as const };
+    const scope = createDshHostScopeId(input);
+    const layout = resolveMacosSupervisedDshRuntime({ resourcesPath, homePath: evidence.homePath });
+    // This is a test-only workspace inside the Helper's own container.  A
+    // user workspace additionally requires the production Main picker/bookmark
+    // handoff; this test must not manufacture a user bookmark or touch a
+    // project directory merely to prove a sealed native tool can execute.
+    const workspace = mkdtempSync(join(layout.helperContainerDataPath, 'dsh-tool-e2e-workspace-'));
+    const managedScopeRoot = join(layout.helperContainerDataPath, 'dsh-agent-home', scope.scopeId);
+    const persistence = createPromptPersistence(cindySessionId);
+    let provider: LoopbackProvider | null = null;
+    let bridgeHost: Awaited<ReturnType<typeof startMacosSupervisedDshBridge>> | null = null;
+
+    try {
+      provider = await createLoopbackProvider({
+        toolCall: {
+          // The `test` builtins verify the upstream source adaptation removed
+          // Main-only provider variables before invoking bash.  The command
+          // prints only the test workspace and makes no filesystem mutation.
+          arguments: {
+            command: 'printf %s "$PWD"; test -z "${CINDY_DSH_PROVIDER_API_KEY:-}"; test -z "${CINDY_DSH_PROVIDER_BASE_URL:-}"',
+            description: 'Print the sealed test workspace',
+            run_in_background: false,
+            // The normal profile starts at workspace-write.  Requesting this
+            // wider mode forces the real ACP/Main one-shot approval path, but
+            // the command itself remains read-only and confined to this test.
+            sandbox_permissions: 'danger-full-access',
+            justification: 'Verify one signed read-only DSH tool execution.',
+          },
+          finalText: 'CINDY_DSH_SUPERVISED_E2E_TOOL_COMPLETE',
+        },
+      });
+      bridgeHost = await startMacosSupervisedDshBridge(
+        {
+          resourcesPath,
+          homePath: evidence.homePath,
+          logger: createConsoleLogger('dsh-macos-supervised-tool-e2e'),
+          providerRoute: createLoopbackE2eDshProviderRoute(provider.baseUrl),
+          loadSecrets: () => [
+            { name: 'CINDY_DSH_PROVIDER_API_KEY', value: LOOPBACK_PROVIDER_API_KEY },
+          ],
+          assertAuthorizedCwd: (cwd) => {
+            if (cwd !== workspace) throw new Error(`unexpected supervised tool E2E workdir: ${cwd}`);
+          },
+          bindingStore: persistence.bindingStore,
+          activitySnapshotStore: persistence.activitySnapshotStore,
+          promptReceiptStore: persistence.promptReceiptStore,
+          projectionJournal: persistence.projectionJournal,
+          toolPath: '/usr/bin:/bin',
+        },
+        input,
+      );
+      const agent = new DshAgent(dshAgentDeps(bridgeHost.binaryPath), {
+        bridge: bridgeHost.bridge,
+        scopeId: bridgeHost.scopeId,
+        admission: bridgeHost.adapterAdmission,
+        onDispose: () => bridgeHost!.close('macOS supervised tool E2E complete'),
+      });
+      const maker = new Maker({
+        agents: { dsh: agent },
+        storage: createMakerSessionStorage(),
+        logger: createConsoleLogger('dsh-macos-supervised-tool-maker-e2e'),
+      });
+      const session = await maker.createSession({
+        id: cindySessionId,
+        agentKind: 'dsh',
+        workingDir: workspace,
+        model: 'cindy-dsh-managed',
+        permissionMode: 'auto',
+      });
+      const interactions: unknown[] = [];
+      session.setInteractionListener(async (request) => {
+        interactions.push(request);
+        return { kind: 'permission' as const, behavior: 'allow' as const };
+      });
+      const events: unknown[] = [];
+      session.onEvent((event) => events.push(event));
+
+      await expect(session.send('run the signed tool fixture')).resolves.toMatchObject({ accepted: true });
+      await vi.waitFor(
+        () =>
+          expect(events).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: 'tool_use',
+                data: expect.objectContaining({ toolName: 'bash' }),
+                source: 'dsh',
+              }),
+              expect.objectContaining({
+                type: 'tool_result_full',
+                data: expect.objectContaining({ fullText: expect.stringContaining(workspace), isError: false }),
+                source: 'dsh',
+              }),
+              expect.objectContaining({
+                type: 'text',
+                data: expect.objectContaining({ text: 'CINDY_DSH_SUPERVISED_E2E_TOOL_COMPLETE' }),
+                source: 'dsh',
+              }),
+              expect.objectContaining({ type: 'done', data: { stopReason: 'end_turn' } }),
+            ]),
+          ),
+        { timeout: 15_000 },
+      );
+      expect(interactions).toEqual([
+        expect.objectContaining({
+          kind: 'permission',
+          requestId: expect.stringMatching(/^dsh:permission:/),
+          toolUseId: expect.stringMatching(/^dsh:tool:/),
+          toolName: 'bash',
+          metadata: { dsh: { approvalScope: 'once', toolKind: 'other' } },
+        }),
+      ]);
+      expect(provider.acceptedRequestCount()).toBe(2);
+      expect(provider.diagnosticCounts()).toMatchObject({ unexpected: 0, unauthorized: 0, malformed: 0 });
+      expect(JSON.stringify(events)).not.toContain(LOOPBACK_PROVIDER_API_KEY);
+      expect(JSON.stringify(events)).not.toContain('cindy-dsh-supervised-e2e-tool-call');
+
+      await maker.closeSession(cindySessionId);
+      await maker.shutdown({ reason: 'app-quit' });
+    } finally {
+      await bridgeHost?.close('macOS supervised tool E2E cleanup');
+      await provider?.close();
+      persistence.rawDb.close();
+      rmSync(workspace, { recursive: true, force: true });
+      if (existsSync(managedScopeRoot)) rmSync(managedScopeRoot, { recursive: true, force: true });
+    }
+  }, 50_000);
+
   it('continues the same Maker task through a fresh supervised bridge without exposing its native session id', async () => {
     const evidence = runtimeEvidence!;
     const resourcesPath = join(evidence.appPath, 'Contents', 'Resources');
@@ -997,7 +1242,7 @@ describePromptRuntime('packaged macOS supervised DSH prompt integration', () => 
     const layout = resolveMacosSupervisedDshRuntime({ resourcesPath, homePath: evidence.homePath });
     const managedScopeRoot = join(layout.helperContainerDataPath, 'dsh-agent-home', scope.scopeId);
     const workspace = mkdtempSync(join(tmpdir(), 'cindy-dsh-supervised-maker-workspace-'));
-    const persistence = createPromptPersistence(cindySessionId);
+    const persistence = createPromptPersistence(cindySessionId, { seedParent: false });
     let provider: LoopbackProvider | null = null;
     let bridgeHost: Awaited<ReturnType<typeof startMacosSupervisedDshBridge>> | null = null;
 
@@ -1034,6 +1279,31 @@ describePromptRuntime('packaged macOS supervised DSH prompt integration', () => 
         agents: {},
         storage: createMakerSessionStorage(),
         logger: createConsoleLogger('dsh-macos-supervised-maker-e2e'),
+        lifecycleHooks: {
+          reserveSessionMetadata: async (meta) => {
+            if (meta.agentKind !== 'dsh') return null;
+            expect(persistence.rawDb.prepare('SELECT id FROM sessions WHERE id = ?').get(meta.id)).toBeUndefined();
+            persistence.rawDb.prepare('INSERT INTO sessions (id) VALUES (?)').run(meta.id);
+            let settled = false;
+            return {
+              commit: async (sdkSessionId) => {
+                if (settled) throw new Error('fixture reservation settled twice');
+                settled = true;
+                return {
+                  ...meta,
+                  ...(sdkSessionId === undefined ? {} : { sdkSessionId }),
+                  createdAt: 1,
+                  updatedAt: 1,
+                };
+              },
+              rollback: async () => {
+                if (settled) return;
+                persistence.rawDb.prepare('DELETE FROM sessions WHERE id = ?').run(meta.id);
+                settled = true;
+              },
+            };
+          },
+        },
       });
       expect(maker.registerAgent('dsh', agent)).toBe(true);
       expect(maker.listAvailableAgents()).toContain('dsh');

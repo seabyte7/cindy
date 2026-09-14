@@ -1512,11 +1512,35 @@
           "label": "DeepSeek Harness",
           "description": "Optional. Configure one dedicated HTTPS endpoint and API key for DeepSeek Harness. It never reuses credentials from the other runtimes.",
           "endpoint": "DSH endpoint",
-          "endpointPlaceholder": "https://adapter.example.com/v1",
+          "endpointPlaceholder": "https://api.deepseek.com",
           "apiKey": "DSH API key",
           "apiKeyPlaceholder": "DSH API key",
           "apiKeyHelp": "For an unchanged endpoint, leave this blank to retain its locally stored key. Changing the endpoint requires a new key.",
-          "authRequired": "DeepSeek Harness requires API key authentication."
+          "authRequired": "DeepSeek Harness requires API key authentication.",
+          "runtimeStatus": {
+            "title": "Runtime status",
+            "retry": "Retry",
+            "loading": "Reading the local DSH status…",
+            "unavailable": "The local DSH status is unavailable. Try again.",
+            "configuration": {
+              "ready": "Configured source: {{provider}}.",
+              "not-configured": "No DeepSeek Harness source is configured.",
+              "multiple-configured": "More than one DeepSeek Harness source is configured. Select one source before use.",
+              "auth-not-api-key": "The selected source must use API-key authentication.",
+              "invalid-runtime-shape": "The DeepSeek Harness settings contain unsupported runtime fields.",
+              "invalid-route": "The DeepSeek Harness endpoint is invalid.",
+              "missing-api-key": "The DeepSeek Harness API key is missing.",
+              "unavailable": "The DeepSeek Harness configuration is unavailable."
+            },
+            "registration": {
+              "not-registered": "The DSH task factory is not ready.",
+              "registering": "Preparing the local DSH task factory…",
+              "task-factory-ready": "Ready to create a local DSH task.",
+              "reconfiguration-pending": "The DSH configuration changed and is waiting for affected tasks to close."
+            },
+            "closeTasks": "Close {{count}} active DSH task before the new configuration can take effect.",
+            "evidence": "Model connection, commands, file tools, attachments, and approvals still require verification in the final signed app."
+          }
         },
         "wireProtocol": {
           "responses": "OpenAI Responses (native)",
@@ -6819,8 +6843,7 @@
   "newChat": {
     "dsh": {
       "managedRuntime": "Managed DSH runtime",
-      "managedRuntimeDetails": "Runs locally in a managed DSH runtime. Text only; after a restart, only this same task may continue when its verified local binding is available.",
-      "textOnlyInput": "DSH currently supports text-only input."
+      "managedRuntimeDetails": "Runs locally in a managed DSH runtime. Files and images are copied into this task's restricted attachment area, and every tool run needs a separate approval. After a restart, only this same task may continue when its verified local binding is available."
     },
     "noProvider": {
       "title": "No connected source for this model",

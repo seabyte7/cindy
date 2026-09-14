@@ -121,6 +121,11 @@ function providerHasModels(provider: ProviderView): boolean {
   );
 }
 
+/** DSH is a runtime profile, not a model catalog; its provider must still be manageable. */
+function providerHasDshRuntime(provider: ProviderView): boolean {
+  return provider.agents.includes('dsh');
+}
+
 /**
  * 写供应商级停用 override(model-disable-store)。成功后由 main 广播
  * PROVIDER_CHANGED 驱动快照刷新,这里不 refetch;失败走统一错误提示。
@@ -2003,6 +2008,7 @@ export function ProvidersSection() {
         (p.id === MANAGED_OLLAMA_PROVIDER_ID ||
           p.id === MANAGED_LMSTUDIO_PROVIDER_ID ||
           providerHasModels(p) ||
+          providerHasDshRuntime(p) ||
           (p.auth.method === 'oauth' && !!p.auth.oauth))
       ) {
         rows.push(p);

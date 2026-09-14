@@ -694,6 +694,45 @@ export function NewMakerDraftRoute() {
   const vendorAuthGate = useVendorAuthGate();
   const refreshWorktreeForSession = useRefreshWorktreeForSession();
 
+  /**
+   * DSH has no renderer-owned provider or generic local-db creation path.
+   *
+   * `local-db:sessions:create` deliberately rejects DSH because it cannot
+   * prove that Main admitted the packaged Helper and its per-task workspace
+   * grant. Create through the narrow Main-owned Maker endpoint instead, then
+   * hydrate the durable row it created. Keep the opaque model marker and the
+   * no-provider invariant here as well as in Main's IPC validation.
+   */
+  const createManagedDshSession = useCallback(
+    async ({
+      id,
+      workingDir,
+      workspaceKind,
+    }: {
+      id: string;
+      workingDir?: string;
+      workspaceKind: 'project' | 'dialogue';
+    }) => {
+      const created = await window.electronAPI.maker.createSession({
+        id,
+        agentKind: 'dsh',
+        model: DSH_MANAGED_RUNTIME_MODEL_ID,
+        effort: 'medium',
+        permissionMode: 'auto',
+        fastMode: false,
+        planMode: false,
+        // The Main handler turns an empty dialogue cwd into its private,
+        // task-scoped directory before the DSH lifecycle starts.
+        workingDir: workingDir ?? '',
+        workspaceKind,
+      });
+      const session = await sessionService.get(created.sessionId);
+      sessionsStore.prependCreated(session);
+      return session;
+    },
+    [],
+  );
+
   /** createSession 失败 toast:远端路由错误按 code 给可操作文案,其余回退通用文案。 */
   const toastCreateSessionFailed = (err?: unknown) => {
     const code =
@@ -1063,21 +1102,7 @@ export function NewMakerDraftRoute() {
    * 免得又出现「只堵了一半」。
    */
   const guardedAttachmentState = useMemo(() => {
-    if (!isDeviceLinkDraft && !isDshDraft) return attachmentState;
-    if (isDshDraft) {
-      return {
-        ...attachmentState,
-        addFiles: async () => {
-          toast.warning(t('newChat.dsh.textOnlyInput'));
-        },
-        addClipboardImage: async () => {
-          toast.warning(t('newChat.dsh.textOnlyInput'));
-        },
-        addFolderPath: () => {
-          toast.warning(t('newChat.dsh.textOnlyInput'));
-        },
-      };
-    }
+    if (!isDeviceLinkDraft) return attachmentState;
     return {
       ...attachmentState,
       addFiles: async (fileList: FileList | readonly File[]) => {
@@ -1113,7 +1138,7 @@ export function NewMakerDraftRoute() {
         if (passed.length > 0) await attachmentState.addFiles(passed);
       },
     };
-  }, [isDeviceLinkDraft, isDshDraft, attachmentState, t]);
+  }, [isDeviceLinkDraft, attachmentState, t]);
   /**
    * 「远程草稿绝不携带控制端路径附件」的**收敛器** —— 兜住所有按路径逐个堵会漏掉的入口。
    *
@@ -3539,6 +3564,7 @@ export function NewMakerDraftRoute() {
       // 确认不合格(2026-08-07 裁决)时控件隐藏、勾选不生效，偏好写入在途不应
       // 卡住普通会话创建——确认不合格目录永远不会创建 worktree。
       if (
+        !isDshDraft &&
         selectedWorktree.confirmedIneligible !== true &&
         (wtPreferenceSavingRef.current ||
           wtPreferenceAuthorityUnknownRef.current ||
@@ -3551,6 +3577,7 @@ export function NewMakerDraftRoute() {
       // 按普通会话创建(2026-08-07 裁决)。confirmedIneligible === null(探测中/失败)
       // 仍走 fail-closed —— 探测不出来不等于确认不是 git。
       if (
+        !isDshDraft &&
         selectedWorkingDir
         && !isRemoteProjectDraft
         && selectedWorktree.enabled
@@ -3956,7 +3983,7 @@ export function NewMakerDraftRoute() {
           const wt = selectedWorktree;
           // 生效条件 = 勾选 && baseRepo 已就绪。上面的发送门已阻止不完整状态；
           // 这里保留完整条件作创建副作用前的防御，且始终不改写勾选记忆。
-          if (!isRemoteProjectDraft && wt.enabled && wt.baseRepo) {
+          if (!isDshDraft && !isRemoteProjectDraft && wt.enabled && wt.baseRepo) {
             const baseRepo = wt.baseRepo;
 
             let name = wt.name.trim();
@@ -3988,14 +4015,13 @@ export function NewMakerDraftRoute() {
               return;
             }
             // 草稿里选中的那条收藏跟着会话走(见 carryDraftFavoriteAnchorToSession)。
-            if (persistedAgentKind !== 'dsh') {
-              carryDraftFavoriteAnchorToSession(
-                newSession.id,
-                persistedAgentKind,
-                model,
-                providerId,
-              );
-            }
+            // 此 worktree 分支已由 !isDshDraft 排除 DSH。
+            carryDraftFavoriteAnchorToSession(
+              newSession.id,
+              persistedAgentKind,
+              model,
+              providerId,
+            );
             // 计划模式是一次性选择:随本次发送被消耗,草稿勾选同步熄灭,
             // 下一次 New Maker 不延续。
             if (effectivePlanMode) patchActivePrefs({ planMode: false });
@@ -4230,24 +4256,30 @@ export function NewMakerDraftRoute() {
             return;
           }
 
-          const newSession = await createSession({
-            id: sessionId,
-            agentKind: persistedAgentKind,
-            model,
-            effort,
-            permissionMode,
-            fastMode: effectiveFastMode,
-            planModeEnabled: effectivePlanMode,
-            workingDir: workingDir ?? undefined,
-            // 没选项目目录 = 创建 standalone dialogue;main 端会按 workspaceKind='dialogue'
-            // 自动分配 <userData>/dialogues/<date>/<sid>/ 作为运行目录,不进入项目段。
-            workspaceKind: workingDir ? 'project' : 'dialogue',
-            remoteHostId: workingDir ? (effectiveRemoteHostId ?? undefined) : undefined,
-            // extraDirs 是 vendor 无关字段；Claude 与 Codex 都按只读引用目录透传。
-            extraDirs: effectiveExtraDirs,
-            writableDirs: effectiveWritableDirs,
-            providerId,
-          });
+          const newSession = isDshDraft
+            ? await createManagedDshSession({
+                id: sessionId,
+                workingDir,
+                workspaceKind: workingDir ? 'project' : 'dialogue',
+              })
+            : await createSession({
+                id: sessionId,
+                agentKind: persistedAgentKind,
+                model,
+                effort,
+                permissionMode,
+                fastMode: effectiveFastMode,
+                planModeEnabled: effectivePlanMode,
+                workingDir: workingDir ?? undefined,
+                // 没选项目目录 = 创建 standalone dialogue;main 端会按 workspaceKind='dialogue'
+                // 自动分配 <userData>/dialogues/<date>/<sid>/ 作为运行目录,不进入项目段。
+                workspaceKind: workingDir ? 'project' : 'dialogue',
+                remoteHostId: workingDir ? (effectiveRemoteHostId ?? undefined) : undefined,
+                // extraDirs 是 vendor 无关字段；Claude 与 Codex 都按只读引用目录透传。
+                extraDirs: effectiveExtraDirs,
+                writableDirs: effectiveWritableDirs,
+                providerId,
+              });
           if (!newSession) {
             if (optimisticTitleSessionId) emitAutoTitlePreviewCleared(optimisticTitleSessionId);
             toastCreateSessionFailed();
@@ -4533,6 +4565,7 @@ export function NewMakerDraftRoute() {
       localProvidersLoading,
       vendorAuthGate,
       createSession,
+      createManagedDshSession,
       carryDraftFavoriteAnchorToSession,
       navigate,
       crossAgentDialog.runMigrationFlow,
@@ -5388,7 +5421,7 @@ export function NewMakerDraftRoute() {
                   onSuggestedNameChange={handleWtNameChange}
                   // SSH 远程仍禁用 worktree(远端 git 探测未落地);device-link 远程可用:
                   // 探测/建议名/创建全部经隧道在被控端执行(与 488cb33 前口径一致)。
-                  worktreeDisabled={isRemoteProjectDraft}
+                  worktreeDisabled={isRemoteProjectDraft || isDshDraft}
                   deviceLinkDeviceId={effectiveDeviceLinkDeviceId ?? null}
                   deviceLinkReconnectEpoch={remoteDraftRefreshEpoch}
                   disabled={wtCreating || sendInFlight}

@@ -1512,11 +1512,35 @@
           "label": "DeepSeek Harness",
           "description": "選用。為 DeepSeek Harness 設定一個獨立的 HTTPS 端點和 API 金鑰；絕不會重複使用其他 runtime 的憑證。",
           "endpoint": "DSH 端點",
-          "endpointPlaceholder": "https://adapter.example.com/v1",
+          "endpointPlaceholder": "https://api.deepseek.com",
           "apiKey": "DSH API 金鑰",
           "apiKeyPlaceholder": "DSH API 金鑰",
           "apiKeyHelp": "端點未變時可留白並保留本機已儲存的金鑰；變更端點必須重新輸入金鑰。",
-          "authRequired": "DeepSeek Harness 需要 API 金鑰驗證。"
+          "authRequired": "DeepSeek Harness 需要 API 金鑰驗證。",
+          "runtimeStatus": {
+            "title": "執行環境狀態",
+            "retry": "重試",
+            "loading": "正在讀取本機 DSH 狀態…",
+            "unavailable": "本機 DSH 狀態暫時無法使用，請重試。",
+            "configuration": {
+              "ready": "已設定來源：{{provider}}。",
+              "not-configured": "尚未設定 DeepSeek Harness 來源。",
+              "multiple-configured": "已設定多個 DeepSeek Harness 來源，請先選擇一個來源。",
+              "auth-not-api-key": "所選來源必須使用 API 金鑰驗證。",
+              "invalid-runtime-shape": "DeepSeek Harness 設定含有不支援的執行環境欄位。",
+              "invalid-route": "DeepSeek Harness 端點無效。",
+              "missing-api-key": "缺少 DeepSeek Harness API 金鑰。",
+              "unavailable": "DeepSeek Harness 設定暫時無法使用。"
+            },
+            "registration": {
+              "not-registered": "DSH 任務工廠尚未就緒。",
+              "registering": "正在準備本機 DSH 任務工廠…",
+              "task-factory-ready": "可以建立本機 DSH 任務。",
+              "reconfiguration-pending": "DSH 設定已變更，正在等待受影響的任務關閉。"
+            },
+            "closeTasks": "請先關閉 {{count}} 個作用中的 DSH 任務，新設定才能生效。",
+            "evidence": "模型連線、命令、檔案工具、附件與核准仍須在最終簽名 App 中驗證。"
+          }
         },
         "wireProtocol": {
           "responses": "OpenAI Responses（原生）",
@@ -6803,8 +6827,7 @@
   "newChat": {
     "dsh": {
       "managedRuntime": "受管 DSH 執行環境",
-      "managedRuntimeDetails": "在本機受管 DSH 執行環境中執行。僅支援文字；重新啟動後，只有已驗證的本機繫結可用時，才能繼續同一個任務。",
-      "textOnlyInput": "DSH 目前僅支援文字輸入。"
+      "managedRuntimeDetails": "在本機受管 DSH 執行環境中執行。檔案與圖片會複製到目前任務的受限附件區，每次工具執行都需個別確認；重新啟動後，只有已驗證的本機繫結可用時，才能繼續同一個任務。"
     },
     "noProvider": {
       "title": "當前模型沒有可用來源",

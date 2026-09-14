@@ -34,6 +34,7 @@ export interface DshAcpInitializeResult {
   agentInfo: { name: string; version: string };
   agentCapabilities: {
     sessionCapabilities?: Partial<Record<'close' | 'list' | 'resume', object>>;
+    promptCapabilities?: Partial<Record<'image' | 'audio' | 'embeddedContext', boolean>>;
     [key: string]: unknown;
   };
   [key: string]: unknown;

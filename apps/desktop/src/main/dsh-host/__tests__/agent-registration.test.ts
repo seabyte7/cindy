@@ -24,6 +24,7 @@ function createDeps(input: {
   readonly providers?: readonly CustomProviderConfig[];
   readonly registerResult?: boolean;
   readonly onBridgeStart?: () => void;
+  readonly bridgeReadsSecretsDuringRegistration?: boolean;
 } = {}): {
   deps: DshAgentRegistrationDeps<{ dispose(): Promise<void> }>;
   bridgeClose: ReturnType<typeof vi.fn>;
@@ -36,10 +37,9 @@ function createDeps(input: {
   const bridgeClose = vi.fn(async (_reason: string) => undefined);
   const agentDispose = vi.fn(async () => bridgeClose('DSH agent discarded'));
   const startBridge = vi.fn(async (start: Parameters<DshAgentRegistrationDeps<{ dispose(): Promise<void> }>['startBridge']>[0]) => {
-    // The production bridge reads the wrapped loader while composing the
-    // supervised child environment. A fake that does not do this is not a
-    // valid registration test double.
-    start.configuration.loadSecrets();
+    if (input.bridgeReadsSecretsDuringRegistration !== false) {
+      start.configuration.loadSecrets();
+    }
     input.onBridgeStart?.();
     return { close: bridgeClose };
   });
@@ -75,6 +75,16 @@ describe('registerDshAgentForCurrentOwner', () => {
     }));
     expect(registerAgent).toHaveBeenCalledTimes(1);
     expect(bridgeClose).not.toHaveBeenCalled();
+  });
+
+  it('admits a lazy per-task bridge without requiring a child launch during registration', async () => {
+    const { deps, startBridge, registerAgent } = createDeps({
+      bridgeReadsSecretsDuringRegistration: false,
+    });
+
+    await expect(registerDshAgentForCurrentOwner(deps)).resolves.toEqual({ status: 'registered' });
+    expect(startBridge).toHaveBeenCalledTimes(1);
+    expect(registerAgent).toHaveBeenCalledTimes(1);
   });
 
   it('closes a just-started bridge when the account boundary changes', async () => {

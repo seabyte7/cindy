@@ -96,6 +96,52 @@ describe('DSH ACP stdio launch boundary', () => {
     await expect(transport.close('implicit bookmark descriptor test')).resolves.toBeUndefined();
   }, 5_000);
 
+  it.runIf(process.platform !== 'win32')('uses a private fd 4 socket for the workspace while an unused fd 3 is a character device', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cindy-dsh-stdio-workspace-bookmark-test-'));
+    temporaryRoots.push(root);
+    const descriptorReader = join(root, 'workspace-descriptor-reader');
+    const bookmark = Buffer.from('workspace-bookmark-fixture', 'utf8').toString('base64');
+    writeFileSync(descriptorReader, [
+      `#!${process.execPath}`,
+      "'use strict';",
+      "const fs = require('node:fs');",
+      "const descriptor3 = fs.fstatSync(3);",
+      "const chunks = [];",
+      "fs.createReadStream(null, { fd: 4, autoClose: true })",
+      "  .on('data', (chunk) => chunks.push(chunk))",
+      "  .on('end', () => {",
+      "    const frame = Buffer.concat(chunks);",
+      "    const length = frame.length >= 6 ? frame.readUInt32BE(2) : -1;",
+      "    const payload = frame.subarray(6).toString('ascii');",
+      "    const descriptor3IsCharacterDevice = (descriptor3.mode & fs.constants.S_IFMT) === fs.constants.S_IFCHR;",
+      "    process.stdout.write(JSON.stringify({ version: frame[0], purpose: frame[1], length, payload, frameBytes: frame.length, descriptor3IsCharacterDevice }) + '\\n');",
+      "  });",
+      "process.stdin.resume();",
+      '',
+    ].join('\n'), { mode: 0o700 });
+    chmodSync(descriptorReader, 0o700);
+
+    const transport = createDshAcpStdioTransport({
+      binaryPath: descriptorReader,
+      launcherCwd: root,
+      env: { DSH_HOME: root, PATH: process.env.PATH },
+      workspaceBookmark: { kind: 'dsh-task-workspace-implicit-bookmark', bookmark },
+      forceKillGraceMs: 10,
+    });
+    const lines: string[] = [];
+    transport.onLine((line) => lines.push(line));
+    await vi.waitFor(() => expect(lines).toHaveLength(1), { timeout: 4_000 });
+    expect(JSON.parse(lines[0]!)).toEqual({
+      version: 1,
+      purpose: 1,
+      length: Buffer.byteLength(bookmark, 'ascii'),
+      payload: bookmark,
+      frameBytes: 6 + Buffer.byteLength(bookmark, 'ascii'),
+      descriptor3IsCharacterDevice: true,
+    });
+    await expect(transport.close('workspace bookmark descriptor test')).resolves.toBeUndefined();
+  }, 5_000);
+
   it.runIf(process.platform === 'win32')('refuses Windows launch until identity-bound process-tree containment exists', () => {
     expect(() => createDshAcpStdioTransport(valid)).toThrow('identity-bound process-tree containment');
   });
@@ -271,7 +317,11 @@ describe('DSH ACP stdio launch boundary', () => {
     });
     const lines: string[] = [];
     transport.onLine((line) => lines.push(line));
-    await vi.waitFor(() => expect(lines).toEqual(['ready']));
+    // The fixture intentionally starts two CPU-bound shell loops. Its first
+    // stdout callback is not a one-second contract when Desktop unit runs
+    // eight workers in parallel; keep the observation inside this test's
+    // explicit five-second budget.
+    await vi.waitFor(() => expect(lines).toEqual(['ready']), { timeout: 4_000 });
     const descendantFile = join(root, 'descendant.pid');
     await vi.waitFor(() => expect(existsSync(descendantFile)).toBe(true));
     const descendantPid = Number.parseInt(readFileSync(descendantFile, 'utf8'), 10);

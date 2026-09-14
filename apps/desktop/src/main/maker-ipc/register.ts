@@ -90,6 +90,7 @@ import {
   type AgentInputSessionReferenceContext,
 } from '../../shared/agentInputQueue.js';
 import { getManagedWorktreeBasePath } from '../../shared/managedWorktreePaths.js';
+import { isManagedDshRuntimeRoute } from '../../shared/dshSession.js';
 import { normalizeWorkingDirForProjectSettings } from '../../shared/workingDir.js';
 import { buildTurnUsageDetails } from '../../shared/turnUsageDetails.js';
 import type { DesktopCommandContext } from '../commands/index.js';
@@ -387,10 +388,12 @@ import {
   finalizeCodexAfterAuthModeChange,
   getMaker,
   getDshRuntimeConfigurationControl,
+  getDshRuntimeStatusForCurrentOwner,
   getMakerIfReady,
   getPluginRegistry,
   prepareCodexForAuthModeChange,
   registerDshAgentIfAvailable,
+  retryDshRuntimeRegistration,
   restartCodexAfterAuthModeChange,
   setBeforeLocalCodexSessionStartHook,
 } from '../maker-host/index.js';
@@ -641,6 +644,7 @@ import { runAcceptedCallback } from './acceptedCallbackRunner.js';
 import { createElectronIpcHandlerRegistry } from './electronIpcRegistry.js';
 import { registerDshActivityHandlers } from './dshActivityHandlers.js';
 import { registerDshRuntimeConfigurationHandlers } from './dsh-runtime-configuration-ipc.js';
+import { registerDshRuntimeStatusHandlers } from './dsh-runtime-status-ipc.js';
 import { refreshCodexMcpEnvironment } from './codexMcpRefresh.js';
 import { broadcastSchedulerChanged } from './schedule.js';
 import {
@@ -4009,7 +4013,12 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       // 每条本地 Session.send 都经过这一个 Main-owned 边界，包括 renderer、IM、
       // Goal、Learn、Hook 与 Scheduler。付费权限不能只挂在普通 IPC 发送事务上。
       const model = session.model;
-      if (model) {
+      // DSH's fixed value is an internal runtime marker, not a provider
+      // catalog model. Its exact route and credential are revalidated by the
+      // Main-owned DSH control plane immediately before every native prompt.
+      // Applying the generic model catalog guard here would reject every DSH
+      // turn before that control plane can run.
+      if (model && !isManagedDshRuntimeRoute(session.agentKind, model)) {
         const verdict = await verdictForModelRoute(
           session.agentKind,
           model,
@@ -6131,11 +6140,13 @@ export async function beginTurnChangeSetAtDispatch(
   session: SendToSessionDispatchSession,
   anchorClientId: string,
 ): Promise<void> {
+  // DSH has its own Main-owned ACP projection and does not expose the generic
+  // reversible file-change capture contract.  That optional review feature
+  // must not prevent an otherwise admitted local DSH prompt from reaching the
+  // signed Helper.  DSH file/tool capability remains governed by its per-tool
+  // approval path, not by this review-only capture hook.
   if (session.agentKind === 'dsh') {
-    throwIpcError(
-      'UNSUPPORTED_CAPABILITY',
-      'DSH turn-change capture is unavailable until the managed DSH host is registered',
-    );
+    return;
   }
   await waitForTurnChangeSetSeal(session.id);
   await finalizeTurnChangeSet(session.id, null, 'partial');
@@ -6223,6 +6234,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     assertTrustedCaller: (event) =>
       assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
     getControl: getDshRuntimeConfigurationControl,
+  });
+  registerDshRuntimeStatusHandlers(createElectronIpcHandlerRegistry(), {
+    assertTrustedCaller: (event) =>
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+    getService: () => ({
+      get: getDshRuntimeStatusForCurrentOwner,
+      retry: retryDshRuntimeRegistration,
+    }),
   });
   const broadcastSessionRuntimeProjection = async (
     sessionId: string,
@@ -7919,7 +7938,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 隐式来源的原生默认落点被停用而有启用替代拷贝时,把会话显式改路由过去(下方
     // persistAndHydrateSessionProvider 会把它落库):实际路由层对隐式来源走原生
     // 默认、不查停用标志,仅放行等于继续用停用拷贝付费。
-    if (typeof o.model === 'string' && o.model) {
+    // DSH accepts only the opaque marker at the IPC boundary. It must not be
+    // treated as a user-selectable model or provider route: Main validates
+    // the configured DSH HTTPS endpoint and API key separately at runtime.
+    if (
+      typeof o.model === 'string' &&
+      o.model &&
+      !isManagedDshRuntimeRoute(o.agentKind, o.model)
+    ) {
       let verifiedResume = false;
       if (o.resumeSessionId && typeof o.id === 'string' && o.id) {
         try {
@@ -14130,9 +14156,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (
       msg.createOpts.agentKind !== 'claude-code' &&
       msg.createOpts.agentKind !== 'codex' &&
-      msg.createOpts.agentKind !== 'pi'
+      msg.createOpts.agentKind !== 'pi' &&
+      msg.createOpts.agentKind !== 'dsh'
     ) {
       throwIpcError('INVALID_PARAMS', 'queued.createOpts.agentKind invalid');
+    }
+    // DSH is deliberately local-only: its signed Helper receives a Main-owned
+    // macOS workspace bookmark and must never be launched through Device Link.
+    // Local renderer prompts use this same validated queue path.
+    if (msg.createOpts.agentKind === 'dsh' && isDeviceLinkInvoke()) {
+      throwIpcError('UNSUPPORTED_CAPABILITY', 'DSH queued input is only available on this Mac');
     }
     const normalized: AgentInputQueuedMessage = { ...msg };
     const refs = requireSessionRefs(normalized.sessionRefs);

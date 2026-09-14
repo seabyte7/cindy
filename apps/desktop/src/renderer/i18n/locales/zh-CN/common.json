@@ -1512,11 +1512,35 @@
           "label": "DeepSeek Harness",
           "description": "可选。为 DeepSeek Harness 配置一个独立的 HTTPS 端点和 API 密钥；绝不会复用其他 runtime 的凭证。",
           "endpoint": "DSH 端点",
-          "endpointPlaceholder": "https://adapter.example.com/v1",
+          "endpointPlaceholder": "https://api.deepseek.com",
           "apiKey": "DSH API 密钥",
           "apiKeyPlaceholder": "DSH API 密钥",
           "apiKeyHelp": "端点未变时可留空，保留本机已存密钥；更换端点必须重新输入密钥。",
-          "authRequired": "DeepSeek Harness 需要 API 密钥鉴权。"
+          "authRequired": "DeepSeek Harness 需要 API 密钥鉴权。",
+          "runtimeStatus": {
+            "title": "运行时状态",
+            "retry": "重试",
+            "loading": "正在读取本机 DSH 状态…",
+            "unavailable": "本机 DSH 状态暂不可用，请重试。",
+            "configuration": {
+              "ready": "已配置来源：{{provider}}。",
+              "not-configured": "尚未配置 DeepSeek Harness 来源。",
+              "multiple-configured": "已配置多个 DeepSeek Harness 来源，请先选择一个来源。",
+              "auth-not-api-key": "所选来源必须使用 API 密钥鉴权。",
+              "invalid-runtime-shape": "DeepSeek Harness 设置包含不支持的运行时字段。",
+              "invalid-route": "DeepSeek Harness 端点无效。",
+              "missing-api-key": "缺少 DeepSeek Harness API 密钥。",
+              "unavailable": "DeepSeek Harness 配置暂不可用。"
+            },
+            "registration": {
+              "not-registered": "DSH 任务工厂尚未就绪。",
+              "registering": "正在准备本机 DSH 任务工厂…",
+              "task-factory-ready": "已可新建本机 DSH 任务。",
+              "reconfiguration-pending": "DSH 配置已变更，正在等待受影响任务关闭。"
+            },
+            "closeTasks": "请先关闭 {{count}} 个活跃 DSH 任务，新配置才能生效。",
+            "evidence": "模型连接、命令、文件工具、附件和审批仍须在最终签名 App 中验证。"
+          }
         },
         "wireProtocol": {
           "responses": "OpenAI Responses（原生）",
@@ -6803,8 +6827,7 @@
   "newChat": {
     "dsh": {
       "managedRuntime": "受管 DSH 运行时",
-      "managedRuntimeDetails": "在本机受管 DSH 运行时中执行。仅支持文本；重启后，只有在已验证本机绑定可用时，才能继续同一个任务。",
-      "textOnlyInput": "DSH 当前仅支持文本输入。"
+      "managedRuntimeDetails": "在本机受管 DSH 运行时中执行。文件和图片会复制到当前任务的受限附件区；工具每次运行均需单独确认。重启后，只有在已验证本机绑定可用时，才能继续同一个任务。"
     },
     "noProvider": {
       "title": "当前模型没有可用来源",

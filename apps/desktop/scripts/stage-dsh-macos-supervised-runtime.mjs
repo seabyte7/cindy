@@ -337,9 +337,20 @@ export function stageMacDshSupervisedRuntime({ appPath, archivePath, manifestPat
     ], 'compile native DSH Main bookmark bridge');
     fs.chmodSync(mainBookmarkBridgeStage, 0o755);
 
-    signAdHoc(path.join(runtimeStage, manifest.runtime.executable), RUNTIME_ENTITLEMENTS);
-    for (const sidecar of manifest.runtime.requiredSidecars) {
-      signAdHoc(path.join(runtimeStage, sidecar), RUNTIME_ENTITLEMENTS);
+    const runtimeExecutables = [
+      path.join(runtimeStage, manifest.runtime.executable),
+      ...manifest.runtime.requiredSidecars.map((sidecar) => path.join(runtimeStage, sidecar)),
+    ];
+    for (const runtimeExecutable of runtimeExecutables) {
+      signAdHoc(runtimeExecutable, RUNTIME_ENTITLEMENTS);
+      // The SEA executable owns the only dynamic-loading exception. Its
+      // bootstrap resolves native modules exclusively from the manifest-bound,
+      // Helper-signed caches; do not move this entitlement to Main or the
+      // Supervisor just to make local ad-hoc signing work.
+      assertSignedBooleanEntitlement(runtimeExecutable, 'com.apple.security.app-sandbox');
+      assertSignedBooleanEntitlement(runtimeExecutable, 'com.apple.security.inherit');
+      assertSignedBooleanEntitlement(runtimeExecutable, 'com.apple.security.cs.allow-jit');
+      assertSignedBooleanEntitlement(runtimeExecutable, 'com.apple.security.cs.disable-library-validation');
     }
     for (const addon of manifest.runtime.requiredNativeAddons) {
       signAdHoc(path.join(cacheStage, addon.cachePath));

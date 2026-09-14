@@ -10,6 +10,7 @@ import type {
   DshBridgePermissionRequest,
   DshBridgePermissionResolver,
   DshBridgePort,
+  DshBridgePromptContent,
   DshBridgePromptReceipt,
 } from './bridge-port.js';
 import { DshAgent } from './index.js';
@@ -63,7 +64,9 @@ class FakeDshBridge implements DshBridgePort {
   readonly create = vi.fn(async () => createReceipt());
   readonly resumeForAdapter = vi.fn(async () => resumeReceipt());
   readonly promptDeferred = deferred<DshBridgePromptReceipt>();
-  readonly prompt = vi.fn(async () => await this.promptDeferred.promise);
+  readonly prompt = vi.fn(async (_input: DshBridgeAgentSessionRef & {
+    content: readonly DshBridgePromptContent[];
+  }) => await this.promptDeferred.promise);
   readonly cancel = vi.fn(async (input: DshBridgeAgentSessionRef): Promise<DshBridgeAgentReceipt<'cancel'>> => ({
     contractVersion: 1,
     operation: 'cancel',
@@ -186,7 +189,10 @@ describe('DshAgent', () => {
 
     await handle.send({ type: 'user', content: 'run it' });
     expect(bridge.prompt).toHaveBeenCalledWith({
-      cindySessionId: 'cindy-1', scopeId: 'scope-1', bridgeSessionKey: 'bridge-session-key-1', text: 'run it',
+      cindySessionId: 'cindy-1',
+      scopeId: 'scope-1',
+      bridgeSessionKey: 'bridge-session-key-1',
+      content: [{ type: 'text', text: 'run it' }],
     });
     expect((await nextEvent(handle)).type).toBe('status');
 
@@ -256,7 +262,7 @@ describe('DshAgent', () => {
     await handle.close();
   });
 
-  it('rejects remote, foreign resume, empty, and attachment dispatches before an ACP prompt is issued', async () => {
+  it('rejects remote, foreign resume, and an empty dispatch before an ACP prompt is issued', async () => {
     const bridge = new FakeDshBridge();
     const agent = new DshAgent(deps(), {
       bridge, scopeId: 'scope-1', admission: { committedFollowProjection: true, promptReceiptLedger: true },
@@ -269,11 +275,39 @@ describe('DshAgent', () => {
     })).rejects.toThrow('verified opaque handle');
 
     const handle = await agent.startSession({ sessionId: 'cindy-1', workingDir: '/project', model: 'native-dsh' });
-    await expect(handle.send({ type: 'user', content: '' })).rejects.toThrow('non-empty text');
-    await expect(handle.send({
-      type: 'user', content: [{ type: 'file', path: '/project/input.txt' }],
-    })).rejects.toThrow('text-only');
+    await expect(handle.send({ type: 'user', content: '' })).rejects.toThrow('text or a local attachment');
     expect(bridge.prompt).not.toHaveBeenCalled();
+    await handle.close();
+  });
+
+  it('forwards attachment references to Main without reading their bytes in maker-core', async () => {
+    const bridge = new FakeDshBridge();
+    const handle = await new DshAgent(deps(), {
+      bridge, scopeId: 'scope-1', admission: { committedFollowProjection: true, promptReceiptLedger: true },
+    }).startSession({ sessionId: 'cindy-1', workingDir: '/project', model: 'native-dsh' });
+
+    await handle.send({
+      type: 'user',
+      content: [
+        { type: 'text', text: 'inspect these' },
+        { type: 'image', path: '/project/image.png', mimeType: 'image/png' },
+        { type: 'file', path: '/project/input.txt', mimeType: 'text/plain' },
+        { type: 'mention', name: 'readme', path: '/project/README.md', kind: 'file' },
+      ],
+    });
+
+    expect(bridge.prompt).toHaveBeenCalledWith({
+      cindySessionId: 'cindy-1',
+      scopeId: 'scope-1',
+      bridgeSessionKey: 'bridge-session-key-1',
+      content: [
+        { type: 'text', text: 'inspect these' },
+        { type: 'image', path: '/project/image.png', mimeType: 'image/png' },
+        { type: 'file', path: '/project/input.txt', mimeType: 'text/plain' },
+        { type: 'mention', name: 'readme', path: '/project/README.md', kind: 'file' },
+      ],
+    });
+    bridge.promptDeferred.resolve(promptReceipt('end_turn'));
     await handle.close();
   });
 

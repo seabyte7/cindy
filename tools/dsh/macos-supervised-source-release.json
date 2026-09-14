@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "releaseId": "cindy-dsh-0.1.2-alpha.3-build.9-macos-supervised",
+  "releaseId": "cindy-dsh-0.1.2-alpha.3-build.11-macos-supervised",
   "source": {
     "repository": "https://github.com/deepseek-ai/deepseek-harness.git",
     "tag": "dsh-v0.1.2-alpha.3",
@@ -33,7 +33,7 @@
       {
         "patch": {
           "path": "tools/dsh/upstream-patches/deepseek-harness-alpha3-direct-runtime-closure-check.patch",
-          "sha256": "758e1a7a9bc761783aab93498dbabdc4c5125cc3d8a27ca1c3813e1ab50a2916"
+          "sha256": "6d7ee135a7a3a87d9e1636fe10a05e6e25751d08fed4ce5810bb2602c9419547"
         },
         "files": [
           {
@@ -59,7 +59,7 @@
       {
         "patch": {
           "path": "tools/dsh/upstream-patches/deepseek-harness-alpha3-stage-sealed-pkg-native-cache.patch",
-          "sha256": "4155dc33a47970542d2f47f6fda46499b2e86fc779ef55927240b072e86af420"
+          "sha256": "a231f509b92fba4e6f6e9053f6af59d70e398dfb84154a29ce858b7bd203bf84"
         },
         "files": [
           {
@@ -84,14 +84,19 @@
       },
       {
         "patch": {
-          "path": "tools/dsh/upstream-patches/deepseek-harness-alpha3-macos-acp-mvp-capability-floor.patch",
-          "sha256": "c0c40081098e2744fa5f48098f742e27bbc4be67277434fbd1c07f16870cb226"
+          "path": "tools/dsh/upstream-patches/deepseek-harness-alpha3-cindy-tool-path.patch",
+          "sha256": "c8226da7b38cfb6300d1adb7afbd8aeee29b13c6cc67161ec358510d56f04dbd"
         },
         "files": [
           {
-            "path": "packages/bundle/acp-app/cordis.patch.yml",
-            "beforeSha256": "dbe5fcb2ae0b6eac3df92413dd9f2d407cfea9c1c31d4d103045adcd3329c6ba",
-            "afterSha256": "30beac85e1da985ccc3ed3ce8543ec3291ee3a09060ae3b67243554380831e6a"
+            "path": "packages/subprocess/subprocess/src/index.ts",
+            "beforeSha256": "0498a406106a51e34ac24e2e752dde67bb3c5c623333599e2af1805a30ca5499",
+            "afterSha256": "243d09b87dc67c8d2326494c4373882158e430c57291cd3cb255d0bde0cb8c60"
+          },
+          {
+            "path": "packages/subprocess/subprocess-local/tests/spawn.spec.ts",
+            "beforeSha256": "7f22c5da206fba30d021766da386d1a73109a45ae31b9127b43351c0eabe24f2",
+            "afterSha256": "d774f5d7fe7a95d43619a91771ed813d35d14d118a0a3a4513d7884991c466bb"
           }
         ]
       }

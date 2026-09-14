@@ -5315,6 +5315,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       choiceId: string,
     ): Promise<import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationSnapshot> =>
       ipcRenderer.invoke('maker:dsh-runtime-configuration:set', { sessionId, controlId, choiceId }),
+    /** Main-owned DSH registration state; no route, secret, or native id crosses preload. */
+    getDshRuntimeStatus: (): Promise<import('../shared/dshRuntimeStatus').DshRuntimeStatus> =>
+      ipcRenderer.invoke('maker:dsh-runtime-status:get'),
+    retryDshRuntimeRegistration: (): Promise<import('../shared/dshRuntimeStatus').DshRuntimeStatus> =>
+      ipcRenderer.invoke('maker:dsh-runtime-status:retry'),
     /**
      * Existing DSH Home selection is Main-owned. These calls have no inputs
      * and only return a display-safe mode/status projection.
@@ -5847,8 +5852,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     createSession: (opts: {
       /** 可选: 复用外部 sessionId(本端 chat 用 local-db:sessions:create 拿到的 id) */
       id?: string;
-      agentKind: 'claude-code' | 'codex' | 'pi';
+      agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh';
       workingDir: string;
+      workspaceKind?: 'project' | 'dialogue';
       model: string;
       title?: string;
       parentSessionId?: string;

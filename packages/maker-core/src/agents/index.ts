@@ -35,6 +35,7 @@ export {
   type DshBridgePermissionRequest,
   type DshBridgePermissionResolver,
   type DshBridgePort,
+  type DshBridgePromptContent,
   type DshBridgePromptReceipt,
   type DshBridgePromptStopReason,
   type DshBridgeReceiptId,

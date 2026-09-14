@@ -65,6 +65,16 @@ export const sessions = sqliteTable(
     status: text('status', { enum: ['active', 'archived', 'deleted'] })
       .notNull()
       .default('active'),
+    /**
+     * Main-only startup reservation. A DSH binding needs this session row as
+     * its foreign-key parent before the native create receipt exists, but a
+     * reserved row must not be presented as a usable user task yet.
+     */
+    startupState: text('startup_state', {
+      enum: ['ready', 'starting', 'needs_reconcile'],
+    })
+      .notNull()
+      .default('ready'),
     sdkSessionId: text('sdk_session_id'),
     totalTokenUsage: integer('total_token_usage').notNull().default(0),
     totalCostUsd: real('total_cost_usd').notNull().default(0),

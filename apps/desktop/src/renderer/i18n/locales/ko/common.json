@@ -1512,11 +1512,35 @@
           "label": "DeepSeek Harness",
           "description": "선택 사항입니다. DeepSeek Harness 전용 HTTPS 엔드포인트와 API 키를 설정합니다. 다른 런타임의 자격 증명은 재사용하지 않습니다.",
           "endpoint": "DSH 엔드포인트",
-          "endpointPlaceholder": "https://adapter.example.com/v1",
+          "endpointPlaceholder": "https://api.deepseek.com",
           "apiKey": "DSH API 키",
           "apiKeyPlaceholder": "DSH API 키",
           "apiKeyHelp": "엔드포인트가 바뀌지 않았다면 비워 두어 로컬에 저장된 키를 유지할 수 있습니다. 엔드포인트를 변경하면 새 키가 필요합니다.",
-          "authRequired": "DeepSeek Harness에는 API 키 인증이 필요합니다."
+          "authRequired": "DeepSeek Harness에는 API 키 인증이 필요합니다.",
+          "runtimeStatus": {
+            "title": "런타임 상태",
+            "retry": "재시도",
+            "loading": "로컬 DSH 상태를 읽는 중…",
+            "unavailable": "로컬 DSH 상태를 사용할 수 없습니다. 다시 시도하세요.",
+            "configuration": {
+              "ready": "구성된 소스: {{provider}}.",
+              "not-configured": "DeepSeek Harness 소스가 구성되지 않았습니다.",
+              "multiple-configured": "여러 DeepSeek Harness 소스가 구성되었습니다. 사용하기 전에 하나를 선택하세요.",
+              "auth-not-api-key": "선택한 소스는 API 키 인증을 사용해야 합니다.",
+              "invalid-runtime-shape": "DeepSeek Harness 설정에 지원되지 않는 런타임 필드가 있습니다.",
+              "invalid-route": "DeepSeek Harness 엔드포인트가 올바르지 않습니다.",
+              "missing-api-key": "DeepSeek Harness API 키가 없습니다.",
+              "unavailable": "DeepSeek Harness 설정을 사용할 수 없습니다."
+            },
+            "registration": {
+              "not-registered": "DSH 작업 팩토리가 아직 준비되지 않았습니다.",
+              "registering": "로컬 DSH 작업 팩토리를 준비하는 중…",
+              "task-factory-ready": "로컬 DSH 작업을 만들 수 있습니다.",
+              "reconfiguration-pending": "DSH 설정이 변경되어 영향을 받는 작업이 닫히기를 기다리고 있습니다."
+            },
+            "closeTasks": "새 구성을 적용하려면 활성 DSH 작업 {{count}}개를 먼저 닫으세요.",
+            "evidence": "모델 연결, 명령, 파일 도구, 첨부 파일 및 승인은 최종 서명된 App에서 검증해야 합니다."
+          }
         },
         "wireProtocol": {
           "responses": "OpenAI Responses(네이티브)",
@@ -6811,8 +6835,7 @@
   "newChat": {
     "dsh": {
       "managedRuntime": "관리형 DSH 런타임",
-      "managedRuntimeDetails": "관리형 DSH 런타임에서 로컬로 실행됩니다. 텍스트만 지원하며, 다시 시작한 후에는 검증된 로컬 바인딩을 사용할 수 있을 때만 이 동일한 작업을 계속할 수 있습니다.",
-      "textOnlyInput": "DSH는 현재 텍스트 입력만 지원합니다."
+      "managedRuntimeDetails": "관리형 DSH 런타임에서 로컬로 실행됩니다. 파일과 이미지는 이 작업의 제한된 첨부 영역에 복사되며, 도구 실행마다 별도 승인이 필요합니다. 다시 시작한 후에는 검증된 로컬 바인딩을 사용할 수 있을 때만 이 동일한 작업을 계속할 수 있습니다."
     },
     "noProvider": {
       "title": "이 모델에 연결된 소스가 없습니다",

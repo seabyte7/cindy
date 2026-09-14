@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,6 +19,15 @@ function writeInfoPlist(destination, identifier) {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${identifier}</string></dict></plist>
 `);
+}
+
+function signedEntitlements(candidate) {
+  const result = spawnSync('/usr/bin/codesign', ['-d', '--entitlements', ':-', candidate], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.equal(result.status, 0, `codesign entitlement inspection failed: ${result.stderr || result.stdout}`);
+  return `${result.stdout || ''}\n${result.stderr || ''}`;
 }
 
 test('staged macOS Helper moves the archive-bound pkg native cache into its signed resource root', {
@@ -69,6 +79,11 @@ test('staged macOS Helper moves the archive-bound pkg native cache into its sign
     assert.ok(fs.lstatSync(path.join(stagedCache, 'native.node')).isFile());
     assert.ok(fs.lstatSync(path.join(stagedCache, 'libfixture.dylib')).isFile());
     assert.equal(fs.existsSync(path.join(helperResources, 'dsh-runtime', target.pkgNativeCache.sourceDirectory)), false);
+    const runtimeEntitlements = signedEntitlements(staged.runtime);
+    assert.match(runtimeEntitlements, /com\.apple\.security\.app-sandbox/);
+    assert.match(runtimeEntitlements, /com\.apple\.security\.inherit/);
+    assert.match(runtimeEntitlements, /com\.apple\.security\.cs\.allow-jit/);
+    assert.match(runtimeEntitlements, /com\.apple\.security\.cs\.disable-library-validation/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -14,6 +14,8 @@ const h = vi.hoisted(() => ({
   captured: null as Record<string, unknown> | null,
   updateSet: null as Record<string, unknown> | null,
   updateReturning: [] as Array<{ id: string }>,
+  selectRows: [] as Array<{ startupState: 'ready' | 'starting' | 'needs_reconcile' }>,
+  deleteReturning: [] as Array<{ id: string }>,
   whereCalled: false,
 }));
 
@@ -26,6 +28,11 @@ vi.mock('../../localDb/client/current.js', () => ({
           return Promise.resolve();
         },
       }),
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: async () => h.selectRows }),
+        }),
+      }),
       update: () => ({
         set: (patch: Record<string, unknown>) => {
           h.updateSet = patch;
@@ -36,6 +43,9 @@ vi.mock('../../localDb/client/current.js', () => ({
             },
           };
         },
+      }),
+      delete: () => ({
+        where: () => ({ returning: async () => h.deleteReturning }),
       }),
     },
   }),
@@ -82,6 +92,44 @@ describe('DesktopSessionStorage.create remoteHostId 规范化', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await storage.create({ ...base } as any);
     expect(h.captured?.remoteHostId).toBeNull();
+  });
+});
+
+describe('DesktopSessionStorage DSH startup reservation', () => {
+  beforeEach(() => {
+    h.captured = null;
+    h.updateSet = null;
+    h.selectRows = [];
+    h.deleteReturning = [{ id: 'dsh-new' }];
+  });
+
+  const dshMeta = {
+    id: 'dsh-new', title: 'New Maker', workDir: '/repo', model: 'cindy-dsh-managed', agentKind: 'dsh' as const,
+  };
+
+  it('inserts an invisible starting parent and removes it when native startup fails', async () => {
+    const reservation = await new DesktopSessionStorage().reserveDshSessionMetadata(dshMeta);
+    expect(h.captured).toMatchObject({ id: 'dsh-new', agentKind: 'dsh', startupState: 'starting', sdkSessionId: null });
+    await reservation!.rollback();
+  });
+
+  it('blocks a retry for an existing starting task instead of making a second native session', async () => {
+    h.selectRows = [{ startupState: 'starting' }];
+    await expect(new DesktopSessionStorage().reserveDshSessionMetadata(dshMeta))
+      .rejects.toThrow('requires reconciliation');
+  });
+
+  it('quarantines an uncertain rollback rather than silently allowing a duplicate native task', async () => {
+    h.deleteReturning = [];
+    const reservation = await new DesktopSessionStorage().reserveDshSessionMetadata(dshMeta);
+    await reservation!.rollback();
+    expect(h.updateSet).toMatchObject({ startupState: 'needs_reconcile' });
+  });
+
+  it('does not reserve a parent for other agent kinds', async () => {
+    await expect(new DesktopSessionStorage().reserveDshSessionMetadata({ ...dshMeta, agentKind: 'codex' }))
+      .resolves.toBeNull();
+    expect(h.captured).toBeNull();
   });
 });
 

@@ -11,12 +11,21 @@ import { createRequire } from 'node:module';
 import {
   encodeDshImplicitBookmarkHandoff,
   type DshImplicitBookmarkHandoff,
+  encodeDshWorkspaceBookmarkHandoff,
+  type DshWorkspaceBookmarkHandoff,
 } from './implicit-bookmark-handoff.js';
 
 const MAIN_BOOKMARK_BRIDGE_NAME = 'cindy-dsh-main-bookmark-bridge.node';
 
 export interface DshMainBookmarkNativeBridge {
   createImplicitBookmark(persistentBookmark: string): string;
+  /**
+   * Electron only returns security-scoped bookmarks for MAS builds.  The
+   * signed Main bridge creates the equivalent source bookmark for a directory
+   * the native picker has just selected; callers must still validate that the
+   * selected directory is the exact task workspace before invoking it.
+   */
+  createPersistentBookmarkForPath?(selectedDirectory: string): string;
 }
 
 function assertRealResourcesDirectory(resourcesPath: string): string {
@@ -86,5 +95,24 @@ export function createDshImplicitBookmarkHandoff(input: {
   };
   // Reuse the exact transport parser before a native child is even spawned.
   encodeDshImplicitBookmarkHandoff(handoff);
+  return Object.freeze(handoff);
+}
+
+/**
+ * The native conversion is shared with existing Home, but the resulting
+ * descriptor has a distinct purpose and fixed fd.  The caller must have
+ * obtained the persistent source bookmark through an explicit workspace
+ * selection for this exact Cindy task.
+ */
+export function createDshWorkspaceBookmarkHandoff(input: {
+  persistentBookmark: string;
+  bridge: DshMainBookmarkNativeBridge;
+}): DshWorkspaceBookmarkHandoff {
+  const bookmark = input.bridge.createImplicitBookmark(input.persistentBookmark);
+  const handoff: DshWorkspaceBookmarkHandoff = {
+    kind: 'dsh-task-workspace-implicit-bookmark',
+    bookmark,
+  };
+  encodeDshWorkspaceBookmarkHandoff(handoff);
   return Object.freeze(handoff);
 }

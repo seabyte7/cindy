@@ -1,7 +1,7 @@
 /**
  * CustomProviderDialog —— 自定义供应商「新建 / 编辑」表单弹窗（按 .pen pQrpu/Fxstc 还原）。
  *
- * 结构：顶部「显示名称」(供应商身份,跨 runtime 共享) + Runtime 分段 Tab(Claude Code / Codex)。
+ * 结构：顶部「显示名称」(供应商身份,跨 runtime 共享) + Runtime 分段 Tab(Claude Code / Codex / Pi / DSH)。
  * **每个 Tab 是独立配置**：基础 URL / API 密钥 / 模型 / 请求头 都属于当前 Tab 的那个 runtime。
  * 只配需要的那个,也可两个都配(该来源同时供两端)。至少配一个 Tab。
  *
@@ -104,12 +104,14 @@ import {
   configuredPresetAgents,
   isConfiguredPresetRuntime,
 } from '@/../shared/piRuntimeInitialization';
+import type { DshRuntimeStatus } from '@/../shared/dshRuntimeStatus';
 
 /**
  * 本面板配置 claude / codex / pi 三个 runtime。pi 是多协议 harness:BYOM 自定义/本地模型
  * 走 pi 原生 provider 直连(不过 anthropic-compat 代理),故 pi tab 额外提供显式 api 选择器。
  */
 type DialogAgentKind = ModelProviderAgentKind;
+type RuntimeSettingsPanel = DialogAgentKind | 'dsh';
 
 const AGENTS: DialogAgentKind[] = ['claude-code', 'codex', 'pi'];
 
@@ -489,9 +491,57 @@ export function CustomProviderDialog({
   const [name, setName] = useState(initial?.name ?? '');
   const [rt, setRt] = useState<Record<DialogAgentKind, RuntimeFields>>(() => initRuntimes(initial));
   const [dsh, setDsh] = useState<DshRuntimeFields>(() => initDshRuntime(initial));
+  const [dshRuntimeStatus, setDshRuntimeStatus] = useState<DshRuntimeStatus | null>(null);
+  const [dshRuntimeStatusError, setDshRuntimeStatusError] = useState(false);
+  const [retryingDshRuntime, setRetryingDshRuntime] = useState(false);
   const [activeTab, setActiveTab] = useState<DialogAgentKind>(
     () => (initial && VISIBLE_AGENTS.find((a) => initial.runtimes[a])) || 'claude-code',
   );
+  const [activeRuntimePanel, setActiveRuntimePanel] = useState<RuntimeSettingsPanel>(
+    () => (initial?.runtimes.dsh ? 'dsh' : (initial && VISIBLE_AGENTS.find((a) => initial.runtimes[a])) || 'claude-code'),
+  );
+
+  useEffect(() => {
+    if (activeRuntimePanel !== 'dsh') return;
+    let cancelled = false;
+    setDshRuntimeStatusError(false);
+    const getStatus = window.electronAPI.maker.getDshRuntimeStatus;
+    if (typeof getStatus !== 'function') {
+      setDshRuntimeStatusError(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+    void getStatus()
+      .then((status) => {
+        if (!cancelled) setDshRuntimeStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) setDshRuntimeStatusError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeRuntimePanel]);
+
+  const retryDshRuntime = useCallback(async () => {
+    if (retryingDshRuntime) return;
+    const retry = window.electronAPI.maker.retryDshRuntimeRegistration;
+    if (typeof retry !== 'function') {
+      setDshRuntimeStatusError(true);
+      return;
+    }
+    setRetryingDshRuntime(true);
+    try {
+      const status = await retry();
+      setDshRuntimeStatus(status);
+      setDshRuntimeStatusError(false);
+    } catch {
+      setDshRuntimeStatusError(true);
+    } finally {
+      setRetryingDshRuntime(false);
+    }
+  }, [retryingDshRuntime]);
   const [hasKey, setHasKey] = useState<Record<DialogAgentKind, boolean>>({
     'claude-code': false,
     codex: false,
@@ -1981,53 +2031,7 @@ export function CustomProviderDialog({
             )}
           </div>
 
-          {/* DSH is an opt-in, fixed ACP adapter profile. It uses neither a
-              generic model selection nor inherited credentials from the tabs. */}
-          <div
-            className="flex flex-col gap-3 rounded-[12px] p-4"
-            style={{
-              backgroundColor: 'var(--surface)',
-              border: '1px solid var(--settings-theme-card-border)',
-            }}
-          >
-            <div className="flex flex-col gap-1">
-              <FieldLabel>{t('settings.providers.custom.dsh.label')}</FieldLabel>
-              <span className="text-12 leading-snug text-[var(--text-tertiary)]">
-                {t('settings.providers.custom.dsh.description')}
-              </span>
-            </div>
-            <div className="flex flex-col gap-[7px]">
-              <FieldLabel>{t('settings.providers.custom.dsh.endpoint')}</FieldLabel>
-              <SettingsTextInput
-                surface="ivory"
-                value={dsh.baseUrl}
-                onChange={(baseUrl) => setDsh((current) => ({ ...current, baseUrl }))}
-                placeholder={t('settings.providers.custom.dsh.endpointPlaceholder')}
-              />
-            </div>
-            {authMode === 'apiKey' ? (
-              <div className="flex flex-col gap-[7px]">
-                <FieldLabel>{t('settings.providers.custom.dsh.apiKey')}</FieldLabel>
-                <SettingsTextInput
-                  surface="ivory"
-                  value={dsh.apiKey}
-                  onChange={(apiKey) => setDsh((current) => ({ ...current, apiKey }))}
-                  placeholder={t('settings.providers.custom.dsh.apiKeyPlaceholder')}
-                  mono
-                  secret
-                />
-                <span className="text-12 leading-snug text-[var(--text-tertiary)]">
-                  {t('settings.providers.custom.dsh.apiKeyHelp')}
-                </span>
-              </div>
-            ) : (
-              <span className="text-12 leading-snug text-[var(--error-fg)]">
-                {t('settings.providers.custom.dsh.authRequired')}
-              </span>
-            )}
-          </div>
-
-          {/* Runtime 分段 Tab：Claude Code 与 Codex 各自维护端点、协议、模型与凭证。 */}
+          {/* Runtime 分段 Tab：每个 harness 各自维护它可用的连接参数。 */}
           <div className="flex flex-col gap-2">
             <FieldLabel>{t('settings.providers.custom.fields.protocols')}</FieldLabel>
             <div
@@ -2038,7 +2042,7 @@ export function CustomProviderDialog({
               {VISIBLE_AGENTS.map((a) => {
                 const meta = TAB_META[a];
                 const Mark = meta.Mark;
-                const active = activeTab === a;
+                const active = activeRuntimePanel === a;
                 const configured = rt[a].baseUrl.trim().length > 0;
                 return (
                   <button
@@ -2049,6 +2053,7 @@ export function CustomProviderDialog({
                     onClick={() => {
                       setChildLayer(null);
                       setActiveTab(a);
+                      setActiveRuntimePanel(a);
                     }}
                     className={cn(
                       'flex h-[26px] flex-1 items-center justify-center gap-1.5 rounded-full px-2 text-13 leading-none transition-colors',
@@ -2075,9 +2080,42 @@ export function CustomProviderDialog({
                   </button>
                 );
               })}
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeRuntimePanel === 'dsh'}
+                onClick={() => {
+                  setChildLayer(null);
+                  setActiveRuntimePanel('dsh');
+                }}
+                className={cn(
+                  'flex h-[26px] flex-1 items-center justify-center gap-1.5 rounded-full px-2 text-13 leading-none transition-colors',
+                  activeRuntimePanel === 'dsh' ? 'font-medium' : 'font-normal',
+                )}
+                style={
+                  activeRuntimePanel === 'dsh'
+                    ? {
+                        backgroundColor: 'var(--surface-elevated)',
+                        border: '1px solid var(--border-default)',
+                        color: 'var(--settings-section-title)',
+                      }
+                    : { color: 'var(--text-secondary)' }
+                }
+              >
+                <Sparkles size={14} className="shrink-0" />
+                <span className="whitespace-nowrap">{t('settings.providers.custom.dsh.label')}</span>
+                {dsh.baseUrl.trim() && (
+                  <span
+                    className="h-1.5 w-1.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: 'var(--remote-status-ready)' }}
+                  />
+                )}
+              </button>
             </div>
             <span className="text-12 leading-snug text-[var(--text-tertiary)]">
-              {t(TAB_META[activeTab].helpKey)}
+              {activeRuntimePanel === 'dsh'
+                ? t('settings.providers.custom.dsh.description')
+                : t(TAB_META[activeRuntimePanel].helpKey)}
             </span>
           </div>
 
@@ -2089,6 +2127,99 @@ export function CustomProviderDialog({
               border: '1px solid var(--settings-theme-card-border)',
             }}
           >
+            {activeRuntimePanel === 'dsh' ? (
+              <>
+                <div className="flex flex-col gap-1">
+                  <FieldLabel>{t('settings.providers.custom.dsh.label')}</FieldLabel>
+                  <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                    {t('settings.providers.custom.dsh.description')}
+                  </span>
+                </div>
+                <div className="flex flex-col gap-2 rounded-[10px] border border-[var(--settings-theme-card-border)] bg-[var(--surface-elevated)] p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <FieldLabel>{t('settings.providers.custom.dsh.runtimeStatus.title')}</FieldLabel>
+                    <button
+                      type="button"
+                      onClick={() => void retryDshRuntime()}
+                      disabled={
+                        retryingDshRuntime ||
+                        dshRuntimeStatus?.actions.canRetryRegistration === false
+                      }
+                      className="inline-flex h-7 items-center gap-1 rounded-full border border-[var(--settings-theme-card-border)] px-2.5 text-12 font-medium text-[var(--settings-section-sublabel)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {retryingDshRuntime ? <Spinner size={13} /> : <RefreshCw size={13} />}
+                      {t('settings.providers.custom.dsh.runtimeStatus.retry')}
+                    </button>
+                  </div>
+                  {dshRuntimeStatus ? (
+                    <>
+                      <p className="text-12 leading-snug text-[var(--settings-section-sublabel)]">
+                        {dshRuntimeStatus.configuration.status === 'ready'
+                          ? t('settings.providers.custom.dsh.runtimeStatus.configuration.ready', {
+                              provider: dshRuntimeStatus.configuration.providerName,
+                            })
+                          : t(
+                              `settings.providers.custom.dsh.runtimeStatus.configuration.${dshRuntimeStatus.configuration.reason}`,
+                            )}
+                      </p>
+                      <p className="text-12 leading-snug text-[var(--settings-section-desc)]">
+                        {t(
+                          `settings.providers.custom.dsh.runtimeStatus.registration.${dshRuntimeStatus.registration}`,
+                        )}
+                      </p>
+                      {dshRuntimeStatus.actions.mustCloseActiveTasksBeforeReplacement ? (
+                        <p className="text-12 leading-snug text-[var(--warning-fg)]">
+                          {t('settings.providers.custom.dsh.runtimeStatus.closeTasks', {
+                            count: dshRuntimeStatus.activeTaskCount,
+                          })}
+                        </p>
+                      ) : null}
+                      <p className="text-12 leading-snug text-[var(--text-tertiary)]">
+                        {t('settings.providers.custom.dsh.runtimeStatus.evidence')}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-12 leading-snug text-[var(--text-tertiary)]">
+                      {t(
+                        dshRuntimeStatusError
+                          ? 'settings.providers.custom.dsh.runtimeStatus.unavailable'
+                          : 'settings.providers.custom.dsh.runtimeStatus.loading',
+                      )}
+                    </p>
+                  )}
+                </div>
+                <div className="flex flex-col gap-[7px]">
+                  <FieldLabel>{t('settings.providers.custom.dsh.endpoint')}</FieldLabel>
+                  <SettingsTextInput
+                    surface="ivory"
+                    value={dsh.baseUrl}
+                    onChange={(baseUrl) => setDsh((current) => ({ ...current, baseUrl }))}
+                    placeholder={t('settings.providers.custom.dsh.endpointPlaceholder')}
+                  />
+                </div>
+                {authMode === 'apiKey' ? (
+                  <div className="flex flex-col gap-[7px]">
+                    <FieldLabel>{t('settings.providers.custom.dsh.apiKey')}</FieldLabel>
+                    <SettingsTextInput
+                      surface="ivory"
+                      value={dsh.apiKey}
+                      onChange={(apiKey) => setDsh((current) => ({ ...current, apiKey }))}
+                      placeholder={t('settings.providers.custom.dsh.apiKeyPlaceholder')}
+                      mono
+                      secret
+                    />
+                    <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                      {t('settings.providers.custom.dsh.apiKeyHelp')}
+                    </span>
+                  </div>
+                ) : (
+                  <span className="text-12 leading-snug text-[var(--error-fg)]">
+                    {t('settings.providers.custom.dsh.authRequired')}
+                  </span>
+                )}
+              </>
+            ) : (
+              <>
             {(activeTab === 'codex' || activeTab === 'pi') && (
               <div className="flex flex-col gap-[7px]">
                 <FieldLabel>{t('settings.providers.custom.fields.wireProtocol')}</FieldLabel>
@@ -2649,6 +2780,8 @@ export function CustomProviderDialog({
                   </span>
                 )}
               </div>
+            )}
+              </>
             )}
           </div>
         </div>

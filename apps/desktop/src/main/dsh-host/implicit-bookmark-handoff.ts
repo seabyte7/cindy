@@ -8,12 +8,30 @@
  */
 
 export const DSH_IMPLICIT_BOOKMARK_DESCRIPTOR_FD = 3;
+/**
+ * A task workspace is a separate authority from an existing DSH Home.  Keep
+ * it on a different private descriptor so the Helper cannot mistake a Home
+ * selection for permission to operate on a project directory.
+ */
+export const DSH_WORKSPACE_BOOKMARK_DESCRIPTOR_FD = 4;
 export const DSH_IMPLICIT_BOOKMARK_MAX_BYTES = 1024 * 1024;
+const DSH_WORKSPACE_DESCRIPTOR_VERSION = 1;
+const DSH_WORKSPACE_DESCRIPTOR_PURPOSE = 1;
 
 const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 export interface DshImplicitBookmarkHandoff {
   readonly kind: 'dsh-existing-home-implicit-bookmark';
+  readonly bookmark: string;
+}
+
+/**
+ * One fresh, non-persistent bookmark for exactly one task-scoped Helper
+ * launch. The originating security-scoped bookmark remains Main-only and is
+ * never stored in the DSH binding database or sent over normal IPC.
+ */
+export interface DshWorkspaceBookmarkHandoff {
+  readonly kind: 'dsh-task-workspace-implicit-bookmark';
   readonly bookmark: string;
 }
 
@@ -47,5 +65,23 @@ export function encodeDshImplicitBookmarkHandoff(input: DshImplicitBookmarkHando
   const frame = Buffer.allocUnsafe(4 + bookmark.length);
   frame.writeUInt32BE(bookmark.length, 0);
   bookmark.copy(frame, 4);
+  return frame;
+}
+
+/**
+ * Versioned length-prefixed base64 plus EOF. The purpose byte is intentionally
+ * fixed: accepting an arbitrary descriptor kind would turn fd 4 into a
+ * generic bookmark tunnel.
+ */
+export function encodeDshWorkspaceBookmarkHandoff(input: DshWorkspaceBookmarkHandoff): Buffer {
+  if (input.kind !== 'dsh-task-workspace-implicit-bookmark') {
+    throw new Error('DSH workspace bookmark handoff is invalid');
+  }
+  const bookmark = assertImplicitBookmark(input.bookmark);
+  const frame = Buffer.allocUnsafe(6 + bookmark.length);
+  frame.writeUInt8(DSH_WORKSPACE_DESCRIPTOR_VERSION, 0);
+  frame.writeUInt8(DSH_WORKSPACE_DESCRIPTOR_PURPOSE, 1);
+  frame.writeUInt32BE(bookmark.length, 2);
+  bookmark.copy(frame, 6);
   return frame;
 }

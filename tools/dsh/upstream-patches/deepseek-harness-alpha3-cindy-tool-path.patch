@@ -1,0 +1,68 @@
+diff --git a/packages/subprocess/subprocess-local/tests/spawn.spec.ts b/packages/subprocess/subprocess-local/tests/spawn.spec.ts
+--- a/packages/subprocess/subprocess-local/tests/spawn.spec.ts
++++ b/packages/subprocess/subprocess-local/tests/spawn.spec.ts
+@@ -1038,6 +1038,33 @@ describe('abort edge cases', () => {
+ })
+
+ describe('environment and spill-file hardening', () => {
++  it('uses the Main-approved Cindy tool PATH without forwarding its activation variable', () => {
++    const previousPath = process.env.PATH
++    const previousToolPath = process.env.CINDY_DSH_TOOL_PATH
++    const previousProviderKey = process.env.CINDY_DSH_PROVIDER_API_KEY
++    const previousLeaseToken = process.env.CINDY_DSH_INTERNAL_LEASE_TOKEN
++    process.env.PATH = '/ambient-path-must-not-reach-tools'
++    process.env.CINDY_DSH_TOOL_PATH = '/usr/bin:/bin:/opt/homebrew/bin'
++    process.env.CINDY_DSH_PROVIDER_API_KEY = 'test-only-provider-secret'
++    process.env.CINDY_DSH_INTERNAL_LEASE_TOKEN = 'test-only-internal-token'
++    try {
++      const env = childEnv()
++      expect(env.PATH).toBe('/usr/bin:/bin:/opt/homebrew/bin')
++      expect(env).not.toHaveProperty('CINDY_DSH_TOOL_PATH')
++      expect(env).not.toHaveProperty('CINDY_DSH_PROVIDER_API_KEY')
++      expect(env).not.toHaveProperty('CINDY_DSH_INTERNAL_LEASE_TOKEN')
++    } finally {
++      if (previousPath === undefined) delete process.env.PATH
++      else process.env.PATH = previousPath
++      if (previousToolPath === undefined) delete process.env.CINDY_DSH_TOOL_PATH
++      else process.env.CINDY_DSH_TOOL_PATH = previousToolPath
++      if (previousProviderKey === undefined) delete process.env.CINDY_DSH_PROVIDER_API_KEY
++      else process.env.CINDY_DSH_PROVIDER_API_KEY = previousProviderKey
++      if (previousLeaseToken === undefined) delete process.env.CINDY_DSH_INTERNAL_LEASE_TOKEN
++      else process.env.CINDY_DSH_INTERNAL_LEASE_TOKEN = previousLeaseToken
++    }
++  })
++
+   it('scrubs credential-shaped and ambient DSH env vars from child processes', async () => {
+     process.env.DSH_TEST_API_KEY = 'super-secret'
+     process.env.DSH_TEST_TOKEN = 'also-secret'
+diff --git a/packages/subprocess/subprocess/src/index.ts b/packages/subprocess/subprocess/src/index.ts
+--- a/packages/subprocess/subprocess/src/index.ts
++++ b/packages/subprocess/subprocess/src/index.ts
+@@ -43,6 +43,13 @@ export type {
+  */
+ export const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i
+
++/**
++ * Cindy's Main-owned supervisor may provide an already-validated tool lookup
++ * path. It is consumed while constructing the child environment and is never
++ * itself forwarded to a model-requested tool process.
++ */
++export const CINDY_DSH_TOOL_PATH_ENV = 'CINDY_DSH_TOOL_PATH'
++
+ /**
+  * The ambient parent environment minus credential-shaped names and minus all
+  * `DSH_*` names — the canonical base every harness child starts from. `PATH`,
+@@ -59,8 +66,12 @@ export const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i
+  */
+ export function scrubbedParentEnv(): Record<string, string> {
+   const env: Record<string, string> = {}
++  const cindyToolPath = process.env[CINDY_DSH_TOOL_PATH_ENV]
+   for (const [key, value] of Object.entries(process.env)) {
+-    if (value !== undefined && !SENSITIVE_ENV_PATTERN.test(key) && !key.toUpperCase().startsWith(DSH_ENV_PREFIX)) env[key] = value
++    if (key.startsWith('CINDY_DSH_')) continue
++    if (value !== undefined && !SENSITIVE_ENV_PATTERN.test(key) && !key.toUpperCase().startsWith(DSH_ENV_PREFIX)) {
++      env[key] = key === 'PATH' && cindyToolPath !== undefined ? cindyToolPath : value
++    }
+   }
+   return env
+ }

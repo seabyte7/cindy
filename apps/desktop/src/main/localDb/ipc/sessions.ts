@@ -1071,15 +1071,24 @@ export function registerSessionIpc(
         // (feishu/slack/discord)与本机自动化(scheduler/learn/shared);
         // feishu 会话以「对话」分组展示(workspaceKind='dialogue')。
         const sourceFilter = inArray(sessions.source, DESKTOP_VISIBLE_SESSION_SOURCES);
+        // DSH must reserve a sessions parent before its signed native bridge can
+        // persist the FK-bound receipt.  Do not surface that transactional
+        // reservation (or a conservatively quarantined failure) as a task.
+        // Historical rows receive the schema default of ready during migration.
+        const startupStateFilter = eq(sessions.startupState, 'ready');
         const statusWhere = () =>
           statusFilter ? eq(sessions.status, statusFilter) : ne(sessions.status, 'deleted');
-        const rows = await selectSessionListRows(db, and(sourceFilter, statusWhere()), cap);
+        const rows = await selectSessionListRows(
+          db,
+          and(sourceFilter, startupStateFilter, statusWhere()),
+          cap,
+        );
 
         let mergedRows = rows;
         if (includePinned) {
           const pinnedRows = await selectSessionListRows(
             db,
-            and(sourceFilter, statusWhere(), isNotNull(sessions.pinnedAt)),
+            and(sourceFilter, startupStateFilter, statusWhere(), isNotNull(sessions.pinnedAt)),
             null,
           );
           mergedRows = mergeSessionListRows(rows, pinnedRows);

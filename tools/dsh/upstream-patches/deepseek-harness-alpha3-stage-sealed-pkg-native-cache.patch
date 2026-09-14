@@ -1,10 +1,9 @@
 diff --git a/scripts/build-exe-for-python-sdk.ts b/scripts/build-exe-for-python-sdk.ts
-index f14f7c90c..e989bb4ac 100644
 --- a/scripts/build-exe-for-python-sdk.ts
 +++ b/scripts/build-exe-for-python-sdk.ts
 @@ -355,6 +355,75 @@ class SingleExeBuild {
-    await writeFile(loader, patched)
-  }
+     await writeFile(loader, patched)
+   }
 -
 +
 +  /**

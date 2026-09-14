@@ -18,6 +18,7 @@ import { dbToMakerAgentKind, makerToDbAgentKind } from '../../shared/agentKindCo
 import type {
   AgentKind,
   SessionMeta,
+  SessionMetadataReservation,
   SessionStorage,
   WorkspaceKind,
 } from '@cindy/maker-core';
@@ -68,6 +69,88 @@ function rowToMeta(row: SessionRow): SessionMeta {
 }
 
 export class DesktopSessionStorage implements SessionStorage {
+  /**
+   * DSH creates a durable native binding before Maker can publish its normal
+   * session metadata. Reserve the FK parent as invisible `starting` state;
+   * only this returned token can make it visible or remove it again.
+   */
+  async reserveDshSessionMetadata(
+    meta: Omit<SessionMeta, 'createdAt' | 'updatedAt'>,
+  ): Promise<SessionMetadataReservation | null> {
+    if (meta.agentKind !== 'dsh') return null;
+    const db = getDbClient().drizzle;
+    const [existing] = await db
+      .select({ startupState: sessions.startupState })
+      .from(sessions)
+      .where(eq(sessions.id, meta.id))
+      .limit(1);
+    // Resume/retry of a previously published task must retain its historical
+    // row; only a genuinely new DSH task needs an FK-parent reservation.
+    if (existing?.startupState === 'ready') return null;
+    if (existing) throw new Error('DSH task startup requires reconciliation before retrying');
+    const now = Date.now();
+    const workingDir = normalizeWorkingDirForStorage(meta.workDir);
+    await db.insert(sessions).values({
+      id: meta.id,
+      title: meta.title,
+      workingDir,
+      workspaceKind: normalizeWorkspaceKind(meta.workspaceKind),
+      model: meta.model,
+      effort: meta.effort ?? 'high',
+      permissionMode: meta.permissionMode ?? 'ask',
+      fastMode: meta.fastMode ?? false,
+      status: 'active',
+      startupState: 'starting',
+      sdkSessionId: null,
+      agentKind: 'dsh',
+      parentSessionId: meta.parentSessionId ?? null,
+      remoteHostId: normalizeRemoteHostId(meta.remoteHostId),
+      source: meta.reviewMode === true ? 'review' : 'desktop',
+      createdAt: now,
+      updatedAt: now,
+    });
+    let settled = false;
+    return {
+      commit: async (sdkSessionId) => {
+        if (settled) throw new Error('DSH session metadata reservation is already settled');
+        const [updated] = await db
+          .update(sessions)
+          .set({
+            startupState: 'ready',
+            sdkSessionId: sdkSessionId ?? null,
+            updatedAt: Date.now(),
+          })
+          .where(and(eq(sessions.id, meta.id), eq(sessions.startupState, 'starting')))
+          .returning();
+        if (!updated) throw new Error('DSH session metadata reservation is no longer current');
+        settled = true;
+        return rowToMeta(updated);
+      },
+      rollback: async () => {
+        if (settled) return;
+        try {
+          const removed = await db
+            .delete(sessions)
+            .where(and(eq(sessions.id, meta.id), eq(sessions.startupState, 'starting')))
+            .returning({ id: sessions.id });
+          if (removed.length !== 1) {
+            throw new Error('DSH session metadata reservation is no longer current during rollback');
+          }
+          settled = true;
+        } catch {
+          // A native session may have been acknowledged and bound before a
+          // later persistence failure. Preserve the parent as unavailable so
+          // a retry cannot create a second native session under the same task.
+          await db
+            .update(sessions)
+            .set({ startupState: 'needs_reconcile', updatedAt: Date.now() })
+            .where(and(eq(sessions.id, meta.id), eq(sessions.startupState, 'starting')));
+          settled = true;
+        }
+      },
+    };
+  }
+
   async create(meta: Omit<SessionMeta, 'createdAt' | 'updatedAt'>): Promise<SessionMeta> {
     const db = getDbClient().drizzle;
     const now = Date.now();
@@ -82,6 +165,7 @@ export class DesktopSessionStorage implements SessionStorage {
       permissionMode: meta.permissionMode ?? 'ask',
       fastMode: meta.fastMode ?? false,
       status: 'active',
+      startupState: 'ready',
       sdkSessionId: meta.sdkSessionId ?? null,
       agentKind: toDbKind(meta.agentKind),
       parentSessionId: meta.parentSessionId ?? null,
@@ -120,7 +204,12 @@ export class DesktopSessionStorage implements SessionStorage {
     const rows = await db
       .select()
       .from(sessions)
-      .where(inArray(sessions.source, DESKTOP_VISIBLE_SESSION_SOURCES));
+      .where(
+        and(
+          inArray(sessions.source, DESKTOP_VISIBLE_SESSION_SOURCES),
+          eq(sessions.startupState, 'ready'),
+        ),
+      );
     return rows.map(rowToMeta);
   }
 
