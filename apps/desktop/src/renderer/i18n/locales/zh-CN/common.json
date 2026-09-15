@@ -1772,7 +1772,10 @@
           "contextWindowInvalid": "上下文窗口必须是合法的正整数（数字组之间可用分隔符）",
           "requestPathInvalid": "精确请求路径需以单个 / 开头，不含片段标识或 .、.. 路径段；空格和不安全字符请使用百分号编码",
           "modelRequired": "请至少添加一个模型",
-          "oauthInvalid": "OAuth 配置不完整：所有字段均必填，且两个端点必须是安全的 https 地址"
+          "oauthInvalid": "OAuth 配置不完整：所有字段均必填，且两个端点必须是安全的 https 地址",
+          "dshEndpointInvalid": "DeepSeek Harness 仅接受不含凭证、查询参数或片段的 HTTPS 端点",
+          "dshApiKeyRequired": "请为该 DeepSeek Harness 端点输入 API 密钥",
+          "dshAuthApiKeyRequired": "DeepSeek Harness 需要 API 密钥鉴权"
         },
         "toast": {
           "created": "已添加供应商",
@@ -1899,6 +1902,40 @@
           "modelsBusy": "请先完成正在进行的模型列表获取或选择，再填充其他 runtime",
           "noCompatibleFields": "其他 runtime 不支持当前 runtime 中可复用的字段",
           "filledToast": "已填充 {{targets}}；各 runtime 仍独立"
+        },
+        "dsh": {
+          "label": "DeepSeek Harness",
+          "description": "可选。为 DeepSeek Harness 配置一个独立的 HTTPS 端点和 API 密钥；绝不会复用其他 runtime 的凭证。",
+          "endpoint": "DSH 端点",
+          "endpointPlaceholder": "https://api.deepseek.com",
+          "apiKey": "DSH API 密钥",
+          "apiKeyPlaceholder": "DSH API 密钥",
+          "apiKeyHelp": "端点未变时可留空，保留本机已存密钥；更换端点必须重新输入密钥。",
+          "authRequired": "DeepSeek Harness 需要 API 密钥鉴权。",
+          "runtimeStatus": {
+            "title": "运行时状态",
+            "retry": "重试",
+            "loading": "正在读取本机 DSH 状态…",
+            "unavailable": "本机 DSH 状态暂不可用，请重试。",
+            "configuration": {
+              "ready": "已配置来源：{{provider}}。",
+              "not-configured": "尚未配置 DeepSeek Harness 来源。",
+              "multiple-configured": "已配置多个 DeepSeek Harness 来源，请先选择一个来源。",
+              "auth-not-api-key": "所选来源必须使用 API 密钥鉴权。",
+              "invalid-runtime-shape": "DeepSeek Harness 设置包含不支持的运行时字段。",
+              "invalid-route": "DeepSeek Harness 端点无效。",
+              "missing-api-key": "缺少 DeepSeek Harness API 密钥。",
+              "unavailable": "DeepSeek Harness 配置暂不可用。"
+            },
+            "registration": {
+              "not-registered": "DSH 任务工厂尚未就绪。",
+              "registering": "正在准备本机 DSH 任务工厂…",
+              "task-factory-ready": "已可新建本机 DSH 任务。",
+              "reconfiguration-pending": "DSH 配置已变更，正在等待受影响任务关闭。"
+            },
+            "closeTasks": "请先关闭 {{count}} 个活跃 DSH 任务，新配置才能生效。",
+            "evidence": "模型连接、命令、文件工具、附件和审批仍须在最终签名 App 中验证。"
+          }
         }
       },
       "models": {
@@ -2151,7 +2188,11 @@
         "endpointLabel": "{{agent}} 基础 URL",
         "noAuthNote": "此 Proxy 无需客户端密钥；Cindy 会在转发前移除 CLI 的订阅凭证。",
         "signIn": "登录",
-        "setupLink": {"apiKey": "获取 API Key", "account": "注册或登录", "setup": "设置帮助"},
+        "setupLink": {
+          "apiKey": "获取 API Key",
+          "account": "注册或登录",
+          "setup": "设置帮助"
+        },
         "fetching": "正在验证连接并获取模型列表…",
         "fetchFailed": "模型列表获取失败——可先按预设推荐模型完成添加，稍后在详情里刷新",
         "manualModelHint": "未发现可用模型，请填写此 Proxy 实际提供的模型 ID。",
@@ -5692,6 +5733,26 @@
         "enabledHint": "下方卡片可以测试 Windows 工具的下载与安装，已安装的 Cindy 工具会复用。开关立即生效，刷新或重启后关闭，不改动系统工具。",
         "reportHint": "安装测试已开启：便携工具使用 Cindy 管理的副本。Windows 原生编译工具会模拟缺失，以便测试官方安装指引；关闭开关可检查真实状态。"
       }
+    },
+    "dshExistingHome": {
+      "title": "DeepSeek Harness home",
+      "description": "默认使用 Cindy 受管的 home。你可以安全地选择已有的 DeepSeek Harness home，设置中不会显示其位置。",
+      "status": {
+        "cindyManaged": "正在使用 Cindy 受管的 home",
+        "configured": "已选择已有的 DeepSeek Harness home",
+        "unavailable": "已有的 DeepSeek Harness home 不可用"
+      },
+      "managedHomeHint": "Cindy 会将 Harness 数据保留在自己的受管位置。",
+      "existingHomeHint": "Cindy 只保存使用所选 home 所需的本地授权，不会在这里显示其位置。",
+      "choose": "选择已有 home",
+      "choosing": "正在选择…",
+      "useManaged": "使用 Cindy 受管的 home",
+      "restoring": "正在恢复…",
+      "executionGate": "重启 Cindy 后将使用所选 home。它的原生配置与扩展可能会运行；切回 Cindy 受管 home 可恢复隔离。",
+      "selectionSaved": "已选择已有的 DeepSeek Harness home。重启 Cindy 后生效。",
+      "saveFailed": "保存 DeepSeek Harness home 失败，请重试。",
+      "restored": "已恢复 Cindy 受管的 home。重启 Cindy 后生效。",
+      "restoreFailed": "恢复 Cindy 受管的 home 失败，请重试。"
     }
   },
   "remoteDevice": {
@@ -8316,6 +8377,10 @@
           "prompt": "帮我为这封邮件写一份回复草稿，结合邮件往来和我的想法，先不发送。"
         }
       }
+    },
+    "dsh": {
+      "managedRuntime": "受管 DSH 运行时",
+      "managedRuntimeDetails": "在本机受管 DSH 运行时中执行。文件和图片会复制到当前任务的受限附件区；工具每次运行均需单独确认。重启后，只有在已验证本机绑定可用时，才能继续同一个任务。"
     }
   },
   "onboarding": {
@@ -10083,6 +10148,48 @@
         "active": "筛选 {{count}}",
         "reset": "重置",
         "allProjects": "所有项目"
+      }
+    },
+    "dshActivity": {
+      "ariaLabel": "DSH 本地计划与待办",
+      "title": "本地计划与待办",
+      "localOnly": "由 Cindy 本地保存，不会发送给 DSH 运行时。",
+      "refresh": "刷新本地计划与待办",
+      "unavailable": "本地计划状态暂不可用。请刷新后重试。",
+      "loading": "正在读取本地计划…",
+      "notReady": "DSH 任务正在准备本地活动状态。",
+      "readOnlyUntilResumed": "DSH 已断开连接。Main 验证任务已恢复后，才能继续编辑本地计划。",
+      "planPlaceholder": "添加本地计划",
+      "addPlan": "添加计划",
+      "empty": "尚未创建本地计划。",
+      "unnamedPlan": "未命名计划",
+      "todoPlaceholder": "添加待办",
+      "addTodo": "添加待办",
+      "unnamedTodo": "未命名待办",
+      "complete": "标记完成",
+      "cancel": "取消",
+      "status": {
+        "pending": "未开始",
+        "running": "进行中",
+        "waiting-for-input": "等待输入",
+        "waiting-for-decision": "等待决定",
+        "completed": "已完成",
+        "failed": "失败",
+        "cancelled": "已取消",
+        "disconnected": "已断开",
+        "unavailable": "不可用"
+      }
+    },
+    "dshRuntimeConfiguration": {
+      "ariaLabel": "DSH 运行时设置",
+      "title": "运行时设置",
+      "nextMessageOnly": "仅对该任务后续发送的消息生效，不会保存为供应商设置。",
+      "refresh": "刷新 DSH 运行时设置",
+      "unavailable": "运行时设置暂不可用。请重启此任务后重试。",
+      "noSelection": "未选择",
+      "control": {
+        "model": "模型",
+        "reasoning_effort": "推理强度"
       }
     }
   },

@@ -11,6 +11,7 @@ import { notifyAgentIslandSessionPatch } from './agentIslandSessionPatch.js';
 import { withSessionRouteLock, withSessionRouteLocks } from './sessionRouteLock.js';
 import { cleanupSessionRuntimeForTerminalStatus } from './sessionRuntimeCleanup.js';
 import { compactSessionToolResultsBestEffort } from './toolResultCompaction.js';
+import { dbToMakerAgentKind } from '../../shared/agentKindConversion.js';
 
 const log = createLogger('orca-team-store');
 
@@ -683,7 +684,14 @@ function workerToRecord(
 }
 
 function fromDbAgentKind(agentKind: string): MakerAgentKind {
-  return agentKind === 'codex' || agentKind === 'pi' ? agentKind : 'claude-code';
+  const makerAgentKind = dbToMakerAgentKind(agentKind);
+  if (makerAgentKind === 'dsh') {
+    throwIpcError(
+      'UNSUPPORTED_CAPABILITY',
+      'DSH sessions cannot participate in Orca teams until the managed host is enabled',
+    );
+  }
+  return makerAgentKind;
 }
 
 function msToIso(ms: number | null | undefined): string | null {

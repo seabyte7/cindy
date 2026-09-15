@@ -67,6 +67,16 @@ export const sessions = sqliteTable(
     status: text('status', { enum: ['active', 'archived', 'deleted'] })
       .notNull()
       .default('active'),
+    /**
+     * Main-only startup reservation. A DSH binding needs this session row as
+     * its foreign-key parent before the native create receipt exists, but a
+     * reserved row must not be presented as a usable user task yet.
+     */
+    startupState: text('startup_state', {
+      enum: ['ready', 'starting', 'needs_reconcile'],
+    })
+      .notNull()
+      .default('ready'),
     sdkSessionId: text('sdk_session_id'),
     totalTokenUsage: integer('total_token_usage').notNull().default(0),
     totalCostUsd: real('total_cost_usd').notNull().default(0),
@@ -261,6 +271,121 @@ export const sessions = sqliteTable(
     ),
     // IM 通用标识查询(slack 等渠道按 (source, botContextId, userId) 找会话行)
     idxImLookup: index('idx_sessions_im_lookup').on(t.source, t.imBotContextId, t.imUserId),
+  }),
+);
+
+/**
+ * Durable ownership record for one Cindy-controlled DSH ACP session.
+ *
+ * The opaque runtime id is necessary for Main-only reconciliation, but no
+ * endpoint, token, Home path, profile body, or raw runtime event is stored.
+ * `revision` makes lifecycle and cursor transitions compare-and-set instead
+ * of allowing two controllers to silently overwrite each other.
+ */
+export const dshSessionBindings = sqliteTable(
+  'dsh_session_bindings',
+  {
+    cindySessionId: text('cindy_session_id')
+      .primaryKey()
+      .references(() => sessions.id, { onDelete: 'restrict' }),
+    runtimeSessionId: text('runtime_session_id').notNull(),
+    hostScopeId: text('host_scope_id').notNull(),
+    runtimeReleaseId: text('runtime_release_id').notNull(),
+    runtimeVersion: text('runtime_version').notNull(),
+    controllerApiVersion: integer('controller_api_version').notNull(),
+    capabilityFingerprint: text('capability_fingerprint').notNull(),
+    homeMode: text('home_mode', { enum: ['cindy-managed', 'existing-dsh-home'] }).notNull(),
+    lifecycleState: text('lifecycle_state', { enum: ['active', 'closed', 'needs_reconcile'] })
+      .notNull()
+      .default('active'),
+    lastProjectedSequence: integer('last_projected_sequence').notNull().default(0),
+    revision: integer('revision').notNull().default(1),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    uniqScopeRuntime: uniqueIndex('uniq_dsh_bindings_scope_runtime').on(
+      t.hostScopeId,
+      t.runtimeSessionId,
+    ),
+    idxScopeLifecycle: index('idx_dsh_bindings_scope_lifecycle').on(
+      t.hostScopeId,
+      t.lifecycleState,
+    ),
+  }),
+);
+
+/**
+ * Durable, display-safe journal for an accepted DSH projection sequence.
+ *
+ * Each row is written in the same worker transaction that advances the
+ * corresponding binding cursor. It intentionally stores only the validated
+ * Cindy AgentEvent JSON and its digest: never raw ACP, controller details,
+ * DSH Home/profile data, endpoint or credential material.
+ */
+export const dshProjectionEvents = sqliteTable(
+  'dsh_projection_events',
+  {
+    cindySessionId: text('cindy_session_id')
+      .notNull()
+      .references(() => dshSessionBindings.cindySessionId, { onDelete: 'restrict' }),
+    sequence: integer('sequence').notNull(),
+    eventJson: text('event_json').notNull(),
+    eventSha256: text('event_sha256').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.cindySessionId, t.sequence] }),
+    idxSessionSequence: index('idx_dsh_projection_events_session_sequence').on(
+      t.cindySessionId,
+      t.sequence,
+    ),
+  }),
+);
+
+/** Canonical Cindy-owned activity state for one DSH task binding. */
+export const dshActivitySnapshots = sqliteTable(
+  'dsh_activity_snapshots',
+  {
+    cindySessionId: text('cindy_session_id')
+      .primaryKey()
+      .references(() => dshSessionBindings.cindySessionId, { onDelete: 'restrict' }),
+    hostScopeId: text('host_scope_id').notNull(),
+    activityJson: text('activity_json').notNull(),
+    activitySha256: text('activity_sha256').notNull(),
+    sequence: integer('sequence').notNull(),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    idxScopeSequence: index('idx_dsh_activity_snapshots_scope_sequence').on(
+      t.hostScopeId,
+      t.sequence,
+    ),
+  }),
+);
+
+/** Main-only prompt outcome ledger for a DSH binding. */
+export const dshPromptReceipts = sqliteTable(
+  'dsh_prompt_receipts',
+  {
+    receiptId: text('receipt_id').primaryKey(),
+    cindySessionId: text('cindy_session_id')
+      .notNull()
+      .references(() => dshSessionBindings.cindySessionId, { onDelete: 'restrict' }),
+    state: text('state', { enum: ['pending', 'acknowledged', 'uncertain'] })
+      .notNull()
+      .default('pending'),
+    stopReason: text('stop_reason', { enum: ['end_turn', 'cancelled'] }),
+    createdAt: integer('created_at').notNull(),
+    resolvedAt: integer('resolved_at'),
+  },
+  (t) => ({
+    idxSessionStateCreated: index('idx_dsh_prompt_receipts_session_state_created').on(
+      t.cindySessionId,
+      t.state,
+      t.createdAt,
+    ),
   }),
 );
 

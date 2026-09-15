@@ -2351,7 +2351,7 @@ export interface SessionChatState {
    * Codex reducer。ensureInitialMessages 从 DB sessions.agent_kind 读出来灌进。
    * 默认 'claude-code' 兼容老路径(老 session row 没有此字段时按 Claude 处理)。
    */
-  agentKind: 'claude-code' | 'codex' | 'pi';
+  agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh';
   /** 下一条消息发送时才由 main 应用的跨引擎切换意图。 */
   agentSwitchIntent: AgentSwitchIntentRecord | null;
   /**
@@ -9628,7 +9628,7 @@ setRemoteTerminalErrorProbe(hasSessionTerminalError);
 
 interface ActiveSessionSnapshot {
   sessionId: string;
-  agentKind: 'claude-code' | 'codex' | 'pi';
+  agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh';
   isTurnRunning: boolean;
 }
 
@@ -9637,7 +9637,12 @@ function isActiveSessionSnapshot(value: unknown): value is ActiveSessionSnapshot
   const item = value as Record<string, unknown>;
   return (
     typeof item.sessionId === 'string' &&
-    (item.agentKind === 'claude-code' || item.agentKind === 'codex' || item.agentKind === 'pi') &&
+    (
+      item.agentKind === 'claude-code'
+      || item.agentKind === 'codex'
+      || item.agentKind === 'pi'
+      || item.agentKind === 'dsh'
+    ) &&
     typeof item.isTurnRunning === 'boolean'
   );
 }
@@ -10676,11 +10681,12 @@ function retryInvalidatedInitialHistoryFetchIfNeeded(
  */
 function dbAgentKindToMakerKind(
   dbKind: string | null | undefined,
-  fallback: 'claude-code' | 'codex' | 'pi' = 'claude-code',
-): 'claude-code' | 'codex' | 'pi' {
+  fallback: 'claude-code' | 'codex' | 'pi' | 'dsh' = 'claude-code',
+): 'claude-code' | 'codex' | 'pi' | 'dsh' {
   if (dbKind === 'codex') return 'codex';
   if (dbKind === 'cc') return 'claude-code';
   if (dbKind === 'pi') return 'pi';
+  if (dbKind === 'dsh') return 'dsh';
   return fallback;
 }
 
@@ -13765,7 +13771,7 @@ async function sendMessageCore(
       // 用 Claude haiku 起标题:纯 Codex 用户(无 Claude 鉴权)会 oneShot 失败 →
       // fallback 原话,表现为"Codex 会话标题没有智能总结"。current.agentKind 已是
       // maker 格式('claude-code' | 'codex' | 'pi'),直接透传。起名走立即占位 + 后台覆盖。
-      if (autoTitleSeed) {
+      if (autoTitleSeed && current.agentKind !== 'dsh') {
         scheduleAutoName(
           sessionId,
           autoTitleSeed.text,
@@ -13777,7 +13783,9 @@ async function sendMessageCore(
     }
     // 补起名:首条是纯附件(只贴图没打字)、标题还是合成占位或默认名的会话,以及
     // fork 出来的占位标题会话,都在第一条带文字的消息上把标题换成用户写的内容。
-    maybeAutoNameUnnamedSession(sessionId, autoTitleSeed, current.agentKind);
+    if (current.agentKind !== 'dsh') {
+      maybeAutoNameUnnamedSession(sessionId, autoTitleSeed, current.agentKind);
+    }
   };
   if (materializationPending && remoteRecord) {
     remoteRecord.onMaterializationReady = commitAutoTitle;
@@ -14133,12 +14141,14 @@ async function steerMessageCore(
   // 素材在入队前推导(此刻 queued 还在手里),但**只有输入被受理才改名**:同会话
   // 已有在飞 steer / Stop 边界 / 输入锁都会让它被拒,拒掉的文本不该改名。
   const agentKind = getOrCreateState(sessionId).agentKind;
-  const commitAutoTitle = (titleQueued = queued) =>
+  const commitAutoTitle = (titleQueued = queued) => {
+    if (agentKind === 'dsh') return;
     maybeAutoNameUnnamedSession(
       sessionId,
       deriveAutoTitleSeed(titleQueued, autoTitleFallbackLabels()),
       agentKind,
     );
+  };
   if (deviceLinkRemote && remoteRecord) {
     // Match ordinary remote sends: the first steer attempt also belongs to the
     // outbox pump, so an invoke timeout cannot keep Send disabled. Auto-title
@@ -16135,7 +16145,7 @@ function mirrorAgentSwitchIntent(sessionId: string, value: unknown): void {
 function setSessionRuntime(
   sessionId: string,
   opts: {
-    agentKind?: 'claude-code' | 'codex' | 'pi';
+    agentKind?: 'claude-code' | 'codex' | 'pi' | 'dsh';
     fastMode?: boolean;
     planModeEnabled?: boolean;
     /** Seed before SessionView hydrates the DB row; sendMessage reads this for SSH routing. */
@@ -16227,8 +16237,12 @@ function mirrorSessionFields(
   // 新引擎的事件会被旧引擎 reducer 错误处理(2026-07-20 审计实锤)。随引擎翻转
   // 同步清 sdkSessionId(旧引擎的原生会话 id 对新引擎无意义,与 noteAgentSwitched
   // 口径一致)。幂等:发起窗口已 noteAgentSwitched → 同值 no-op。
-  if (patch.agentKind === 'cc' || patch.agentKind === 'codex' || patch.agentKind === 'pi') {
-    const nextKind = dbToMakerAgentKind(patch.agentKind);
+  if (
+    patch.agentKind === 'cc'
+    || patch.agentKind === 'codex'
+    || patch.agentKind === 'pi'
+  ) {
+    const nextKind = patch.agentKind === 'cc' ? 'claude-code' : patch.agentKind;
     setState(sessionId, (s) => {
       const intentApplied = s.agentSwitchIntent?.target === nextKind;
       if (s.agentKind === nextKind && !intentApplied) return s;

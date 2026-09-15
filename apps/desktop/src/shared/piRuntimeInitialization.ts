@@ -1,21 +1,24 @@
 import type {
   AgentKind,
+  ModelProviderAgentKind,
   ProviderPreset,
   ProviderPresetRuntime,
   ProviderRuntimeModelConfig,
 } from '@cindy/model-providers';
+import { isModelProviderAgentKind } from '@cindy/model-providers';
 
 /** Remote presets may predate explicit Pi protocol metadata. Such a runtime is not saveable. */
 export function isConfiguredPresetRuntime(
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
   runtime: ProviderPresetRuntime | undefined,
 ): runtime is ProviderPresetRuntime {
   return runtime !== undefined && (agent !== 'pi' || runtime.wireProtocol !== undefined);
 }
 
-export function configuredPresetAgents(preset: ProviderPreset): AgentKind[] {
-  return (Object.keys(preset.runtimes) as AgentKind[]).filter((agent) =>
-    isConfiguredPresetRuntime(agent, preset.runtimes[agent]),
+export function configuredPresetAgents(preset: ProviderPreset): ModelProviderAgentKind[] {
+  return (Object.keys(preset.runtimes) as AgentKind[]).filter(
+    (agent): agent is ModelProviderAgentKind =>
+      isModelProviderAgentKind(agent) && isConfiguredPresetRuntime(agent, preset.runtimes[agent]),
   );
 }
 

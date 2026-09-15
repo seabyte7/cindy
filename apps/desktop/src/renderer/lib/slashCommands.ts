@@ -17,6 +17,7 @@
  */
 
 import type { UnifiedCommand, AgentKind } from '@cindy/maker-core';
+import type { ModelProviderAgentKind } from '@cindy/model-providers';
 import { leadingSlashInvocation } from '@cindy/maker-shared';
 import type { PiPackageCommandRuntimeStatus } from '@/../shared/piPackages';
 
@@ -294,7 +295,7 @@ export function filterSlashCommands(
  * - SSH remote 由 opts.skipAgentSkills 显式禁用扫描,避免读取控制端本机 skills。
  */
 export async function loadAllCommands(
-  agentKind: AgentKind,
+  agentKind: ModelProviderAgentKind,
   workingDir: string | null | undefined,
   opts?: {
     forceReload?: boolean;

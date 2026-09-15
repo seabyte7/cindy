@@ -1,4 +1,3 @@
-import type { AgentKind } from '@cindy/maker-core';
 import {
   connectedProvidersForAgent,
   effectiveSourceIdForModel,
@@ -12,6 +11,7 @@ import {
 import type { ProviderService } from '../maker-host/provider-service.js';
 import {
   providerRouteRequiresExplicitSelection,
+  type OrcaWorkerAgentKind,
   type OrcaWorkerProviderRoutingContext,
 } from './orcaWorkerCreationService.js';
 
@@ -40,11 +40,11 @@ export async function readOrcaWorkerProviderRoutingContext(deps: {
 
   // Keep the route policy aligned with modelList.ts: disabled/non-chat capability entries do not
   // enter a new worker route, while the model registry identity remains provider-specific.
-  const routableModels = (provider: ProviderView, agent: AgentKind) =>
+  const routableModels = (provider: ProviderView, agent: OrcaWorkerAgentKind) =>
     (provider.models[agent] ?? []).filter((model) =>
       isModelSelectableForNewRoute(model, { userProvider: provider.source === 'user' }),
     );
-  const availabilityFor = (agent: AgentKind) =>
+  const availabilityFor = (agent: OrcaWorkerAgentKind) =>
     connectedProvidersForAgent(views, agent).map((provider) => {
       const models = routableModels(provider, agent);
       const registryIdentityByModel = Object.fromEntries(

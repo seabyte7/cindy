@@ -1,0 +1,8 @@
+{
+  "name": "cindy-dsh-pkg-toolchain",
+  "private": true,
+  "packageManager": "pnpm@11.7.0",
+  "dependencies": {
+    "@yao-pkg/pkg": "6.21.0"
+  }
+}

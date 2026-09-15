@@ -11,6 +11,8 @@ vi.mock('@cindy/model-providers', async (importOriginal) => ({
   connectedProvidersForAgent: vi.fn(() => []),
   effectiveSourceIdForModel: h.effectiveSourceIdForModel,
   getModel: vi.fn(() => null),
+  isModelProviderAgentKind: (value: unknown) =>
+    value === 'claude-code' || value === 'codex' || value === 'pi',
   isExclusiveXaiModelId: (model: string | null | undefined) =>
     typeof model === 'string'
     && (model.startsWith('grok') || model.startsWith('xai/grok')),

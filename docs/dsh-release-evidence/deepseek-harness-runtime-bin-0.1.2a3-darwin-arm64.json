@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "release": {
+    "packageName": "deepseek-harness-runtime-bin",
+    "pep440Version": "0.1.2a3",
+    "wheel": {
+      "filename": "deepseek_harness_runtime_bin-0.1.2a3-py3-none-macosx_14_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/b6/34/75ffd1a299973efce14cbc4b887436f634276ad04230462cbd51972c87c9/deepseek_harness_runtime_bin-0.1.2a3-py3-none-macosx_14_0_arm64.whl",
+      "sha256": "fb82bf60c4cd5e793bed6caa5060589a31f349342bd9f4bb70826a854419c32d",
+      "bytes": 72547112
+    },
+    "source": {
+      "repository": "https://github.com/deepseek-ai/deepseek-harness",
+      "tag": "dsh-v0.1.2-alpha.3",
+      "tagCommit": "dd6322d604e00eec1ba5e0c8541159906a21094a",
+      "wheelToSourceBinding": "unverified",
+      "note": "The wheel metadata and executable both identify the alpha.3 line, and this upstream tag exists. PyPI reports Trusted Publishing for the wheel, but the exact PEP 740 Integrity API provenance endpoint returned 404 during the 2026-09-02 review; that upload fact is not a source-build attestation. No release attestation binds this wheel hash to that source commit, so the relationship remains unverified."
+    },
+    "license": "MIT",
+    "noticeFile": "deepseek_harness_runtime_bin-0.1.2a3.dist-info/licenses/THIRD_PARTY_NOTICES.md"
+  },
+  "runtime": {
+    "platform": "darwin-arm64",
+    "executable": "deepseek_harness_runtime/runtime/deepseek-harness-sdk-runtime-macos-arm64",
+    "executableVersion": "0.1.2-alpha.3",
+    "requiredSidecars": [
+      "deepseek_harness_runtime/runtime/deepseek-harness-sdk-runtime-macos-arm64-rg",
+      "deepseek_harness_runtime/runtime/deepseek-harness-sdk-runtime-macos-arm64-spawn-helper"
+    ],
+    "allowedTopLevelDirectories": [
+      "deepseek_harness_runtime",
+      "deepseek_harness_runtime_bin-0.1.2a3.dist-info"
+    ],
+    "expectedFiles": [
+      "deepseek_harness_runtime/__init__.py",
+      "deepseek_harness_runtime/deepseek-harness-runtime.json",
+      "deepseek_harness_runtime/runtime/deepseek-harness-sdk-runtime-macos-arm64",
+      "deepseek_harness_runtime/runtime/deepseek-harness-sdk-runtime-macos-arm64-rg",
+      "deepseek_harness_runtime/runtime/deepseek-harness-sdk-runtime-macos-arm64-spawn-helper",
+      "deepseek_harness_runtime_bin-0.1.2a3.dist-info/METADATA",
+      "deepseek_harness_runtime_bin-0.1.2a3.dist-info/RECORD",
+      "deepseek_harness_runtime_bin-0.1.2a3.dist-info/WHEEL",
+      "deepseek_harness_runtime_bin-0.1.2a3.dist-info/entry_points.txt",
+      "deepseek_harness_runtime_bin-0.1.2a3.dist-info/licenses/LICENSE",
+      "deepseek_harness_runtime_bin-0.1.2a3.dist-info/licenses/THIRD_PARTY_NOTICES.md"
+    ],
+    "treeManifestSha256": "e5fbc8433d4d53f7569b2a5df0ca01eae04a3c4207d576fb07e41b7ef7a14693",
+    "sdkHandshake": {
+      "provider": "deepseek-official",
+      "model": "deepseek-v4-flash",
+      "serverName": "deepseek-harness-sdk-runtime",
+      "serverVersion": "0.0.1"
+    },
+    "acpHandshake": {
+      "protocolVersion": 1,
+      "agentName": "deepseek-harness-acp",
+      "agentVersion": "0.0.1",
+      "requiredSessionCapabilities": [
+        "close",
+        "list",
+        "resume"
+      ]
+    }
+  },
+  "cindyBridge": {
+    "availability": "available",
+    "contractVersion": "1",
+    "runtimeProtocol": "acp-v1",
+    "mainOwned": true,
+    "operations": {
+      "create": "passed",
+      "list": "passed",
+      "resume": "passed",
+      "follow": "passed",
+      "prompt": "passed",
+      "cancel": "passed",
+      "close": "passed",
+      "reconcile": "passed"
+    },
+    "note": "The Desktop Main DshControlPlane integration fixtures exercised the reviewed alpha.3 executable through the Cindy DshAcpClient and Main-owned stdio transport. The lifecycle fixture covers initialize, session/new, close, session/list/reconcile, resume, idle cancel, and close. The prompt fixture uses a fresh managed Home whose explicit ACP profile points only to a temporary loopback OpenAI-compatible mock with a deliberately fake key: it covers prompt, session/update follow scoped to the runtime session, cancellation while a streamed turn is running, the explicit ACP stopReason=cancelled result, and close. Cindy admits only end_turn or cancelled as a prompt terminal result. The bridge unit contract requires Main-injected workdir authorization, bounds every runtime-facing operation, and closes the carrier on timeout with needs-reconcile without replay. A missing jsonrpc 2.0 envelope, invalid request/response shape, malformed error response, unsafe runtime session id, or malformed UTF-8 stdout is a fail-closed protocol violation with no stdout payload preview in logs; any initialize rejection or malformed required session capability also closes the carrier. Main closes every child EOF -> bounded TERM -> bounded KILL -> bounded failure if exit remains unconfirmed; uncooperative-child, invalid-UTF-8, and no-close fake-child fixtures prove those teardown branches. Neither fixture reads a user credential or accesses the network."
+  },
+  "observations": {
+    "capturedAt": "2026-09-02",
+    "realBinarySmoke": "passed: --version, sdk initialize, shutdown, EOF, and SIGTERM in a new temporary DSH_HOME and non-project launcher directory; no model prompt or credentials were used.",
+    "acpControlProbe": "passed: ACP v1 initialize advertised session close/list/resume; session/new, idle session/cancel, session/close, session/list and session/resume succeeded through a temporary managed Home and non-project launcher directory. The runtime lists a session after its active handle is closed, not while it is active. No model prompt or credentials were used.",
+    "cindyBridgeIntegration": "passed: apps/desktop/src/main/maker-host/__tests__/dshControlPlane.integration.test.ts ran DshControlPlane -> DshAcpClient -> Main stdio transport -> reviewed alpha.3 executable for create, close, list/reconcile, resume, idle cancel and close. The unit contract also proves an operation timeout closes the carrier, records needs-reconcile and prevents retry. It proves Main ownership and scoped receipt flow for that no-credential lifecycle only.",
+    "cindyBridgePromptIntegration": "passed: the opt-in real-binary test configured only a temporary ACP profile under a fresh managed Home to use a loopback OpenAI-compatible mock and fake fixture key. DshControlPlane prompt produced an ACP session/update agent_message_chunk for the owned runtime session; a second streamed turn was cancelled through the bridge, returned the validated stopReason=cancelled terminal result, and settled before close. No user credential, user DSH_HOME, user profile, or network endpoint was used.",
+    "platformCoverage": "darwin-arm64 only; no Linux or Windows runner result is claimed."
+  }
+}

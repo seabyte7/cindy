@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { DSH_MANAGED_RUNTIME_MODEL_ID } from '../../../shared/dshSession';
 import { MAKER_INVOKE } from '../channels';
 import { registerMakerSessionCreateHandler } from '../sessionCreateHandler';
 import { IpcHarness } from './helpers/ipcHarness';
@@ -128,6 +129,31 @@ describe('maker session CREATE_SESSION IPC handler', () => {
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
     expect(deps.bootstrapSession).not.toHaveBeenCalled();
+  });
+
+  it('passes DSH only to the Main-owned Maker bootstrap without agent substitution', async () => {
+    const harness = new IpcHarness();
+    const deps = createDeps({
+      bootstrapSession: vi.fn().mockResolvedValue({
+        session: createSessionStub({ agentKind: 'dsh', workDir: '/repo' }),
+        didInjectOrcaInstructions: false,
+        didInjectProjectContext: false,
+      }),
+    });
+    registerMakerSessionCreateHandler(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.CREATE_SESSION, {
+        agentKind: 'dsh',
+        workingDir: '/repo',
+        model: DSH_MANAGED_RUNTIME_MODEL_ID,
+      }),
+    ).resolves.toMatchObject({ agentKind: 'dsh', workDir: '/repo' });
+    expect(deps.bootstrapSession).toHaveBeenCalledWith(expect.objectContaining({
+      agentKind: 'dsh',
+      workingDir: '/repo',
+      model: DSH_MANAGED_RUNTIME_MODEL_ID,
+    }));
   });
 
   it('maps credential mode busy from bootstrap to CREDENTIAL_SWITCH_BUSY', async () => {

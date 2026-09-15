@@ -1100,7 +1100,7 @@ export async function commitContextRebuild(
     reason:
       'context-overflow' | 'model-window-switch' | 'pi-prompt-timeout' | 'native-session-recovery';
     sourceUserClientId: string | null;
-    sourceAgentKind?: 'cc' | 'codex' | 'pi';
+    sourceAgentKind?: 'cc' | 'codex' | 'pi' | 'dsh';
     sourceModel?: string | null;
     sourceProviderId?: string | null;
     expectedClearedAt?: number | null;
@@ -1135,7 +1135,7 @@ export async function commitContextRebuild(
 export async function findLatestContextRebuildMeta(sessionId: string): Promise<{
   reason?: string;
   sourceUserClientId?: string | null;
-  sourceAgentKind?: 'cc' | 'codex' | 'pi';
+  sourceAgentKind?: 'cc' | 'codex' | 'pi' | 'dsh';
   sourceModel?: string | null;
   sourceProviderId?: string | null;
 } | null> {
@@ -1161,7 +1161,8 @@ export async function findLatestContextRebuildMeta(sessionId: string): Promise<{
         typeof parsed.sourceUserClientId === 'string' ? parsed.sourceUserClientId : null,
       ...(parsed.sourceAgentKind === 'cc' ||
       parsed.sourceAgentKind === 'codex' ||
-      parsed.sourceAgentKind === 'pi'
+      parsed.sourceAgentKind === 'pi' ||
+      parsed.sourceAgentKind === 'dsh'
         ? { sourceAgentKind: parsed.sourceAgentKind }
         : {}),
       ...(typeof parsed.sourceModel === 'string' ? { sourceModel: parsed.sourceModel } : {}),
@@ -1532,7 +1533,8 @@ export async function createMessage(
      * agentMeta 需要它;main 侧 SDK 事件落库路径必传,renderer pending echo 等
      * 无 SDK 元信息的行留空(null 回落 session.agentKind)。
      */
-    agentKind?: 'cc' | 'codex' | 'pi' | null;
+    /** Persist the recognized DSH identity; execution remains unavailable in F1. */
+    agentKind?: 'cc' | 'codex' | 'pi' | 'dsh' | null;
     createdAt?: number;
   },
   opts?: {

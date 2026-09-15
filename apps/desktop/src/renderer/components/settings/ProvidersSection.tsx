@@ -101,6 +101,7 @@ import { SortableList } from '@/components/sidebar/SortableList';
 import { localCliDisplayName, type LocalCliDetection } from '../../../shared/localCliDetect';
 import { isBuiltinRefreshableProviderId } from '../../../shared/providerModelRefresh';
 import { applyProviderOrder } from '../../../shared/providerOrder';
+import { isModelProviderAgentKind } from '@cindy/model-providers';
 import type { AgentKind, CustomProviderConfig, ProviderView } from '@cindy/model-providers';
 
 // ---------------------------------------------------------------------------
@@ -119,6 +120,11 @@ function providerHasModels(provider: ProviderView): boolean {
     (provider.audioModels?.length ?? 0) > 0 ||
     (provider.embeddingModels?.length ?? 0) > 0
   );
+}
+
+/** DSH is a runtime profile, not a model catalog; its provider must still be manageable. */
+function providerHasDshRuntime(provider: ProviderView): boolean {
+  return provider.agents.includes('dsh');
 }
 
 /**
@@ -2114,6 +2120,7 @@ export function ProvidersSection() {
         (p.id === MANAGED_OLLAMA_PROVIDER_ID ||
           p.id === MANAGED_LMSTUDIO_PROVIDER_ID ||
           providerHasModels(p) ||
+          providerHasDshRuntime(p) ||
           (p.auth.method === 'oauth' && (!!p.auth.oauth || !!p.auth.native)))
       ) {
         rows.push(p);
@@ -2386,7 +2393,7 @@ export function ProvidersSection() {
         const config = providerViewToCustomProviderConfig(p);
         let added = 0;
         let anyOk = false;
-        for (const agent of p.agents) {
+        for (const agent of p.agents.filter(isModelProviderAgentKind)) {
           const rt = config.runtimes[agent];
           if (!rt?.baseUrl) continue;
           const authMethod =

@@ -29,7 +29,8 @@ const messageRowid = sql<number>`"messages"."rowid"`;
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export type HistoryOrder = 'asc' | 'desc';
-export type HistoryAgentKind = 'cc' | 'codex' | 'pi';
+/** Persisted history preserves a known DSH identity even while it is not runnable. */
+export type HistoryAgentKind = 'cc' | 'codex' | 'pi' | 'dsh';
 
 export interface HistoryCursor {
   createdAt: number; // unix ms

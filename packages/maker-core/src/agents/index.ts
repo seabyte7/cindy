@@ -19,6 +19,70 @@ export {
 // finalizeCodexCitationText = 剥截断残尾 + 归一化(与流式 completed 完全同口径)。
 export { finalizeCodexCitationText, normalizeCodexFileCitations } from './codex/translator.js';
 export { PiAgent } from './pi/index.js';
+// DSH is a product AgentKind as of F1. Its adapter is exportable for Main-owned
+// bridge integration tests, but remains unregistered until the managed host and
+// durable recovery admission gates are complete. An attempted product DSH
+// session must therefore fail explicitly rather than falling back to another agent.
+export { DshAgent, type DshAgentOptions } from './dsh/index.js';
+export {
+  DSH_BRIDGE_CONTRACT_VERSION,
+  type DshBridgeAgentReceipt,
+  type DshBridgeAgentResumeReceipt,
+  type DshBridgeAgentSessionReceipt,
+  type DshBridgeAgentSessionRef,
+  type DshBridgeCommittedFollowEvent,
+  type DshBridgeCommittedFollowHandler,
+  type DshBridgePermissionDecision,
+  type DshBridgePermissionRequest,
+  type DshBridgePermissionResolver,
+  type DshBridgePort,
+  type DshBridgePromptContent,
+  type DshBridgePromptReceipt,
+  type DshBridgePromptStopReason,
+  type DshBridgeReceiptId,
+} from './dsh/bridge-port.js';
+export {
+  translateDshFollowEvent,
+  type DshFollowTranslation,
+} from './dsh/translator.js';
+export {
+  DSH_ACTIVITY_CONTRACT_VERSION,
+  DSH_ACTIVITY_ORIGIN,
+  createEmptyDshActivitySnapshot,
+  isDshActivitySnapshot,
+  reduceDshActivity,
+  type DshActivityAction,
+  type DshActivityCreateInput,
+  type DshActivityKind,
+  type DshActivityMutation,
+  type DshActivityObject,
+  type DshActivityReconnectInput,
+  type DshActivityReduceResult,
+  type DshActivityRejectionReason,
+  type DshActivitySnapshot,
+  type DshActivityStatus,
+  type DshActivitySummaryCode,
+  type DshActivityTransitionInput,
+  type DshActivityUnavailableReason,
+} from './dsh/activity.js';
+export {
+  DshAcpClient,
+  DshAcpRequestError,
+  DshAcpRequestTimeoutError,
+  type DshAcpClientOptions,
+  type DshAcpInitializeResult,
+  type DshAcpPromptResult,
+  type DshAcpSessionClient,
+  type DshAcpNotificationHandler,
+  type DshAcpServerRequestHandler,
+  type DshAcpTransportCloseHandler,
+} from './dsh/acp-client.js';
+export type {
+  DshAcpTransport,
+  DshAcpTransportCloseInfo,
+  DshAcpLineHandler,
+  DshAcpCloseHandler,
+} from './dsh/transport.js';
 export {
   canReuseCodexHostForCredentialMode,
   canReuseHostForCredentialMode,

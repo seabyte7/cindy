@@ -82,12 +82,30 @@ export interface SessionStartFailureContext {
   runtimeMayBeAlive?: boolean;
 }
 
+/**
+ * A host-owned durable parent reservation for agents whose native lifecycle
+ * must write child records before Maker can publish its normal session row.
+ * The token never crosses an agent/IPC boundary.
+ */
+export interface SessionMetadataReservation {
+  commit(sdkSessionId?: string): Promise<SessionMeta>;
+  rollback(): Promise<void>;
+}
+
 export interface SessionLifecycleHooks {
   /**
    * Agent 启动前补齐 start options。该步骤属于正确启动的前置条件，失败会阻断创建。
    * 允许直接修改 options；Maker 会把同一个对象传给 agent 和成功钩子。
    */
   prepareStartOptions?: (sessionId: string, options: CreateSessionOptions) => void | Promise<void>;
+  /**
+   * Optionally reserve a host session parent before the agent starts. DSH uses
+   * this because its durable native binding has a foreign key to that parent;
+   * other agents retain the historical start-then-persist ordering.
+   */
+  reserveSessionMetadata?: (
+    meta: Omit<SessionMeta, 'createdAt' | 'updatedAt'>,
+  ) => SessionMetadataReservation | null | Promise<SessionMetadataReservation | null>;
   /** Agent 启动前的 host 准备动作。失败只记日志，不阻断 session 创建。 */
   onBeforeStart?: (context: SessionBeforeStartContext) => void | Promise<void>;
   /** Agent 和 Session 均创建成功后、对外发布前调用。失败只记日志，不阻断创建。 */
@@ -405,6 +423,13 @@ export class Maker {
   >();
   /** All create paths, including anonymous ids, that may still publish or quarantine a handle. */
   private readonly pendingSessionCreations = new Set<Promise<Session>>();
+  /**
+   * A dynamic agent replacement must not remove an adapter while one of its
+   * sessions is still in the interval before it can be published into
+   * activeSessions.  Keep the small per-kind counter in the Maker, where both
+   * registration and session creation are serialized by the same event loop.
+   */
+  private readonly pendingAgentSessionCreations = new Map<AgentKind, number>();
   /** Once shutdown starts, no new handle may race past its creation barrier. */
   private shutdownStarted = false;
   /**
@@ -545,12 +570,17 @@ export class Maker {
     if (this.shutdownStarted) {
       throw new Error('Maker is shutting down; refusing to create a new session');
     }
+    const pendingForKind = (this.pendingAgentSessionCreations.get(opts.agentKind) ?? 0) + 1;
+    this.pendingAgentSessionCreations.set(opts.agentKind, pendingForKind);
     const creation = this.createSessionWhileRunning(opts);
     this.pendingSessionCreations.add(creation);
     try {
       return await creation;
     } finally {
       this.pendingSessionCreations.delete(creation);
+      const remaining = (this.pendingAgentSessionCreations.get(opts.agentKind) ?? 1) - 1;
+      if (remaining > 0) this.pendingAgentSessionCreations.set(opts.agentKind, remaining);
+      else this.pendingAgentSessionCreations.delete(opts.agentKind);
     }
   }
 
@@ -696,6 +726,29 @@ export class Maker {
     // business id 在 close/rebuild 后会复用；另铸一个只活在本次内存实例里的
     // 代号，让迟到的旧 MCP 请求不能借用新 Session 的权限状态。
     const sessionInstanceId = generateSessionId();
+    const metadataInput: Omit<SessionMeta, 'createdAt' | 'updatedAt'> = {
+      id,
+      agentKind: opts.agentKind,
+      workDir: startOpts.workingDir,
+      title: startOpts.title ?? DEFAULT_DRAFT_SESSION_TITLE,
+      model: startOpts.model,
+      workspaceKind: startOpts.workspaceKind,
+      effort: startOpts.effort,
+      permissionMode: startOpts.permissionMode,
+      fastMode: startOpts.fastMode,
+      reviewMode: startOpts.reviewMode,
+      parentSessionId: startOpts.parentSessionId,
+      remoteHostId: startOpts.remoteHostId,
+    };
+    let metadataReservation: SessionMetadataReservation | null = null;
+    if (this.lifecycleHooks.reserveSessionMetadata) {
+      try {
+        metadataReservation = await this.lifecycleHooks.reserveSessionMetadata(metadataInput);
+      } catch (error) {
+        await notifyStartFailed('prepare', error);
+        throw error;
+      }
+    }
     let codexThreadClaim: CodexThreadClaimLease | null = null;
     let handle: AgentSessionHandle;
     let agentStartAttempted = false;
@@ -743,6 +796,14 @@ export class Maker {
         void error.whenStopped.then(notifyStartCleanupSucceeded).catch((cleanupError) => {
           this.logger.warn('adapter startup cleanup remains unconfirmed', {
             sessionId: id, error: String(cleanupError),
+          });
+        });
+      }
+      if (metadataReservation) {
+        await metadataReservation.rollback().catch((rollbackError) => {
+          this.logger.warn('failed to rollback reserved session metadata after agent startup failure', {
+            sessionId: id,
+            error: String(rollbackError),
           });
         });
       }
@@ -818,32 +879,37 @@ export class Maker {
     let createdMetadata = false;
     let updatedSdkSessionId = false;
     try {
-      existingRowBeforePersistence = opts.id ? await this.storage.get(opts.id) : null;
-      if (existingRowBeforePersistence) {
+      if (metadataReservation) {
+        meta = await metadataReservation.commit(handle.id !== '<pending>' ? handle.id : undefined);
+        createdMetadata = true;
+      } else {
+        existingRowBeforePersistence = opts.id ? await this.storage.get(opts.id) : null;
+        if (existingRowBeforePersistence) {
         updatedSdkSessionId = handle.id !== '<pending>'
           && existingRowBeforePersistence.sdkSessionId !== handle.id;
         meta = updatedSdkSessionId
           ? await this.storage.update(id, { sdkSessionId: handle.id })
           : existingRowBeforePersistence;
-      } else {
-        meta = await this.storage.create({
-          id,
-          agentKind: opts.agentKind,
-          workDir: opts.workingDir,
-          title: opts.title ?? DEFAULT_DRAFT_SESSION_TITLE,
-          model: opts.model,
-          workspaceKind: opts.workspaceKind,
-          effort: opts.effort,
-          permissionMode: opts.permissionMode,
-          fastMode: opts.fastMode,
-          reviewMode: opts.reviewMode,
-          parentSessionId: opts.parentSessionId,
+        } else {
+          meta = await this.storage.create({
+            id,
+            agentKind: opts.agentKind,
+            workDir: opts.workingDir,
+            title: opts.title ?? DEFAULT_DRAFT_SESSION_TITLE,
+            model: opts.model,
+            workspaceKind: opts.workspaceKind,
+            effort: opts.effort,
+            permissionMode: opts.permissionMode,
+            fastMode: opts.fastMode,
+            reviewMode: opts.reviewMode,
+            parentSessionId: opts.parentSessionId,
           // remoteHostId: 远端 session 把目标机器持久化, 之后 resume / list 都能识别。
           // 本地 session 留 undefined (sqlite 落空), 跟历史行为兼容。
           remoteHostId: opts.remoteHostId,
           sdkSessionId: handle.id !== '<pending>' ? handle.id : undefined,
-        });
-        createdMetadata = true;
+          });
+          createdMetadata = true;
+        }
       }
     } catch (error) {
       // 轮 40-w4-t5 CRITICAL:agent-agnostic 回滚 —— startSession 成功后 storage
@@ -870,6 +936,14 @@ export class Maker {
       }
       if (!cleanupFailed && codexThreadClaim) {
         codexThreadClaim.release();
+      }
+      if (metadataReservation) {
+        await metadataReservation.rollback().catch((rollbackError) => {
+          this.logger.warn('failed to rollback reserved session metadata after persistence failure', {
+            sessionId: id,
+            error: String(rollbackError),
+          });
+        });
       }
       await notifyStartFailed('storage', error, cleanupFailed);
       throw error;
@@ -1348,6 +1422,24 @@ export class Maker {
     if (this.shutdownStarted) return false;
     if (this.agents[kind]) return false;
     this.agents[kind] = agent;
+    return true;
+  }
+
+  /**
+   * Remove one optional runtime without disturbing unrelated agents.
+   *
+   * The expected-instance check makes an old lifecycle callback harmless after
+   * a newer runtime has been installed.  A live or pre-publication session
+   * keeps ownership of its adapter, so replacement callers must drain it
+   * explicitly rather than silently switching a task underneath the user.
+   */
+  unregisterAgent(kind: AgentKind, expectedAgent: BaseAgent): boolean {
+    if (this.agents[kind] !== expectedAgent) return false;
+    if (this.pendingAgentSessionCreations.get(kind)) return false;
+    if ([...this.activeSessions.values()].some((session) => session.agentKind === kind)) {
+      return false;
+    }
+    delete this.agents[kind];
     return true;
   }
 

@@ -24,6 +24,15 @@ const desktopTestInclude = [
 const gitIntegrationTestInclude = [
   'src/main/**/*.git-integration.test.ts',
 ];
+// These two DSH package tests deliberately use Node's built-in test runner:
+// they validate plain Node packaging helpers and are invoked by the root
+// `test:runner` command. Do not hand them to Vitest as well; `node:test`
+// registrations are not a Vitest suite and make the Desktop unit gate fail at
+// collection time.
+const nodeTestScriptExclude = [
+  'scripts/package-dsh-local-macos.test.mjs',
+  'scripts/stage-dsh-macos-supervised-runtime.test.mjs',
+];
 
 export default defineConfig({
   define: {
@@ -103,7 +112,7 @@ export default defineConfig({
         test: {
           name: 'standard',
           include: desktopTestInclude,
-          exclude: [...gitIntegrationTestInclude, ...cliTestExclude],
+          exclude: [...gitIntegrationTestInclude, ...nodeTestScriptExclude, ...cliTestExclude],
         },
       },
       {

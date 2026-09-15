@@ -3,7 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { AlertTriangle, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import type { AgentKind, ProviderView } from '@cindy/model-providers';
+import type { ModelProviderAgentKind, ProviderView } from '@cindy/model-providers';
 
 import { cn } from '@/lib/utils';
 import { toast } from '@/lib/toast';
@@ -14,7 +14,7 @@ import type {
 } from '../../../shared/modelPriceOverride';
 import type { UnionModelRow } from './UnifiedModelList';
 
-const AGENT_LABEL: Record<AgentKind, string> = {
+const AGENT_LABEL: Record<ModelProviderAgentKind, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
   pi: 'Pi',
@@ -70,7 +70,7 @@ function parseOptionalPrice(value: string): number | null | 'invalid' {
 
 export function ModelPriceOverrideDialog({ provider, row, open, onOpenChange }: Props) {
   const { t } = useTranslation();
-  const [agent, setAgent] = useState<AgentKind>(row.avail[0]);
+  const [agent, setAgent] = useState<ModelProviderAgentKind>(row.avail[0]);
   const [view, setView] = useState<ModelPriceOverrideView | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [loading, setLoading] = useState(false);

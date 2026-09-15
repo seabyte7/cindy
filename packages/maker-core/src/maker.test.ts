@@ -98,6 +98,29 @@ describe('Maker agent status', () => {
     });
   });
 
+  it('does not substitute Claude when an unregistered DSH session is requested', async () => {
+    const claudeStart = vi.fn(async () => ({
+      id: 'unexpected-claude-handle',
+      events: async function* (): AsyncGenerator<AgentEvent> {},
+      send: async () => {},
+      close: async () => {},
+    }));
+    const maker = new Maker({
+      agents: { 'claude-code': createAgent(claudeStart, 'claude-code') },
+      storage: createStorage(),
+      logger: createLogger(),
+    });
+
+    await expect(maker.createSession({
+      id: 'dsh-unregistered',
+      agentKind: 'dsh',
+      workingDir: '/repo',
+      model: 'dsh-default',
+    })).rejects.toThrow("Agent 'dsh' is not registered");
+    expect(claudeStart).not.toHaveBeenCalled();
+    expect(maker.listAvailableAgents()).toEqual(['claude-code']);
+  });
+
   it('registers an optional agent after construction idempotently', () => {
     const maker = new Maker({
       agents: {},
@@ -109,6 +132,43 @@ describe('Maker agent status', () => {
     expect(maker.registerAgent('pi', pi)).toBe(true);
     expect(maker.registerAgent('pi', pi)).toBe(false);
     expect(maker.listAvailableAgents()).toEqual(['pi']);
+  });
+
+  it('removes only the expected idle optional agent', () => {
+    const maker = new Maker({
+      agents: {},
+      storage: createStorage(),
+      logger: createLogger(),
+    });
+    const dsh = createAgent(async () => undefined, 'dsh');
+    const differentDsh = createAgent(async () => undefined, 'dsh');
+
+    expect(maker.registerAgent('dsh', dsh)).toBe(true);
+    expect(maker.unregisterAgent('dsh', differentDsh)).toBe(false);
+    expect(maker.listAvailableAgents()).toEqual(['dsh']);
+    expect(maker.unregisterAgent('dsh', dsh)).toBe(true);
+    expect(maker.listAvailableAgents()).toEqual([]);
+  });
+
+  it('does not remove an optional agent while its session startup is pending', async () => {
+    const started = createDeferred<AgentSessionHandle>();
+    const dsh = createAgent(async () => await started.promise, 'dsh');
+    const maker = new Maker({ agents: { dsh }, storage: createStorage(), logger: createLogger() });
+
+    const creating = maker.createSession({
+      id: 'pending-dsh',
+      agentKind: 'dsh',
+      workingDir: '/repo',
+      model: 'dsh-default',
+    });
+    expect(maker.unregisterAgent('dsh', dsh)).toBe(false);
+
+    const handle = createHandle({ id: 'pending-dsh-native', agentKind: 'dsh' });
+    handle.close = vi.fn(async () => undefined);
+    started.resolve(handle);
+    const session = await creating;
+    await maker.closeSessionIfCurrent(session);
+    expect(maker.unregisterAgent('dsh', dsh)).toBe(true);
   });
 });
 
@@ -1452,6 +1512,75 @@ describe('Maker before-start lifecycle hook', () => {
 });
 
 describe('Maker start-option lifecycle hooks', () => {
+  it('reserves a DSH parent before native startup and commits it before publish', async () => {
+    const rows = new Map<string, SessionMeta>();
+    const storage = createStorage();
+    const order: string[] = [];
+    const maker = new Maker({
+      agents: {
+        dsh: createAgent(async (opts) => {
+          order.push('native-create');
+          // This models the DSH durable binding foreign key: the parent must
+          // exist before the native receipt can be persisted.
+          expect(rows.get(opts.sessionId!)).toMatchObject({ id: 'dsh-fresh', agentKind: 'dsh' });
+          return createHandle({ id: 'opaque-dsh-handle' });
+        }, 'dsh'),
+      },
+      storage,
+      logger: createLogger(),
+      lifecycleHooks: {
+        reserveSessionMetadata: async (meta) => {
+          if (meta.agentKind !== 'dsh') return null;
+          order.push('reserve');
+          const row: SessionMeta = { ...meta, createdAt: 1, updatedAt: 1 };
+          rows.set(meta.id, row);
+          return {
+            commit: async (sdkSessionId) => {
+              order.push('commit');
+              const committed = { ...row, sdkSessionId, updatedAt: 2 };
+              rows.set(meta.id, committed);
+              return committed;
+            },
+            rollback: async () => {
+              order.push('rollback');
+              rows.delete(meta.id);
+            },
+          };
+        },
+      },
+    });
+
+    await maker.createSession({
+      id: 'dsh-fresh', agentKind: 'dsh', workingDir: '/repo', model: 'dsh-managed',
+    });
+
+    expect(order).toEqual(['reserve', 'native-create', 'commit']);
+    expect(rows.get('dsh-fresh')?.sdkSessionId).toBe('opaque-dsh-handle');
+  });
+
+  it('rolls back a DSH parent reservation when native startup fails', async () => {
+    const rows = new Map<string, SessionMeta>();
+    const rollback = vi.fn(async () => rows.delete('dsh-fails'));
+    const maker = new Maker({
+      agents: { dsh: createAgent(vi.fn().mockRejectedValue(new Error('native create failed')), 'dsh') },
+      storage: createStorage(),
+      logger: createLogger(),
+      lifecycleHooks: {
+        reserveSessionMetadata: async (meta) => {
+          if (meta.agentKind !== 'dsh') return null;
+          rows.set(meta.id, { ...meta, createdAt: 1, updatedAt: 1 });
+          return { commit: async () => { throw new Error('unexpected commit'); }, rollback };
+        },
+      },
+    });
+
+    await expect(maker.createSession({
+      id: 'dsh-fails', agentKind: 'dsh', workingDir: '/repo', model: 'dsh-managed',
+    })).rejects.toThrow('native create failed');
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(rows.has('dsh-fails')).toBe(false);
+  });
+
   it('prepares mutable start options before the agent and marks success before publish', async () => {
     const order: string[] = [];
     const startSession = vi.fn(async (opts: CreateSessionOptions) => {

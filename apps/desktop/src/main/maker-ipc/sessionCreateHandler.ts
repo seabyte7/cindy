@@ -88,6 +88,11 @@ export function registerMakerSessionCreateHandler<TSession extends MakerSessionC
       deps.warnStderr,
     );
 
+    // DSH reaches this generic transaction only after Maker's optional Main
+    // registration gate has admitted the packaged local bridge. If it is not
+    // registered, Maker rejects before a session handle or durable metadata is
+    // created; do not substitute another agent or silently fall back.
+
     const run = async () => {
       let bootstrapped: Awaited<ReturnType<typeof deps.bootstrapSession>>;
       try {

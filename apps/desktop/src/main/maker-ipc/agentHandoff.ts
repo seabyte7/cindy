@@ -12,9 +12,10 @@
  */
 
 import { projectPersistedAgentFacingUserText } from '@cindy/maker-shared/agent-input-projection';
+import type { DbAgentKind as PersistedDbAgentKind } from '../../shared/agentKindConversion.js';
 
 /** DB 层引擎标识(sessions.agent_kind / messages.agent_kind 的值域)。 */
-export type DbAgentKind = 'cc' | 'codex' | 'pi';
+export type DbAgentKind = PersistedDbAgentKind;
 
 /** 构造交接文本所需的最小消息投影(content 已 JSON.parse,即 camel Message.content)。 */
 export interface HandoffSourceMessage {

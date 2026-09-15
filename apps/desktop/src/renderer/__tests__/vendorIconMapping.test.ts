@@ -9,6 +9,11 @@ import { describe, expect, it } from 'vitest';
 import { agentKindToVendor } from '@/components/sidebar/VendorIcon';
 
 describe('agentKindToVendor', () => {
+  it('keeps DSH distinct from Claude Code and does not disguise future values as Claude Code', () => {
+    expect(agentKindToVendor('dsh')).toBe('dsh');
+    expect(agentKindToVendor('future-agent')).toBe('unknown');
+  });
+
   it('maps pi sessions to the pi vendor mark (2026-07-30 regression)', () => {
     expect(agentKindToVendor('pi')).toBe('pi');
   });

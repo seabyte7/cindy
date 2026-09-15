@@ -13,6 +13,8 @@ import {
   effectiveSourceIdForModel,
   getModel,
   isModelSelectableForNewRoute,
+  isModelProviderAgentKind,
+  type ModelProviderAgentKind,
   type ProviderView,
 } from '@cindy/model-providers';
 
@@ -28,6 +30,7 @@ import {
   type ImDefaultAgentSettings,
   type ImDefaultSettingsChannel,
 } from '../../shared/imDefaultSettings.js';
+import type { ImDefaultAgentKind } from '../../shared/imDefaultSettings.js';
 import { createLogger } from '../logger';
 import { getMaker } from '../maker-host';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService';
@@ -35,6 +38,15 @@ import { readImDefaultSettings } from './defaultSettingsStore';
 import type { ImOrchestratorConfig } from './shared/types';
 
 const log = createLogger('im:defaults');
+
+function requireImModelProviderAgent(
+  agentKind: AgentKind,
+): ModelProviderAgentKind {
+  if (!isModelProviderAgentKind(agentKind)) {
+    throw new Error('DSH is unavailable for IM default sessions until its managed host is registered');
+  }
+  return agentKind;
+}
 
 export interface ResolvedImSessionDefaults {
   agentKind: AgentKind;
@@ -50,6 +62,7 @@ export function getImDefaultEffortFor(
   modelId: string,
   overrides: Readonly<Partial<Record<string, Effort>>> = IM_DEFAULT_EFFORT_OVERRIDES,
 ): Effort {
+  agentKind = requireImModelProviderAgent(agentKind);
   const model = getMaker()
     .getCapabilities(agentKind)
     .availableModels.find((m) => m.id === modelId);
@@ -65,6 +78,7 @@ export async function resolveImSessionDefaults(
   providerSnapshot?: ProviderView[] | null,
   channel?: ImDefaultSettingsChannel,
 ): Promise<ResolvedImSessionDefaults> {
+  requireImModelProviderAgent(config.agentKind);
   const raw = readImDefaultSettings(channel);
   const providers =
     providerSnapshot === undefined ? await listProvidersForDefaults() : providerSnapshot;
@@ -116,17 +130,19 @@ export async function resolveDefaultProviderIdForModel(
   modelId: string,
   providerId: string | null,
 ): Promise<string | null> {
+  agentKind = requireImModelProviderAgent(agentKind);
   if (!providerId) return null;
   const providers = await listProvidersForDefaults();
   return resolveProviderId(providers, agentKind, modelId, providerId);
 }
 
 function pickModel(
-  requestedAgent: AgentKind,
+  requestedAgent: ImDefaultAgentKind,
   settings: ImDefaultAgentSettings,
   config: ImOrchestratorConfig,
   providers: ProviderView[] | null,
-): { agentKind: AgentKind; modelId: string } {
+): { agentKind: ImDefaultAgentKind; modelId: string } {
+  const configuredAgent = requireImModelProviderAgent(config.agentKind);
   if (hasModel(requestedAgent, settings.model, providers)) {
     return { agentKind: requestedAgent, modelId: settings.model };
   }
@@ -151,13 +167,13 @@ function pickModel(
     return { agentKind: requestedAgent, modelId: firstForRequestedAgent };
   }
 
-  if (hasModel(config.agentKind, config.defaultModel, providers)) {
+  if (hasModel(configuredAgent, config.defaultModel, providers)) {
     log.warn('im default agent has no models; falling back to channel config', {
       requestedAgent,
-      fallbackAgent: config.agentKind,
+      fallbackAgent: configuredAgent,
       fallbackModel: config.defaultModel,
     });
-    return { agentKind: config.agentKind, modelId: config.defaultModel };
+    return { agentKind: configuredAgent, modelId: config.defaultModel };
   }
 
   // 硬编码系统兜底同样过准入(PR #744 review 第十五轮):走到这里时该 agent 的
@@ -174,7 +190,7 @@ function pickModel(
     }
     log.warn('im default: all model sources exhausted; using admitted system fallback', {
       requestedAgent,
-      channelAgent: config.agentKind,
+      channelAgent: configuredAgent,
       channelModel: config.defaultModel,
       fallbackModel: lenient.model,
     });
@@ -182,7 +198,7 @@ function pickModel(
   }
   log.warn('im default: all model sources exhausted; using hardcoded system default', {
     requestedAgent,
-    channelAgent: config.agentKind,
+    channelAgent: configuredAgent,
     channelModel: config.defaultModel,
   });
   return { agentKind: systemAgent, modelId: systemFallbackModel };

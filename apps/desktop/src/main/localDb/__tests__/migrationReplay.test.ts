@@ -208,6 +208,31 @@ describeMigrationReplay('migration replay', () => {
       expect(tableExists(db, 'wechat_outbox')).toBe(true);
       expect(tableExists(db, 'wechat_file_attachments')).toBe(true);
       expect(tableExists(db, 'schedule_session_latest_runs')).toBe(true);
+      expect(tableExists(db, 'dsh_session_bindings')).toBe(true);
+      expect(tableExists(db, 'dsh_projection_events')).toBe(true);
+      expect(tableExists(db, 'dsh_prompt_receipts')).toBe(true);
+      expect(tableExists(db, 'dsh_activity_snapshots')).toBe(true);
+      expect(columnNames(db, 'dsh_session_bindings')).toEqual(
+        expect.arrayContaining([
+          'cindy_session_id',
+          'runtime_session_id',
+          'host_scope_id',
+          'runtime_release_id',
+          'runtime_version',
+          'controller_api_version',
+          'capability_fingerprint',
+          'home_mode',
+          'lifecycle_state',
+          'last_projected_sequence',
+          'revision',
+        ]),
+      );
+      expect(columnNames(db, 'sessions')).toContain('startup_state');
+      expect(indexExists(db, 'uniq_dsh_bindings_scope_runtime')).toBe(true);
+      expect(indexExists(db, 'idx_dsh_bindings_scope_lifecycle')).toBe(true);
+      expect(indexExists(db, 'idx_dsh_projection_events_session_sequence')).toBe(true);
+      expect(indexExists(db, 'idx_dsh_prompt_receipts_session_state_created')).toBe(true);
+      expect(indexExists(db, 'idx_dsh_activity_snapshots_scope_sequence')).toBe(true);
       expect(indexExists(db, 'idx_messages_active_error_tail')).toBe(true);
       expect(indexExists(db, 'idx_schedule_runs_running_schedule')).toBe(true);
       expect(indexExists(db, 'idx_schedule_runs_running_heartbeat')).toBe(true);

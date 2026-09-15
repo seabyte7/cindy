@@ -47,6 +47,22 @@ describe('NewMakerDraftRoute local first-message send', () => {
     expect(seedBlock).toContain('remoteHostId: workingDir ? (effectiveRemoteHostId ?? null) : null');
   });
 
+  it('keeps DSH as the runtime identity when seeding the local first send', () => {
+    const seed = source.indexOf(
+      'makerChatStore.setSessionRuntime(newSession.id, {',
+      source.indexOf("workspaceKind: workingDir ? 'project' : 'dialogue'"),
+    );
+    const seedBlock = source.slice(seed, source.indexOf('});', seed) + 3);
+
+    expect(seed).toBeGreaterThan(-1);
+    // capabilityAgentKind is only a generic model-catalog lookup key. Using
+    // it as the persisted runtime would route a DSH first prompt to Claude.
+    expect(seedBlock).toContain(
+      "agentKind: persistedAgentKind === 'cc' ? 'claude-code' : persistedAgentKind",
+    );
+    expect(seedBlock).not.toContain('agentKind: capabilityAgentKind');
+  });
+
   it('does not register a memory-only pending payload for ordinary local text', () => {
     const localSend = source.indexOf('const sendPromise = makerChatStore.sendMessage(', localFence);
     const pendingAfterSend = source.indexOf('setPending(newSession.id', localSend);

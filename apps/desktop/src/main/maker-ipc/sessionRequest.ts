@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import type { AgentKind, CreateSessionOptions, WorkspaceKind } from '@cindy/maker-core';
 
+import { DSH_MANAGED_RUNTIME_MODEL_ID } from '../../shared/dshSession.js';
 import { requireObject, requireString, throwIpcError } from '../utils/ipcValidate.js';
 
 /**
@@ -68,7 +69,7 @@ export interface ReadCreateSessionOptsDeps {
 }
 
 function readAgentKind(value: unknown): AgentKind {
-  if (value === 'claude-code' || value === 'codex' || value === 'pi') return value;
+  if (value === 'claude-code' || value === 'codex' || value === 'pi' || value === 'dsh') return value;
   throwIpcError('INVALID_PARAMS', 'agentKind required');
 }
 
@@ -112,6 +113,14 @@ export function readCreateSessionOpts(
   const body = requireObject(input, 'createSession opts');
   const agentKind = readAgentKind(body.agentKind);
   const model = requireString(body.model, 'model');
+  if (agentKind === 'dsh') {
+    if (model !== DSH_MANAGED_RUNTIME_MODEL_ID) {
+      throwIpcError('INVALID_PARAMS', 'DSH requires the Cindy-managed runtime model marker');
+    }
+    if (body.providerId !== undefined && body.providerId !== null) {
+      throwIpcError('INVALID_PARAMS', 'DSH does not accept a renderer-selected provider');
+    }
+  }
   const workspaceKind = readWorkspaceKind(body.workspaceKind);
   const explicitWorkingDir = readExplicitWorkingDir(body.workingDir);
   const needsDialogueWorkspace =

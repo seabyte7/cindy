@@ -24,10 +24,12 @@ import { isLegacyGptContextProfile } from './legacy-context-profiles.js';
 import {
   PI_REASONING_EFFORTS,
   isAgentSelectableModel,
+  isModelProviderAgentKind,
   isModelSelectableForNewRoute,
   type Catalog,
   type CatalogModel,
   type AgentKind,
+  type ModelProviderAgentKind,
 } from '@cindy/model-providers';
 import type { ModelDescriptor } from '@cindy/maker-core';
 import type { ModelCatalogOverrides } from './model-plane/localCatalogOverrides.js';
@@ -64,7 +66,7 @@ function hasValidPiReasoningCapabilities(m: CatalogModel): boolean {
 /** CatalogModel → ModelDescriptor。仅透传 ModelDescriptor 需要的字段；可选字段缺省时不写键。 */
 function toDescriptor(
   m: CatalogModel,
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
   options: DescriptorProjectionOptions = {},
 ): ModelDescriptor {
   // 缺少或格式错误的 Pi 能力字段继续走旧目录 minimal 兼容补档。合法独立 Pi 目录的
@@ -136,7 +138,7 @@ function intersectPiEffortCapabilities(
 function mergeNewSessionDefaultMarker(
   first: ModelDescriptor,
   next: ModelDescriptor,
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
 ): ModelDescriptor {
   const hasNewMarker =
     next.newSessionDefault?.includes(agent) === true &&
@@ -150,6 +152,9 @@ function mergeNewSessionDefaultMarker(
 
 /** 派生 availableModels：字段按 id 首见胜出；另收敛 Pi BYOM effort 与 XD 区域默认标记。 */
 export function deriveAvailableModels(catalog: Catalog, agent: AgentKind): ModelDescriptor[] {
+  // DSH's ACP host/binding is not registered yet. The catalog must report no
+  // models rather than aliasing it to one of the existing runtimes.
+  if (!isModelProviderAgentKind(agent)) return [];
   const seen = new Map<string, SeenModelProjection>();
   const out: ModelDescriptor[] = [];
   for (const provider of catalog.providers) {

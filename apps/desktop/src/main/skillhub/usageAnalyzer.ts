@@ -2,7 +2,12 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { stripTrailingPathSeparators } from '../../shared/pathText';
 
-export type SkillUsageAgentKind = 'claude-code' | 'codex' | 'pi';
+/**
+ * Historical analytics must retain a known product identity even before that
+ * harness has a transcript parser. DSH deliberately produces no skill
+ * exposures in F1; treating it as Codex here would corrupt the audit trail.
+ */
+export type SkillUsageAgentKind = 'claude-code' | 'codex' | 'pi' | 'dsh';
 
 export type SkillUsageExposureSource =
   | 'claude_skill_tool'

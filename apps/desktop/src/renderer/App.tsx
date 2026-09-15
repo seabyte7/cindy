@@ -41,7 +41,6 @@ import { installSystemNetworkErrorToastListener } from '@/lib/systemNetworkError
 import { installSilentInstallToastListener } from '@/lib/silentInstallToast';
 import { installProviderUpstreamErrorToastListener } from '@/lib/providerUpstreamErrorToast';
 import { installAutoPermissionFallbackToastListener } from '@/lib/autoPermissionFallbackToast';
-import { agentKindToVendor } from '@/components/sidebar/VendorIcon';
 import { installCcMgrUpgradeListener } from '@/state/ccMgrUpgradeStore';
 import {
   preloadLocalCatalogSnapshot,

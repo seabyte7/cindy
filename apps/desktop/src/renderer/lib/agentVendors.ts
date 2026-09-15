@@ -18,7 +18,23 @@ export const SELECTABLE_VENDORS = ['cc', 'codex', 'pi'] as const satisfies reado
 
 export type SelectableVendor = (typeof SELECTABLE_VENDORS)[number];
 
+/**
+ * DSH is selectable only at local New Maker entry. It intentionally stays out
+ * of SELECTABLE_VENDORS, which is the model-catalog and preference domain for
+ * the three providers that expose selectable models.
+ */
+export const NEW_MAKER_SELECTABLE_VENDORS = [...SELECTABLE_VENDORS, 'dsh'] as const satisfies readonly MakerVendor[];
+
+export type NewMakerSelectableVendor = (typeof NEW_MAKER_SELECTABLE_VENDORS)[number];
+
 /** localStorage / IPC 等外部输入的引擎值校验(不认识的一律交给调用方回退默认)。 */
 export function isSelectableVendor(value: unknown): value is SelectableVendor {
   return typeof value === 'string' && (SELECTABLE_VENDORS as readonly string[]).includes(value);
+}
+
+export function isNewMakerSelectableVendor(value: unknown): value is NewMakerSelectableVendor {
+  return (
+    typeof value === 'string' &&
+    (NEW_MAKER_SELECTABLE_VENDORS as readonly string[]).includes(value)
+  );
 }

@@ -19,14 +19,7 @@
 
 /** 供应商密钥的稳定标识。新增供应商时在此扩展。 */
 export type ProviderSecretId =
-  | 'xd'
-  | 'mivo'
-  | 'brave'
-  | 'tavily'
-  | 'xai'
-  | 'voice-asr'
-  | 'gemini'
-  | 'openai-images';
+  'xd' | 'mivo' | 'brave' | 'tavily' | 'xai' | 'voice-asr' | 'gemini' | 'openai-images';
 
 /** The dedicated builtin key bridge and its UI must expose the same supported IDs. */
 export function isBuiltinApiKeyProviderId(providerId: unknown): providerId is ProviderSecretId {
@@ -103,8 +96,8 @@ export const CUSTOM_PROVIDER_HEADER_SECRET_PREFIX = 'provider_headers_';
 export function isRendererAccessibleSafeStorageKey(storageKey: string): boolean {
   const normalized = storageKey.toLowerCase();
   return (
-    !MAIN_ONLY_PROVIDER_SECRET_STORAGE_KEYS.has(normalized)
-    && !normalized.startsWith(CUSTOM_PROVIDER_HEADER_SECRET_PREFIX)
+    !MAIN_ONLY_PROVIDER_SECRET_STORAGE_KEYS.has(normalized) &&
+    !normalized.startsWith(CUSTOM_PROVIDER_HEADER_SECRET_PREFIX)
   );
 }
 
@@ -113,7 +106,7 @@ export function isRendererAccessibleSafeStorageKey(storageKey: string): boolean 
  *
  * per-runtime 独立密钥：一个供应商的 Claude Code / Codex 两个端点可能用不同 key，故按 agent 分开存。
  * 自定义供应商 id 是动态的，不进上面的 `ProviderSecretId` 闭合枚举，这里单独走泛化键名。
- * id 限制为 /^[a-z0-9_-]+$/、agent 为 `claude-code` / `codex`（均只含字母/数字/连字符），故拼出的
+ * id 限制为 /^[a-z0-9_-]+$/、agent 为 `claude-code` / `codex` / `pi` / `dsh`（均只含字母/数字/连字符），故拼出的
  * 键名满足 safe-storage IPC 的 isValidKey 校验（/^[a-zA-Z0-9_-]+$/）。main（路由 resolve 读）与
  * renderer（表单写/清）共用本函数，保证两端键名一致、读写同一 .enc 文件。
  */
@@ -136,7 +129,7 @@ export function customProviderSecretStorageKey(providerId: string, agent: string
   return `provider_key_${providerId}_${agent}`;
 }
 
-const CUSTOM_PROVIDER_RUNTIME_KEY_RE = /^provider_key_[a-zA-Z0-9_-]+_(?:claude-code|codex|pi)$/;
+const CUSTOM_PROVIDER_RUNTIME_KEY_RE = /^provider_key_[a-zA-Z0-9_-]+_(?:claude-code|codex|pi|dsh)$/;
 
 export function isCustomProviderRuntimeKeyStorageKey(storageKey: unknown): boolean {
   return typeof storageKey === 'string' && CUSTOM_PROVIDER_RUNTIME_KEY_RE.test(storageKey);

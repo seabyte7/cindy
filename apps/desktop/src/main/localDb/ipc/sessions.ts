@@ -38,7 +38,7 @@ import { buildSessionListFlightKey, runSessionListSingleFlight } from './session
 import { throwIpcError, requireString, requireObject } from '../../utils/ipcValidate';
 import { bindDeletedPiSubagentCleanupCancel } from './piSubagentDeletion';
 import { resolveBusinessSessionId } from '../../sessionIds';
-import { normalizeDbAgentKind } from '../../../shared/agentKindConversion';
+import { dbToMakerAgentKind, normalizeDbAgentKind } from '../../../shared/agentKindConversion';
 import {
   projectSessionContextWindow,
   type ContextWindowSession,
@@ -594,7 +594,7 @@ const REMOTE_PERSIST_FIELDS = new Set([
 export async function applyAgentSwitchToSessionRow(
   sessionId: string,
   patch: {
-    agentKind: 'cc' | 'codex' | 'pi';
+    agentKind: 'cc' | 'codex' | 'pi' | 'dsh';
     model: string;
     providerId: string | null | undefined;
     sdkSessionId?: string | null;
@@ -1025,7 +1025,7 @@ export interface OverwritableAutoTitleTarget {
    * `reconcileCreateOptsAgainstDb` 处理的正是同一类漂移),用错 agent 会让标题
    * 走错供应商 —— 纯 Codex / 纯 Claude 用户会因此只拿到 fallback 标题。
    */
-  agentKind: 'claude-code' | 'codex' | 'pi';
+  agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh';
   /**
    * 是否仍停在建会话时的裸默认标题。合成占位(纯附件消息)只允许覆写这一种 ——
    * fork 占位与上一条附件写下的合成占位都要保留到用户真正打字为止。
@@ -1040,8 +1040,7 @@ export async function getOverwritableAutoTitle(
   const db = getDbClient().drizzle;
   const row = await selectSessionWithCount(db, id);
   if (!row) return null;
-  const agentKind =
-    row.agentKind === 'codex' || row.agentKind === 'pi' ? row.agentKind : 'claude-code';
+  const agentKind = dbToMakerAgentKind(row.agentKind);
   const overwritable =
     row.title === DEFAULT_DRAFT_SESSION_TITLE ||
     (!!row.parentSessionId && row.title.startsWith(FORK_PLACEHOLDER_TITLE_PREFIX)) ||
@@ -1228,15 +1227,24 @@ export function registerSessionIpc(
         // (feishu/slack/discord)与本机自动化(scheduler/learn/shared);
         // feishu 会话以「对话」分组展示(workspaceKind='dialogue')。
         const sourceFilter = inArray(sessions.source, DESKTOP_VISIBLE_SESSION_SOURCES);
+        // DSH must reserve a sessions parent before its signed native bridge can
+        // persist the FK-bound receipt.  Do not surface that transactional
+        // reservation (or a conservatively quarantined failure) as a task.
+        // Historical rows receive the schema default of ready during migration.
+        const startupStateFilter = eq(sessions.startupState, 'ready');
         const statusWhere = () =>
           statusFilter ? eq(sessions.status, statusFilter) : ne(sessions.status, 'deleted');
-        const rows = await selectSessionListRows(db, and(sourceFilter, statusWhere()), cap);
+        const rows = await selectSessionListRows(
+          db,
+          and(sourceFilter, startupStateFilter, statusWhere()),
+          cap,
+        );
 
         let mergedRows = rows;
         if (includePinned) {
           const pinnedRows = await selectSessionListRows(
             db,
-            and(sourceFilter, statusWhere(), isNotNull(sessions.pinnedAt)),
+            and(sourceFilter, startupStateFilter, statusWhere(), isNotNull(sessions.pinnedAt)),
             null,
           );
           mergedRows = mergeSessionListRows(rows, pinnedRows);
@@ -1319,9 +1327,12 @@ export function registerSessionIpc(
     const id = resolveBusinessSessionId(bodyObj.id);
     const createBody = bodyObj as Parameters<typeof sessionCreateToRow>[1];
     // M16: agentKind 白名单校验（防止 renderer 传非法值）
-    const ALLOWED_AGENT_KINDS = new Set<string>(['cc', 'codex', 'pi']);
+    const ALLOWED_AGENT_KINDS = new Set<string>(['cc', 'codex', 'pi', 'dsh']);
     if (bodyObj.agentKind !== undefined && !ALLOWED_AGENT_KINDS.has(bodyObj.agentKind as string)) {
       throwIpcError('INVALID_PARAMS', `invalid agentKind: ${String(bodyObj.agentKind)}`);
+    }
+    if (bodyObj.agentKind === 'dsh') {
+      throwIpcError('UNSUPPORTED_CAPABILITY', 'DSH sessions require the managed host and binding runtime');
     }
     const ALLOWED_WORKSPACE_KINDS = new Set<string>(['project', 'dialogue']);
     if (

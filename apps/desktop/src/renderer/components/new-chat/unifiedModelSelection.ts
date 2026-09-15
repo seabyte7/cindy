@@ -17,7 +17,11 @@
  *      (i18n `effortLevels.*`),绝不把翻译过的文案回灌进配置。
  */
 
-import type { UnifiedAgentCapability, UnifiedModelEntry } from '@cindy/model-providers';
+import type {
+  ModelProviderAgentKind,
+  UnifiedAgentCapability,
+  UnifiedModelEntry,
+} from '@cindy/model-providers';
 
 import type { AgentKind } from '@/hooks/useAgentCapabilities';
 import type { SelectableVendor } from '@/lib/agentVendors';
@@ -29,7 +33,7 @@ import type { ModelFavoriteItem } from '@/state/modelFavorites';
 export type UnifiedEngine = SelectableVendor;
 
 /** vendor → AgentKind(查目录 / 能力 / 记忆时用)。 */
-export function agentKindOfEngine(engine: UnifiedEngine): AgentKind {
+export function agentKindOfEngine(engine: UnifiedEngine): ModelProviderAgentKind {
   return engine === 'cc' ? 'claude-code' : engine === 'codex' ? 'codex' : 'pi';
 }
 
@@ -87,7 +91,7 @@ export function entryMatchesModelId(
 /** 一行(或一条收藏)当前**生效**的完整配置。 */
 export interface UnifiedRowConfig {
   engine: UnifiedEngine;
-  agent: AgentKind;
+  agent: ModelProviderAgentKind;
   /** 该 (模型, 引擎) 真实支持的档位;**空数组 = 不可调**(浮层不画滑杆,行不显示档字)。 */
   efforts: readonly Effort[];
   /** 生效档位;不可调时为 null。 */

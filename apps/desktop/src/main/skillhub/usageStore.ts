@@ -44,6 +44,12 @@ export interface SkillUsageRecentSourceRecord {
   sdkSessionId: string;
 }
 
+function parseSkillUsageAgentKind(value: unknown): SkillUsageAgentKind | null {
+  return value === 'claude-code' || value === 'codex' || value === 'pi' || value === 'dsh'
+    ? value
+    : null;
+}
+
 export interface SkillUsageSourceBreakdown {
   strongActive: number;
   semiActive: number;
@@ -1362,15 +1368,17 @@ function skillUsageEvidenceFilter(
 }
 
 function toRecentSourceRecords(rows: Array<Record<string, unknown>>): SkillUsageRecentSourceRecord[] {
-  return rows.map((row) => {
-    const agentKind: SkillUsageAgentKind = stringValue(row.agentKind) === 'claude-code' ? 'claude-code' : stringValue(row.agentKind) === 'pi' ? 'pi' : 'codex';
-    return {
+  return rows.flatMap((row) => {
+    const agentKind = parseSkillUsageAgentKind(row.agentKind);
+    if (agentKind === null) return [];
+    const source: SkillUsageRecentSourceRecord = {
       rawFilePath: stringValue(row.rawFilePath),
       agentKind,
       sessionId: stringValue(row.sessionId),
       sdkSessionId: stringValue(row.sdkSessionId),
     };
-  }).filter((row) => row.rawFilePath && row.sessionId && row.sdkSessionId);
+    return source.rawFilePath && source.sessionId && source.sdkSessionId ? [source] : [];
+  });
 }
 
 function stringValue(value: unknown): string {

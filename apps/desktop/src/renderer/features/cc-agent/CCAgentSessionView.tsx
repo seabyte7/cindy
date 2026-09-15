@@ -62,6 +62,8 @@ import { shortSessionId } from '@/lib/sessionId';
 import { ChatInput } from '@/components/new-chat/ChatInput';
 import { GoalIndicator } from '@/components/new-chat/GoalIndicator';
 import { PinnedPlanPanel } from '@/components/new-chat/PinnedPlanPanel';
+import { DshActivityPanel } from './DshActivityPanel';
+import { DshRuntimeConfigurationPanel } from './DshRuntimeConfigurationPanel';
 import { sessionsStore } from '@/lib/sessionsStore';
 import { useStopOrcaCollab } from './hooks/useStopOrcaCollab';
 import { useWorkerProjection, useWorkerProjectionOwner } from './hooks/workerProjectionStore';
@@ -1609,6 +1611,9 @@ export function CCAgentSessionView({
     // 先同步清空:切换会话(尤其 local→remote)时 loadAllCommands 是异步的,清空可避免
     // 刷新完成前 getHelpCommandsSnapshot / desktop 命令识别复用上一个项目的本地 skills。
     setAllCommands([]);
+    if (agentKind === 'dsh') return () => {
+      cancelled = true;
+    };
     // device-link 远程会话:传 remoteDeviceId,让 agent-builtin / agent-skill 从**被控端**该会话读
     // (与 ChatInput palette 同源)。否则此 cache 取的是控制端命令,maybeDispatchDesktopSlashCommand
     // 会把被控端 skill/builtin 影子掉的 /clear、/help 等误判成 desktop 命令、在控制端执行。
@@ -1845,6 +1850,7 @@ export function CCAgentSessionView({
   // 真实会话 agentKind(pending switch intent 不影响)——压缩分流必须用它,
   // 否则 intent 乐观切到 pi 但真实会话仍在跑 claude-code 时会错调 compact-session(#1933 review)。
   const realAgentKind = dbToMakerAgentKind(session?.agentKind);
+  const isDshSession = realAgentKind === 'dsh';
   const isCodex = displayAgentKind === 'codex';
   // 手动压缩通道判定(#1927/#1933 review):真实 Claude Code → maker:input:compact;
   // 其余 agent 声明 manualCompact.supported(当前仅 pi)→ maker:compact-session;其余无入口。
@@ -2340,6 +2346,7 @@ export function CCAgentSessionView({
     const cached = allCommandsRef.current;
     if (cached.length > 0) return cached;
     const agentKind = dbToMakerAgentKind(session?.agentKind);
+    if (agentKind === 'dsh') return [];
     try {
       // device-link 远程会话同源:传 remoteDeviceId,fallback 快照也从被控端读(见上方 cache effect 说明)。
       return await loadAllCommands(
@@ -2976,6 +2983,7 @@ export function CCAgentSessionView({
     ): Promise<{ handled: boolean; accepted: boolean; message: string }> => {
       const slashMatch = message.match(/^\/(\S+)(?:\s+(.*))?$/s);
       const agentKind = dbToMakerAgentKind(session?.agentKind);
+      if (agentKind === 'dsh') return { handled: false, accepted: false, message };
       const leading =
         !slashMatch && agentKind === 'pi' ? leadingSlashInvocation(message) : undefined;
       if (!slashMatch && !leading) return { handled: false, accepted: false, message };
@@ -3464,7 +3472,7 @@ export function CCAgentSessionView({
       // 的认证弹窗/导航闭包塞进 outbox：弱网时先建立稳定 clientId 的本地乐观消息，
       // 重连后由被控端 enqueue / steer 路径做权威校验。这样离开任务后旧 outbox 也不会
       // 再弹出旧页面的认证对话框或导航回旧路由。
-      if (!remoteDeviceId) {
+      if (!remoteDeviceId && !isDshSession) {
         const authVendor = displayAgentKind === 'pi' ? 'pi' : isCodex ? 'codex' : 'cc';
         const { proceed } = await vendorAuthGate.checkAndConfirm(authVendor, {
           // 已建会话:suspended 来源计入(停用不打断运行中会话,门禁只看凭证连接态,
@@ -3608,6 +3616,7 @@ export function CCAgentSessionView({
       t,
       vendorAuthGate,
       remoteDeviceId,
+      isDshSession,
       sessionHandoffPreparing,
     ],
   );
@@ -3778,9 +3787,10 @@ export function CCAgentSessionView({
   ]);
 
   const handleBeforeVoiceInputStart = useCallback(async () => {
+    if (isDshSession) return true;
     const { proceed } = await vendorAuthGate.checkAndConfirm('codex', { purpose: 'voice-input' });
     return proceed;
-  }, [vendorAuthGate]);
+  }, [isDshSession, vendorAuthGate]);
 
   // M32: Retry — ErrorBanner 的 retryText 现在只是兼容展示值。真正的
   // recovery target 由 main coordinator 持有，避免把已发出的文本重新走普通
@@ -4977,6 +4987,13 @@ export function CCAgentSessionView({
               style={{ width: inputWidth }}
               data-chat-composer-stack
             >
+              {isDshSession && !remoteDeviceId && (
+                <DshRuntimeConfigurationPanel
+                  sessionId={sessionId ?? null}
+                  disabled={isStreaming || agentStatus.isRunning}
+                />
+              )}
+              {isDshSession && <DshActivityPanel sessionId={sessionId ?? null} />}
               {/* FP-7 / F-PERM-2 / F7.4: mutually exclusive prompts.
                  Plan review takes precedence — the SDK won't interleave it with
                  other tool calls, but explicit priority guards against layout
@@ -5125,10 +5142,10 @@ export function CCAgentSessionView({
                   initialProviderId={session?.providerId ?? null}
                   initialEffort={session?.effort}
                   initialPermissionMode={session?.permissionMode}
-                  planModeEnabled={planModeEnabled}
-                  onPlanModeChange={setPlanMode}
-                  fastMode={fastMode}
-                  onFastModeChange={setFastMode}
+                  planModeEnabled={isDshSession ? false : planModeEnabled}
+                  onPlanModeChange={isDshSession ? undefined : setPlanMode}
+                  fastMode={isDshSession ? false : fastMode}
+                  onFastModeChange={isDshSession ? undefined : setFastMode}
                   onWorkingDirChange={handleWorkingDirChange}
                   isStreaming={isStreaming}
                   isAgentBusy={isAgentBusy}
@@ -5164,16 +5181,28 @@ export function CCAgentSessionView({
                   attachmentState={attachmentState}
                   externalDragOver={isDragOver}
                   onComposerDropHandled={resetFullAreaDragState}
-                  vendorKey={normalizeDbAgentKind(displayAgentKind)}
+                  vendorKey={
+                    isDshSession
+                      ? 'dsh'
+                      : displayAgentKind === 'claude-code'
+                      ? 'cc'
+                      : displayAgentKind === 'codex' || displayAgentKind === 'pi'
+                        ? displayAgentKind
+                        : undefined
+                  }
                   extraDirs={session?.extraDirs ?? []}
-                  onExtraDirsChange={handleExtraDirsChange}
+                  onExtraDirsChange={isDshSession ? undefined : handleExtraDirsChange}
                   writableDirs={session?.writableDirs ?? []}
                   writableGrantScope={sessionId}
                   onWritableDirsChange={
-                    writableDirsChangeSupported ? handleWritableDirsChange : undefined
+                    !isDshSession && writableDirsChangeSupported
+                      ? handleWritableDirsChange
+                      : undefined
                   }
                   onWritableDirRemove={
-                    writableDirsChangeSupported ? handleWritableDirRemove : undefined
+                    !isDshSession && writableDirsChangeSupported
+                      ? handleWritableDirRemove
+                      : undefined
                   }
                   compactToolbar={compactToolbar}
                   // doc rail (isCompactRail) 宽度受限 + 拖宽上限,工具行需要把字号/控件压一档。
@@ -5189,7 +5218,7 @@ export function CCAgentSessionView({
                   // orcaMode 路由下也保留显示 — ON 态菜单项本身就是
                   // 关闭按钮 (点击触发 onChange({enabled:false}),走 requestStopCollab)。
                   collaboration={
-                    allowCollabToggle || (orcaMode && collabEnabled)
+                    !isDshSession && (allowCollabToggle || (orcaMode && collabEnabled))
                       ? {
                           enabled: collabEnabled,
                           worker: collabWorker,
@@ -5334,7 +5363,6 @@ export function CCAgentSessionView({
                       )}
                     </Tip>
                   )}
-
                   {/* Right: Context capacity indicator */}
                   <div className="flex shrink-0 items-center gap-3">
                     {session?.usedProjectContext && (
@@ -5347,7 +5375,8 @@ export function CCAgentSessionView({
                         />
                       </Tip>
                     )}
-                    <TodaySpendChip
+                    {!isDshSession && (
+                      <TodaySpendChip
                       vendorKey={normalizeDbAgentKind(displayAgentKind)}
                       modelId={agentSwitchIntent?.model ?? session?.model ?? null}
                       providerId={
@@ -5361,7 +5390,9 @@ export function CCAgentSessionView({
                       sessionInitialTokens={session?.totalTokenUsage ?? null}
                       remoteHostId={session?.remoteHostId ?? null}
                       deviceLinkDeviceId={remoteDeviceId ?? null}
-                    />
+                      />
+                    )}
+                    {!isDshSession && (
                     <ContextCapacityRing
                       isRunning={agentStatus.isRunning}
                       sessionId={sessionId}
@@ -5399,7 +5430,8 @@ export function CCAgentSessionView({
                           ? handleCompactRequest
                           : undefined
                       }
-                    />
+                      />
+                    )}
                   </div>
                 </div>
               ) : null}
@@ -5890,9 +5922,10 @@ function formatTokenCount(n: number): string {
  */
 function getModelContextWindow(
   model: string,
-  vendorKey: 'cc' | 'codex' | 'pi',
+  vendorKey: 'cc' | 'codex' | 'pi' | 'dsh',
   deviceId?: string,
 ): number | undefined {
+  if (vendorKey === 'dsh') return undefined;
   const found = getModelsForVendor(vendorKey, deviceId).find((m) => m.id === model);
   return found?.contextWindow;
 }
@@ -5914,7 +5947,7 @@ function ContextCapacityRing({
   providerId?: string | null;
   contextTokens: number;
   model: string;
-  vendorKey: 'cc' | 'codex' | 'pi';
+  vendorKey: 'cc' | 'codex' | 'pi' | 'dsh';
   /** SDK-reported context window; 0 = not yet known → use hardcoded fallback. */
   sdkContextWindow: number;
   verifiedContextWindow?: number | null;

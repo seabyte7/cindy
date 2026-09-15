@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "scope": "local-darwin-arm64-development-only",
+  "releaseId": "cindy-dsh-0.1.2-alpha.3-build.1",
+  "target": "darwin-arm64",
+  "runtime": {
+    "expectedVersion": "0.1.2-alpha.3",
+    "executable": "deepseek-harness-sdk-runtime-macos-arm64",
+    "requiredSidecars": [
+      "deepseek-harness-sdk-runtime-macos-arm64-rg",
+      "deepseek-harness-sdk-runtime-macos-arm64-spawn-helper"
+    ],
+    "treeManifestSha256": "bc30b88d13418d979635aa851bc54629da36d03f3b15818742914ea079a4a744",
+    "files": [
+      {
+        "path": "deepseek-harness-sdk-runtime-macos-arm64",
+        "bytes": 260188816,
+        "mode": 493,
+        "sha256": "bd75b495d70725c332fa4f8c0fcf90706db5e96547df5c2ef6b6d0adc8b4841f"
+      },
+      {
+        "path": "deepseek-harness-sdk-runtime-macos-arm64-rg",
+        "bytes": 4528512,
+        "mode": 493,
+        "sha256": "6ef40346bf31fcce79d9614c7745c198542925a0c7d4911e1ffe794c53392ac1"
+      },
+      {
+        "path": "deepseek-harness-sdk-runtime-macos-arm64-spawn-helper",
+        "bytes": 50480,
+        "mode": 493,
+        "sha256": "08bc83a084651d095645010d34783f94b9af443614747e953e66d6578027e999"
+      }
+    ]
+  },
+  "artifact": {
+    "filename": "cindy-dsh-0.1.2-alpha.3-build.1-darwin-arm64.tar.gz",
+    "bytes": 72545837,
+    "sha256": "1e429e2c07a3f74c15d5786d5a6dc52ae2e76440fbc7ce4e18f5914ee5683e66"
+  }
+}

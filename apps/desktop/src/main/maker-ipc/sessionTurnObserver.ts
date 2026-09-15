@@ -4,6 +4,7 @@ import { throwIpcError } from '../utils/ipcValidate.js';
 import { getSessionProvider } from '../maker-host/session-provider-store.js';
 import { verdictForModelRoute } from '../maker-host/model-route-guard-live.js';
 import { describeModelRouteRejection } from '../maker-host/model-route-guard.js';
+import { isManagedDshRuntimeRoute } from '../../shared/dshSession.js';
 import { SilentStopTurnLeaseGate, SessionTurnLeaseTracker } from './sessionTurnLease.js';
 
 export interface InstallSessionTurnObserverDeps {
@@ -26,7 +27,10 @@ export function installSessionTurnObserver(deps: InstallSessionTurnObserverDeps,
       // 每条本地 Session.send 都经过这一个 Main-owned 边界，包括 renderer、IM、
       // Goal、Learn、Hook 与 Scheduler。付费权限不能只挂在普通 IPC 发送事务上。
       const model = session.model;
-      if (model) {
+      // DSH's fixed value is a Main-owned runtime marker, not a catalog model.
+      // Its endpoint and credential are revalidated by the DSH control plane
+      // immediately before every native prompt.
+      if (model && !isManagedDshRuntimeRoute(session.agentKind, model)) {
         const verdict = await verdictForModelRoute(
           session.agentKind,
           model,

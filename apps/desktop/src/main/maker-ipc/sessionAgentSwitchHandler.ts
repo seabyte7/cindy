@@ -65,6 +65,7 @@ export function toMakerAgentKind(dbKind: string): AgentKind {
 export function agentEngineLabel(dbKind: DbAgentKind): string {
   if (dbKind === 'codex') return 'Codex';
   if (dbKind === 'pi') return 'Pi';
+  if (dbKind === 'dsh') return 'DeepSeek Harness';
   return 'Claude Code';
 }
 
@@ -245,7 +246,8 @@ export interface PendingAgentSwitchIntent {
   runtimeSource?: 'agent';
   /** SET_MODEL intent: apply the route without a cross-engine handoff. */
   sameAgentSelection?: boolean;
-  targetAgentKind: AgentKind;
+  /** DSH is identity-only in F1 and cannot be an agent-switch target. */
+  targetAgentKind: Exclude<AgentKind, 'dsh'>;
   model: string;
   providerId: string | null | undefined;
   effort?: string;
@@ -266,7 +268,7 @@ export interface PendingAgentSwitchIntent {
 
 /** 控制端可见的 pending intent 投影；刻意排除 main 内部恢复载荷。 */
 export interface PublicAgentSwitchIntent {
-  targetAgentKind: AgentKind;
+  targetAgentKind: Exclude<AgentKind, 'dsh'>;
   model: string;
   providerId: string | null;
   effort?: string;
@@ -429,6 +431,12 @@ export async function performSessionAgentSwitch(
   params.assertSelectionCurrent?.();
 
   const fromDbKind: DbAgentKind = normalizeDbAgentKind(row.agentKind);
+  if (fromDbKind === 'dsh') {
+    // DSH has its own binding and handoff contract (F3+). Reusing the three
+    // legacy engine-switch workflow would manufacture a Claude/Codex-style
+    // transcript and lose DSH provenance, so reject until that path exists.
+    throwIpcError('UNSUPPORTED_CAPABILITY', 'agent switch is not supported for DSH sessions');
+  }
   const toDbKind: DbAgentKind = makerToDbAgentKind(targetAgentKind);
   if (fromDbKind === toDbKind) {
     // Only picker calls stage a model choice here. Internal cross-engine apply/recovery

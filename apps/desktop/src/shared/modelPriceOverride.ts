@@ -1,10 +1,11 @@
-import type { AgentKind } from '@cindy/model-providers';
+import type { ModelProviderAgentKind } from '@cindy/model-providers';
 
 import type { ModelPriceQuote, MoneyCurrency } from './regionalMoney.js';
 
 export interface ModelPriceOverrideTarget {
   providerId: string;
-  agent: AgentKind;
+  /** Price overrides require a real model-provider route; DSH has none in F1. */
+  agent: ModelProviderAgentKind;
   modelId: string;
 }
 

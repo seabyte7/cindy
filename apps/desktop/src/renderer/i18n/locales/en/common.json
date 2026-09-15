@@ -1772,7 +1772,10 @@
           "contextWindowInvalid": "Context window must be a valid positive integer (separators allowed between digit groups)",
           "requestPathInvalid": "Begin the exact request path with a single /. Do not use fragments or . and .. path segments; percent-encode spaces and unsafe characters.",
           "modelRequired": "Add at least one model",
-          "oauthInvalid": "Incomplete OAuth config: all fields are required and both endpoints must be secure https URLs"
+          "oauthInvalid": "Incomplete OAuth config: all fields are required and both endpoints must be secure https URLs",
+          "dshEndpointInvalid": "DeepSeek Harness requires an HTTPS endpoint without credentials, query parameters, or fragments",
+          "dshApiKeyRequired": "Enter a DeepSeek Harness API key for this endpoint",
+          "dshAuthApiKeyRequired": "DeepSeek Harness requires API key authentication"
         },
         "toast": {
           "created": "Provider added",
@@ -1899,6 +1902,40 @@
           "modelsBusy": "Finish fetching or selecting models before filling other runtimes",
           "noCompatibleFields": "The other runtimes do not support the reusable fields in the current runtime",
           "filledToast": "Filled {{targets}}; each runtime remains independent"
+        },
+        "dsh": {
+          "label": "DeepSeek Harness",
+          "description": "Optional. Configure one dedicated HTTPS endpoint and API key for DeepSeek Harness. It never reuses credentials from the other runtimes.",
+          "endpoint": "DSH endpoint",
+          "endpointPlaceholder": "https://api.deepseek.com",
+          "apiKey": "DSH API key",
+          "apiKeyPlaceholder": "DSH API key",
+          "apiKeyHelp": "For an unchanged endpoint, leave this blank to retain its locally stored key. Changing the endpoint requires a new key.",
+          "authRequired": "DeepSeek Harness requires API key authentication.",
+          "runtimeStatus": {
+            "title": "Runtime status",
+            "retry": "Retry",
+            "loading": "Reading the local DSH status…",
+            "unavailable": "The local DSH status is unavailable. Try again.",
+            "configuration": {
+              "ready": "Configured source: {{provider}}.",
+              "not-configured": "No DeepSeek Harness source is configured.",
+              "multiple-configured": "More than one DeepSeek Harness source is configured. Select one source before use.",
+              "auth-not-api-key": "The selected source must use API-key authentication.",
+              "invalid-runtime-shape": "The DeepSeek Harness settings contain unsupported runtime fields.",
+              "invalid-route": "The DeepSeek Harness endpoint is invalid.",
+              "missing-api-key": "The DeepSeek Harness API key is missing.",
+              "unavailable": "The DeepSeek Harness configuration is unavailable."
+            },
+            "registration": {
+              "not-registered": "The DSH task factory is not ready.",
+              "registering": "Preparing the local DSH task factory…",
+              "task-factory-ready": "Ready to create a local DSH task.",
+              "reconfiguration-pending": "The DSH configuration changed and is waiting for affected tasks to close."
+            },
+            "closeTasks": "Close {{count}} active DSH task before the new configuration can take effect.",
+            "evidence": "Model connection, commands, file tools, attachments, and approvals still require verification in the final signed app."
+          }
         }
       },
       "models": {
@@ -2152,7 +2189,11 @@
         "endpointLabel": "{{agent}} base URL",
         "noAuthNote": "This proxy needs no client key; Cindy removes CLI subscription credentials before forwarding.",
         "signIn": "Sign in",
-        "setupLink": {"apiKey": "Get an API key", "account": "Sign up or sign in", "setup": "Setup help"},
+        "setupLink": {
+          "apiKey": "Get an API key",
+          "account": "Sign up or sign in",
+          "setup": "Setup help"
+        },
         "fetching": "Verifying connection and fetching models…",
         "fetchFailed": "Couldn't fetch the model list — you can finish with the preset's recommended models and refresh later in details",
         "manualModelHint": "No models were discovered. Enter the exact model ID exposed by this proxy.",
@@ -5694,6 +5735,26 @@
         "enabledHint": "The card below can test downloading and installing missing Windows tools. Existing Cindy-managed tools are reused. This takes effect immediately and resets on reload or restart; system tools stay unchanged.",
         "reportHint": "Installation test is on: portable tools use Cindy-managed copies. Windows compiler tools are shown as missing to test the official installation guide; turn off the switch to check their real status."
       }
+    },
+    "dshExistingHome": {
+      "title": "DeepSeek Harness home",
+      "description": "Cindy uses its managed home by default. You can securely select an existing DeepSeek Harness home without exposing its location in Settings.",
+      "status": {
+        "cindyManaged": "Using Cindy-managed home",
+        "configured": "Existing DeepSeek Harness home selected",
+        "unavailable": "Existing DeepSeek Harness home unavailable"
+      },
+      "managedHomeHint": "Cindy keeps harness data in its own managed location.",
+      "existingHomeHint": "Cindy stores only the local authorization needed to use the selected home. Its location is not shown here.",
+      "choose": "Choose existing home",
+      "choosing": "Choosing…",
+      "useManaged": "Use Cindy-managed home",
+      "restoring": "Restoring…",
+      "executionGate": "The selected home is used after Cindy restarts. Its native profiles and extensions may run; switch back to a Cindy-managed home to restore isolation.",
+      "selectionSaved": "Existing DeepSeek Harness home selected. Restart Cindy to use it.",
+      "saveFailed": "Failed to save the DeepSeek Harness home. Try again.",
+      "restored": "Cindy-managed home restored. Restart Cindy to use it.",
+      "restoreFailed": "Failed to restore Cindy-managed home. Try again."
     }
   },
   "remoteDevice": {
@@ -8318,6 +8379,10 @@
           "prompt": "Draft a reply to this email, taking the conversation and my thoughts into account. Don't send it yet."
         }
       }
+    },
+    "dsh": {
+      "managedRuntime": "Managed DSH runtime",
+      "managedRuntimeDetails": "Runs locally in a managed DSH runtime. Files and images are copied into this task's restricted attachment area, and every tool run needs a separate approval. After a restart, only this same task may continue when its verified local binding is available."
     }
   },
   "onboarding": {
@@ -10098,6 +10163,48 @@
         "active": "{{count}} filters",
         "reset": "Reset",
         "allProjects": "All projects"
+      }
+    },
+    "dshActivity": {
+      "ariaLabel": "Local DSH plans and todos",
+      "title": "Local plans and todos",
+      "localOnly": "Saved by Cindy locally; never sent to the DSH runtime.",
+      "refresh": "Refresh local plans and todos",
+      "unavailable": "The local plan state is unavailable. Refresh and try again.",
+      "loading": "Reading local plans…",
+      "notReady": "The DSH task is preparing its local activity state.",
+      "readOnlyUntilResumed": "DSH is disconnected. Local plans are read-only until Main verifies that this task has resumed.",
+      "planPlaceholder": "Add a local plan",
+      "addPlan": "Add plan",
+      "empty": "No local plans yet.",
+      "unnamedPlan": "Untitled plan",
+      "todoPlaceholder": "Add a todo",
+      "addTodo": "Add todo",
+      "unnamedTodo": "Untitled todo",
+      "complete": "Mark complete",
+      "cancel": "Cancel",
+      "status": {
+        "pending": "Not started",
+        "running": "In progress",
+        "waiting-for-input": "Waiting for input",
+        "waiting-for-decision": "Waiting for a decision",
+        "completed": "Completed",
+        "failed": "Failed",
+        "cancelled": "Cancelled",
+        "disconnected": "Disconnected",
+        "unavailable": "Unavailable"
+      }
+    },
+    "dshRuntimeConfiguration": {
+      "ariaLabel": "DSH runtime settings",
+      "title": "Runtime settings",
+      "nextMessageOnly": "Applies only to later messages in this task and is not saved as a provider setting.",
+      "refresh": "Refresh DSH runtime settings",
+      "unavailable": "Runtime settings are temporarily unavailable. Restart this task and try again.",
+      "noSelection": "No selection",
+      "control": {
+        "model": "Model",
+        "reasoning_effort": "Reasoning effort"
       }
     }
   },

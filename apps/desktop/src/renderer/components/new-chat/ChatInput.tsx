@@ -325,7 +325,11 @@ import { useAvailableAgents } from '@/hooks/useAvailableAgents';
 import { useConnectedSource } from '@/hooks/useConnectedSource';
 import { useProviders } from '@/hooks/useProviders';
 import { useDeviceProviders } from '@/hooks/useDeviceProviders';
-import { chatEligibleSourcesForModel, effectiveSourceIdForModel } from '@cindy/model-providers';
+import {
+  chatEligibleSourcesForModel,
+  effectiveSourceIdForModel,
+  isModelProviderAgentKind,
+} from '@cindy/model-providers';
 import {
   deriveModelsFromProviders,
   filterChatBridgedCodexProviders,
@@ -679,7 +683,7 @@ interface ChatInputProps {
    * M35: Vendor lock — when provided, ModelSelector only shows models
    * belonging to this vendor ('cc' for Claude, 'codex' for OpenAI Codex).
    */
-  vendorKey?: 'cc' | 'codex' | 'pi';
+  vendorKey?: 'cc' | 'codex' | 'pi' | 'dsh';
   /**
    * Optional override for the composerDraftStore key used to persist editor
    * content (and via attachmentState, attachments) across mount/unmount.
@@ -821,14 +825,16 @@ interface ChatInputProps {
 }
 
 /** 统一模型选择器联合列表的候选引擎全集(与 SELECTABLE_VENDORS 同一顺序)。 */
-const UNIFIED_AGENT_KINDS: readonly AgentKind[] = ['claude-code', 'codex', 'pi'];
+type ModelRouteAgentKind = Exclude<AgentKind, 'dsh'>;
+
+const UNIFIED_AGENT_KINDS: readonly ModelRouteAgentKind[] = ['claude-code', 'codex', 'pi'];
 
 /** AgentKind → NewMaker vendor(useAvailableAgents 用 vendor 口径)。 */
-function agentKindToVendor(kind: AgentKind): 'cc' | 'codex' | 'pi' {
-  return kind === 'codex' ? 'codex' : kind === 'pi' ? 'pi' : 'cc';
+function agentKindToVendor(kind: AgentKind): 'cc' | 'codex' | 'pi' | 'dsh' {
+  return kind === 'claude-code' ? 'cc' : kind;
 }
 
-function vendorKeyToAgentKind(v?: 'cc' | 'codex' | 'pi'): AgentKind | null {
+function vendorKeyToAgentKind(v?: 'cc' | 'codex' | 'pi'): ModelRouteAgentKind | null {
   if (v === 'cc') return 'claude-code';
   if (v === 'codex') return 'codex';
   if (v === 'pi') return 'pi';
@@ -1153,6 +1159,7 @@ export function ChatInput({
   // 预测守卫用原始值区分 null vs undefined,下游通路继续用 ?? undefined 归一化。
   const deviceLinkDeviceId = _deviceLinkDeviceId;
   const { t } = useTranslation();
+  const isDshManagedRuntime = vendorKey === 'dsh';
   const navigate = useNavigate();
   const [makeDialogSessionId, setMakeDialogSessionId] = useState<string | null>(null);
   const { preference: composerSendShortcutPreference } = useComposerSendShortcutPreference();
@@ -1305,7 +1312,12 @@ export function ChatInput({
     }
     // remote / review/read-only 保持原有 fail-closed 语义。deviceLinkDeviceId=undefined
     // 是归属尚未解析的暂态，先保留 candidate；解析为本地 null 后再继续。
-    if (deviceLinkDeviceId === undefined || runtimeAgentKind == null || !hasPredictionMessages) {
+    if (
+      deviceLinkDeviceId === undefined ||
+      runtimeAgentKind == null ||
+      runtimeAgentKind === 'dsh' ||
+      !hasPredictionMessages
+    ) {
       return;
     }
     if (deviceLinkDeviceId !== null || remoteHostId || disabled) {
@@ -1751,7 +1763,7 @@ export function ChatInput({
     return () => clearTimeout(timer);
   }, [initialModel, initialEffort, initialProviderId, fastMode, pendingRemoteSwitch]);
 
-  const agentKind = vendorKeyToAgentKind(vendorKey);
+  const agentKind = vendorKeyToAgentKind(isDshManagedRuntime ? undefined : vendorKey);
   // device-link 远程会话:能力(模型 / fast / effort)从被控端读;本地会话 deviceLinkDeviceId undefined → 本地。
   const ccCaps = useAgentCapabilities('claude-code', deviceLinkDeviceId ?? undefined);
   const codexCaps = useAgentCapabilities('codex', deviceLinkDeviceId ?? undefined);
@@ -4084,7 +4096,7 @@ export function ChatInput({
 
   // Slash commands — palette refactor 后改成 loadAllCommands 一次性拉三源(desktop +
   // agent-builtin + agent-skill); 内部并发, mergeCommands 按优先级合并去重。
-  const paletteAgentKind = agentKind ?? 'claude-code';
+  const paletteAgentKind: ModelRouteAgentKind = agentKind ?? 'claude-code';
   // remote session:workingDir 是远端主机路径,不能按它扫本机 skills/files。
   // slash 退化为 desktop + agent-builtin(传 null),@ 文件面板直接关闭(见 atOpen)。
   const isRemoteSession = !!remoteHostId;
@@ -5854,6 +5866,7 @@ export function ChatInput({
       captureSendFocusForRestore,
       slashCommandsReady,
       mergedCommands,
+      isDshManagedRuntime,
     ],
   );
   useEffect(() => {
@@ -6087,6 +6100,7 @@ export function ChatInput({
     ) => {
       const agentKind = opts.agentKind ?? currentModelAgentKind;
       if (!sessionId || !agentKind || !modelId) return;
+      if (!isModelProviderAgentKind(agentKind)) return;
       const activeProviderId =
         opts.activeProviderId !== undefined ? opts.activeProviderId : selectedProviderId;
       const memoryProviderId =
@@ -6095,7 +6109,7 @@ export function ChatInput({
         opts.remoteDeviceId ?? getSessionDeviceId(sessionId) ?? deviceLinkDeviceId;
       const markModelChoice = opts.markModelChoice === true;
       if (!remoteDeviceId) {
-        const vendor = agentKind === 'codex' ? 'codex' : agentKind === 'pi' ? 'pi' : 'cc';
+        const vendor = agentKind === 'claude-code' ? 'cc' : agentKind;
         const persistPrefs = markModelChoice
           ? patchVendorPrefs
           : patchVendorPrefsPreservingModelChoice;
@@ -6785,6 +6799,7 @@ export function ChatInput({
   const sessionEngineFilter = useMemo(() => {
     if (!unifiedModelPanelEnabled) return undefined;
     if (!sessionId || !vendorKey || remoteHostId || !sessionAgentSwitchSupported) return undefined;
+    if (isDshManagedRuntime) return undefined;
     const currentAgent = runtimeAgentKind ?? vendorKeyToAgentKind(vendorKey);
     if (!currentAgent) return undefined;
     return {
@@ -6809,6 +6824,7 @@ export function ChatInput({
         fast?: boolean;
         favoriteUid?: string | null;
       }): Promise<boolean> => {
+        if (targetAgent === 'dsh') return false;
         // 取消 = 什么都不改;返回 false 让选择器留在原地(用户还能挑别的行)。
         // 目标显式传给确认门:同一目标不重复弹,换目标要重新确认(见 confirmAgentBrowseSwitch)。
         if (!(await confirmAgentBrowseSwitch(targetAgent))) return false;
@@ -6847,7 +6863,7 @@ export function ChatInput({
               ? {
                   uid: favoriteUid,
                   wireModelId: modelId,
-                  engine: agentKindToVendor(targetAgent),
+                  engine: targetAgent === 'claude-code' ? 'cc' : targetAgent,
                   providerId,
                 }
               : null,
@@ -6860,6 +6876,7 @@ export function ChatInput({
     unifiedModelPanelEnabled,
     sessionId,
     vendorKey,
+    isDshManagedRuntime,
     intentTargetAgent,
     remoteHostId,
     runtimeAgentKind,
@@ -6876,8 +6893,13 @@ export function ChatInput({
   //     身份未加载时 resolveModelSelectorAgentIdentity 返回 undefined → 不画
   //     (绝不拿 vendorKey 的 Claude Code 回退冒充,见 runtimeAgentKind 的 prop 说明);
   //   · 草稿:没有 session 身份可言,当前引擎就是 vendorKey 本身。
-  const composerEngineMarkVendor = sessionId
-    ? (resolveModelSelectorAgentIdentity(runtimeAgentKind, composerSelection.pending ? composerSelection.display.agentKind : null)?.vendorKey ?? null)
+  const composerEngineMarkVendor = isDshManagedRuntime
+    ? null
+    : sessionId
+      ? (resolveModelSelectorAgentIdentity(
+          runtimeAgentKind,
+          composerSelection.pending ? composerSelection.display.agentKind : null,
+        )?.vendorKey ?? null)
     : (vendorKey ?? null);
 
   /**
@@ -8695,16 +8717,18 @@ export function ChatInput({
                   dense={effectiveDenseToolbar}
                   visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
                 />
-                <PermissionSelector
-                  permissionMode={activePermissionMode}
-                  onPermissionModeChange={handlePermissionModeChange}
-                  vendorKey={vendorKey}
-                  deviceId={deviceLinkDeviceId ?? undefined}
-                  disabled={composerEditorLocked || settingsLocked}
-                  dense={effectiveDenseToolbar}
-                  iconOnly={useUltraCompactToolbar}
-                  visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
-                />
+                {!isDshManagedRuntime && (
+                  <PermissionSelector
+                    permissionMode={activePermissionMode}
+                    onPermissionModeChange={handlePermissionModeChange}
+                    vendorKey={vendorKey}
+                    deviceId={deviceLinkDeviceId ?? undefined}
+                    disabled={composerEditorLocked || settingsLocked}
+                    dense={effectiveDenseToolbar}
+                    iconOnly={useUltraCompactToolbar}
+                    visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
+                  />
+                )}
                 {useNarrowToolbar && !useCompactMiddleToolbar && <>{middleToolbarSlot}</>}
               </div>
               <div
@@ -8730,6 +8754,16 @@ export function ChatInput({
                     暴露单次任务的模型切换，避免会话态覆盖伙伴长期配置。 */}
                 {!hideRuntimeControls ? (
                 <div className={useNarrowToolbar ? 'min-w-0 shrink' : undefined}>
+                  {isDshManagedRuntime ? (
+                    <span
+                      data-testid="dsh-managed-runtime-badge"
+                      className="inline-flex h-[30px] max-w-full items-center rounded-full border border-[var(--border-default)] bg-[var(--composer-pill-bg)] px-2.5 text-12 font-medium text-[var(--text-primary)]"
+                      title={t('newChat.dsh.managedRuntimeDetails')}
+                      aria-label={t('newChat.dsh.managedRuntimeDetails')}
+                    >
+                      {t('newChat.dsh.managedRuntime')}
+                    </span>
+                  ) : (
                   <ModelSelector
                     // 选中态一律是会话 / 草稿持有的 **wire model id**(sessions.model 或
                     // lastByVendor.model)。面板行的归一化 id 只活在面板内部 —— 从这里递进去
@@ -8892,6 +8926,7 @@ export function ChatInput({
                     useMorphPopover
                     restoreFocusTarget={composerSuggestionFocusTarget}
                   />
+                  )}
                 </div>
                 ) : null}
                 <div

@@ -17,15 +17,22 @@ import { cn } from '@/lib/utils';
 import { ClaudeMark } from '@/components/icons/ClaudeMark';
 import { CodexMark } from '@/components/icons/CodexMark';
 
-export type VendorIconKind = 'cc' | 'codex' | 'pi';
+export type VendorIconKind = 'cc' | 'codex' | 'pi' | 'dsh' | 'unknown';
 
 /**
  * agentKind → VendorIcon vendor 的唯一映射。所有渲染 agent 身份图标的调用点
  * 必须走这里,禁止各自写 `=== 'codex' ? 'codex' : 'cc'` 二元三元(那会把 pi
- * 吞成 Claude 脸,2026-07-30 实测 bug)。兼容 'claude-code' 别名与 null。
+ * 或 DSH 吞成 Claude 脸)。兼容 'claude-code' 别名与历史 null；未知值保留为
+ * `unknown`，让上层的 fail-closed decoder 可见，而不是伪装成任一已知 harness。
  */
+export function agentKindToVendor(
+  kind: 'cc' | 'claude-code' | 'codex' | 'pi' | 'dsh' | null | undefined,
+): Exclude<VendorIconKind, 'unknown'>;
+export function agentKindToVendor(kind: string | null | undefined): VendorIconKind;
 export function agentKindToVendor(kind: string | null | undefined): VendorIconKind {
-  return kind === 'codex' ? 'codex' : kind === 'pi' ? 'pi' : 'cc';
+  if (kind === null || kind === undefined || kind === 'cc' || kind === 'claude-code') return 'cc';
+  if (kind === 'codex' || kind === 'pi' || kind === 'dsh') return kind;
+  return 'unknown';
 }
 
 interface VendorIconProps {
@@ -66,6 +73,22 @@ export function VendorIcon({
           className="inline-flex items-center justify-center font-semibold"
         >
           π
+        </span>
+      ) : vendor === 'dsh' ? (
+        <span
+          aria-hidden
+          style={{ fontSize: size * 0.78, lineHeight: `${size}px`, width: size, height: size }}
+          className="inline-flex items-center justify-center font-mono font-semibold tracking-[-0.08em]"
+        >
+          D
+        </span>
+      ) : vendor === 'unknown' ? (
+        <span
+          aria-hidden
+          style={{ fontSize: size * 0.86, lineHeight: `${size}px`, width: size, height: size }}
+          className="inline-flex items-center justify-center font-semibold"
+        >
+          ?
         </span>
       ) : (
         <ClaudeMark size={size} />

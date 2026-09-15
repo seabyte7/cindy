@@ -19,10 +19,12 @@ import type { CodexContextWindowInfo } from '@cindy/maker-core';
 import {
   PI_MODEL_APIS,
   isLoopbackProviderUrl,
+  isModelProviderAgentKind,
   isProviderRequestPath,
   runtimeCustomProviderId,
   storedCustomProviderId,
   type AgentKind,
+  type ModelProviderAgentKind,
   type CustomProviderConfig,
   type ProviderModelDiscoveryFailure,
   type ProviderPreset,
@@ -102,7 +104,11 @@ import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
 
 const log = createLogger('maker-ipc:provider');
 
-const VALID_AGENTS: readonly string[] = ['claude-code', 'codex', 'pi'];
+// DSH can be persisted and have its independently scoped API key managed by
+// this transactional handler, but it never enters generic test/model-fetch
+// IPC. Its external route is admitted only from the stored Main configuration.
+const CONFIG_RUNTIME_AGENTS: readonly AgentKind[] = ['claude-code', 'codex', 'pi', 'dsh'];
+const DIAGNOSTIC_RUNTIME_AGENTS: readonly AgentKind[] = ['claude-code', 'codex', 'pi'];
 const VALID_ADHOC_AUTH_METHODS: readonly string[] = ['apiKey', 'oauth', 'none'];
 const PROVIDER_OAUTH_OWNER_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 type RuntimeKeys = Partial<Record<AgentKind, string>>;
@@ -172,7 +178,12 @@ function parseRuntimeKeys(input: unknown): RuntimeKeys | null {
   if (input === undefined) return {};
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const entries = Object.entries(input as Record<string, unknown>);
-  if (entries.some(([agent, value]) => !VALID_AGENTS.includes(agent) || typeof value !== 'string'))
+  if (
+    entries.some(
+      ([agent, value]) =>
+        !CONFIG_RUNTIME_AGENTS.includes(agent as AgentKind) || typeof value !== 'string',
+    )
+  )
     return null;
   return Object.fromEntries(entries) as RuntimeKeys;
 }
@@ -286,6 +297,14 @@ export interface ProviderHandlerDeps {
   hasAppliedCodexCustomProviderImageGeneration?(providerId: string): boolean;
   /** Busy local Codex turns only; remote Codex and other agents are excluded. */
   listBusyLocalCodexSessionIds?(): string[];
+  /**
+   * Optional Main-only hook for a provider type that owns an independently
+   * supervised runtime. It runs only after the durable CRUD mutation and
+   * catalog refresh; failures are deliberately contained by that runtime's
+   * own availability gate and must not turn a saved Settings edit into a
+   * renderer-visible partial failure.
+   */
+  onProviderConfigurationChanged?(): void;
   /** Current selectable catalog ids, used to validate visible provider order entries. */
   listProviderIds(): string[];
   /** Merge the currently visible order into the persisted observed-provider order. */
@@ -449,14 +468,20 @@ function parseTestInput(input: unknown): ProviderTestInput | null {
   const i = input as Record<string, unknown>;
   if (i.kind === 'saved') {
     if (typeof i.providerId !== 'string' || i.providerId.length === 0) return null;
-    if (typeof i.agent !== 'string' || !VALID_AGENTS.includes(i.agent)) return null;
+    if (typeof i.agent !== 'string' || !DIAGNOSTIC_RUNTIME_AGENTS.includes(i.agent as AgentKind))
+      return null;
     return { kind: 'saved', providerId: i.providerId, agent: i.agent as AgentKind };
   }
   if (i.kind === 'adhoc') {
     const s = i.spec;
     if (!s || typeof s !== 'object') return null;
     const spec = s as Record<string, unknown>;
-    if (typeof spec.agent !== 'string' || !VALID_AGENTS.includes(spec.agent)) return null;
+    if (
+      typeof spec.agent !== 'string' ||
+      !DIAGNOSTIC_RUNTIME_AGENTS.includes(spec.agent as AgentKind)
+    ) {
+      return null;
+    }
     if (typeof spec.authMethod !== 'string' || !VALID_ADHOC_AUTH_METHODS.includes(spec.authMethod))
       return null;
     if (typeof spec.baseUrl !== 'string' || spec.baseUrl.length === 0) return null;
@@ -508,7 +533,12 @@ function parseTestInput(input: unknown): ProviderTestInput | null {
 function parseModelsFetchInput(input: unknown): ProviderModelsFetchSpec | null {
   if (!input || typeof input !== 'object') return null;
   const spec = input as Record<string, unknown>;
-  if (typeof spec.agent !== 'string' || !VALID_AGENTS.includes(spec.agent)) return null;
+  if (
+    typeof spec.agent !== 'string' ||
+    !DIAGNOSTIC_RUNTIME_AGENTS.includes(spec.agent as AgentKind)
+  ) {
+    return null;
+  }
   if (typeof spec.authMethod !== 'string' || !VALID_ADHOC_AUTH_METHODS.includes(spec.authMethod))
     return null;
   if (typeof spec.baseUrl !== 'string' || spec.baseUrl.length === 0) return null;
@@ -743,7 +773,7 @@ export function registerProviderHandlers(
     const mutations: KeyMutation[] = [];
     const usesApiKey = !config.auth || config.auth.method === 'apiKey';
     const previouslyUsedApiKey = !previous?.auth || previous.auth.method === 'apiKey';
-    for (const agent of VALID_AGENTS as readonly AgentKind[]) {
+    for (const agent of CONFIG_RUNTIME_AGENTS) {
       const replacement = keys[agent]?.trim();
       if (mode === 'create') {
         if (usesApiKey && config.runtimes[agent] && replacement) {
@@ -1156,6 +1186,13 @@ export function registerProviderHandlers(
           log.warn('provider runtime refresh failed after committed configuration change');
         }
       }
+    }
+    try {
+      deps.onProviderConfigurationChanged?.();
+    } catch {
+      // The DSH runtime gate is post-commit and fail-closed; Settings CRUD
+      // has already succeeded and must not be retroactively reported failed.
+      log.warn('optional provider runtime reconciliation failed after committed configuration change');
     }
     deps.broadcastChanged();
   }
@@ -1583,7 +1620,7 @@ export function registerProviderHandlers(
       typeof target.providerId !== 'string' ||
       target.providerId.length === 0 ||
       target.providerId.length > MAX_DISABLE_ID_LENGTH ||
-      !VALID_AGENTS.includes(String(target.agent)) ||
+      !isModelProviderAgentKind(target.agent) ||
       typeof target.modelId !== 'string' ||
       target.modelId.length === 0 ||
       target.modelId.length > MAX_DISABLE_ID_LENGTH
@@ -1592,7 +1629,7 @@ export function registerProviderHandlers(
     }
     return {
       providerId: target.providerId,
-      agent: target.agent as AgentKind,
+      agent: target.agent as ModelProviderAgentKind,
       modelId: target.modelId,
     };
   };
@@ -2113,7 +2150,7 @@ export function registerProviderHandlers(
         deps.oauthCancel(providerId);
         const credentialSnapshots = stageProviderCredentials(
           providerId,
-          (VALID_AGENTS as readonly AgentKind[]).map((agent) => ({
+          CONFIG_RUNTIME_AGENTS.map((agent) => ({
             agent,
             replacement: null,
           })),

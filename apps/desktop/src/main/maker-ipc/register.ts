@@ -85,7 +85,15 @@ import {
 } from '@cindy/device-link';
 import { and, desc, eq, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
 import { applyScheduledModelSelection, ScheduledModelSelectionBusyError, type ScheduledModelSelection, type ScheduledModelSelectionLease } from './scheduledModelSelection';
-import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  safeStorage,
+  shell,
+  type IpcMainInvokeEvent,
+} from 'electron';
 import {
   activeOwnerScopeKey,
   getActiveAppSession,
@@ -105,6 +113,7 @@ import {
   type AgentInputSessionReferenceContext,
 } from '../../shared/agentInputQueue.js';
 import { getManagedWorktreeBasePath } from '../../shared/managedWorktreePaths.js';
+import { isManagedDshRuntimeRoute } from '../../shared/dshSession.js';
 import { normalizeWorkingDirForProjectSettings } from '../../shared/workingDir.js';
 
 import {
@@ -233,6 +242,8 @@ import {
 import { createBotRuntimeRestoreCoordinator } from './botRuntimeRestore.js';
 import { createWorkingDirectoryRecovery, isUnavailableFilesystemError } from './workingDirectoryRecovery.js';
 import { statWorkingDirectory, mkdirWorkingDirectory, realpathWorkingDirectory, findSimilarWorkingDirectory } from '../workdir-probe-host/index.js';
+import { createDshActivitySnapshotStore } from '../localDb/dshActivitySnapshots.js';
+import { createDshSessionBindingStore } from '../localDb/dshSessionBindings.js';
 import { getMessagesForHistory } from '../localDb/chatHistoryReader.js';
 import {
   awaitAgentInputQueueSnapshotPersistence,
@@ -426,12 +437,20 @@ import { isBotCanonicalReplacementBusy } from './botCanonicalReplacementGuard.js
 import { configureBotCanonicalReplacementCoordinator } from './botCanonicalReplacementCoordinator.js';
 import { botSessionInputBlockReason } from './botSessionInputGuard.js';
 import { configureBotRuntimeEpochRefreshRequest } from './botRuntimeEpochRefreshSignal.js';
+import { createDshExistingHomeIpc } from './dsh-existing-home-ipc.js';
+import {
+  createDshExistingHomeSettingsStore,
+  selectExistingDshHomeFromMain,
+  type DshExistingHomeSettingsStore,
+} from '../dsh-host/existing-home-settings.js';
 import { createGitSnapshotCoordinator } from '../maker-host/git-snapshot-host.js';
 import {
   cancelCodexAuthModeChange,
   ensureCodexMcpBridgeStartedForRemote,
   finalizeCodexAfterAuthModeChange,
   getMaker,
+  getDshRuntimeConfigurationControl,
+  getDshRuntimeStatusForCurrentOwner,
   getMakerIfReady,
   getPluginRegistry,
   isBotToolsetAvailable,
@@ -439,6 +458,8 @@ import {
   preflightBotRuntimeResources,
   prepareCodexForAuthModeChange,
   prepareCodexForCustomProviderHostChange,
+  registerDshAgentIfAvailable,
+  retryDshRuntimeRegistration,
   restartCodexAfterAuthModeChange,
   setBeforeLocalCodexSessionStartHook,
   setBotCapabilityAgentKindResolver,
@@ -610,6 +631,9 @@ import {
   runAcceptedCallback,
 } from './acceptedCallbackRunner.js';
 import { createElectronIpcHandlerRegistry } from './electronIpcRegistry.js';
+import { registerDshActivityHandlers } from './dshActivityHandlers.js';
+import { registerDshRuntimeConfigurationHandlers } from './dsh-runtime-configuration-ipc.js';
+import { registerDshRuntimeStatusHandlers } from './dsh-runtime-status-ipc.js';
 import { refreshCodexMcpEnvironment } from './codexMcpRefresh.js';
 
 import {
@@ -750,6 +774,8 @@ import {
 } from './orcaManualInterrupt.js';
 import { tryInjectProjectContext } from './projectContextInject.js';
 import { registerMakerSessionCreateHandler } from './sessionCreateHandler.js';
+import { createDshActivityControlService } from '../maker-host/dsh-activity-control.js';
+import { dshActivityMutationGate } from '../maker-host/dsh-session-activity.js';
 import {
   applyPendingAgentSwitchIfIdle,
   createPendingAgentSwitchRegistry,
@@ -1518,6 +1544,45 @@ const agentResourceSettingsIpc = createAgentResourceSettingsIpc({
   reset: resetAgentResourceSettings,
 });
 
+// The protected DSH Home bookmark store is lazy: the default managed mode
+// never creates a directory or probes secure storage. The Renderer sees only
+// its display-safe projection through the narrow handlers below.
+let dshExistingHomeSettingsStore: DshExistingHomeSettingsStore | null = null;
+function getDshExistingHomeSettingsStore(): DshExistingHomeSettingsStore {
+  if (dshExistingHomeSettingsStore) return dshExistingHomeSettingsStore;
+  dshExistingHomeSettingsStore = createDshExistingHomeSettingsStore({
+    userDataPath: app.getPath('userData'),
+    safeStorage,
+  });
+  return dshExistingHomeSettingsStore;
+}
+
+const dshExistingHomeIpc = createDshExistingHomeIpc({
+  assertTrustedSender: (event) =>
+    assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+  isSupportedPlatform: () => process.platform === 'darwin' && process.arch === 'arm64',
+  getActiveOwner: getActiveAppSession,
+  getProjection: (accountId) => getDshExistingHomeSettingsStore().getProjection(accountId),
+  selectExistingHome: (accountId, isAccountCurrent) =>
+    selectExistingDshHomeFromMain({
+      accountId,
+      picker: {
+        showOpenDialog: (options) =>
+          dialog.showOpenDialog({
+            title: options.title,
+            buttonLabel: options.buttonLabel,
+            properties: options.properties.filter(
+              (property): property is 'openDirectory' => property === 'openDirectory',
+            ),
+            securityScopedBookmarks: options.properties.includes('securityScopedBookmarks'),
+          }),
+      },
+      store: getDshExistingHomeSettingsStore(),
+      isAccountCurrent,
+    }),
+  reset: (accountId) => getDshExistingHomeSettingsStore().reset(accountId),
+});
+
 function memorySettingsWire() {
   const state = readMemorySettingsState();
   return {
@@ -2187,7 +2252,9 @@ export function stopOrcaIdleWatcher(): void {
 }
 
 function requireAgentKind(value: unknown): AgentKind {
-  if (value === 'claude-code' || value === 'codex' || value === 'pi') return value;
+  if (value === 'claude-code' || value === 'codex' || value === 'pi' || value === 'dsh') {
+    return value;
+  }
   throwIpcError('INVALID_PARAMS', 'agentKind required');
 }
 
@@ -4435,6 +4502,7 @@ function cleanupClosedSessionRuntime(session: WiredSession): void {
 }
 
 // Keep holder reads live, including reads after an awaited pricing/persistence
+
 // operation. Capturing these services when wiring a Session would freeze the
 // pre-initialization or previous runtime value for later events.
 const sessionEventDependencies: SessionEventDependencies = {
@@ -4664,6 +4732,14 @@ export async function beginTurnChangeSetAtDispatch(
   session: SendToSessionDispatchSession,
   anchorClientId: string,
 ): Promise<void> {
+  // DSH has its own Main-owned ACP projection and does not expose the generic
+  // reversible file-change capture contract.  That optional review feature
+  // must not prevent an otherwise admitted local DSH prompt from reaching the
+  // signed Helper.  DSH file/tool capability remains governed by its per-tool
+  // approval path, not by this review-only capture hook.
+  if (session.agentKind === 'dsh') {
+    return;
+  }
   await waitForTurnChangeSetSeal(session.id);
   await finalizeTurnChangeSet(session.id, null, 'partial');
   await waitForTurnChangeSetSeal(session.id);
@@ -4776,6 +4852,42 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   setSessionTextSnapshotReader(getSessionTextSnapshot);
   log.info('registering maker:* IPC handlers');
+  // F6 local plan/todo surface: construct every controller from one current,
+  // owner-scoped database client per invoke. It is intentionally not routed
+  // through device-link and never receives a native DSH bridge or ACP payload.
+  registerDshActivityHandlers(createElectronIpcHandlerRegistry(), {
+    assertTrustedCaller: (event) =>
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+    getControl: () => {
+      const dbClient = getDbClient();
+      return createDshActivityControlService({
+        bindingStore: createDshSessionBindingStore(dbClient),
+        snapshotStore: createDshActivitySnapshotStore(dbClient),
+        isMutationAllowed: (input) => dshActivityMutationGate.isAllowed(input),
+        getSession: async (cindySessionId) => {
+          const [row] = await dbClient.drizzle
+            .select({ agentKind: sessions.agentKind, status: sessions.status })
+            .from(sessions)
+            .where(eq(sessions.id, cindySessionId))
+            .limit(1);
+          return row ?? null;
+        },
+      });
+    },
+  });
+  registerDshRuntimeConfigurationHandlers(createElectronIpcHandlerRegistry(), {
+    assertTrustedCaller: (event) =>
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+    getControl: getDshRuntimeConfigurationControl,
+  });
+  registerDshRuntimeStatusHandlers(createElectronIpcHandlerRegistry(), {
+    assertTrustedCaller: (event) =>
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+    getService: () => ({
+      get: getDshRuntimeStatusForCurrentOwner,
+      retry: retryDshRuntimeRegistration,
+    }),
+  });
   const broadcastSessionRuntimeProjection = async (
     sessionId: string,
     baselineOverride?: SessionRuntimeProfile,
@@ -5256,7 +5368,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // (model/effort/fast/permission/source/是否显式选过模型)。控制端经隧道调用 → seed 远程项目草稿。
   // 缓存未就绪 / 该 vendor 无草稿 model → 返回 {},控制端按 capabilities 默认兜底。
   ipcMain.handle(MAKER_INVOKE.GET_NEW_MAKER_DEFAULTS, (_e, agentKind: unknown) => {
-    return getRemoteNewMakerDefaults(requireAgentKind(agentKind));
+    const kind = requireAgentKind(agentKind);
+    if (kind === 'dsh') {
+      throwIpcError(
+        'UNSUPPORTED_CAPABILITY',
+        'DSH has no model-provider draft defaults until its managed host is registered',
+      );
+    }
+    return getRemoteNewMakerDefaults(kind);
   });
 
   // device-link 草稿「模型 effort/fast」写穿:控制端经隧道调用 → 跑在**被控端**。被控端不直接改
@@ -5469,6 +5588,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     retireCodexAccount,
     finalizeCodexCustomProviderHostChange: finalizeCodexAfterAuthModeChange,
     cancelCodexCustomProviderHostChange: cancelCodexAuthModeChange,
+    onProviderConfigurationChanged: () => {
+      // DSH has no default endpoint. A successful custom-provider save is the
+      // only event that may ask its Main-owned admission gate to try the
+      // packaged local runtime; the gate itself keeps a changed live snapshot
+      // fail-closed and contains all startup errors.
+      void registerDshAgentIfAvailable();
+    },
     beginRouteMutation: (providerId) => beginProviderRouteMutation(providerId),
     broadcastChanged: () => broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {}),
     listProviderIds: () => getDesktopSelectableCatalog().providers.map((provider) => provider.id),
@@ -5906,11 +6032,27 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             ? params.sessionId.trim()
             : undefined;
         const sessionMeta = sessionId ? await maker.getSessionMeta(sessionId) : null;
+        if (kind === 'dsh') {
+          throwIpcError(
+            'UNSUPPORTED_CAPABILITY',
+            'DSH commands are unavailable until its managed host is registered',
+          );
+        }
         const builtins = maker.listAgentCommands(kind);
+        const piCommandSession =
+          sessionMeta?.agentKind === 'claude-code' ||
+          sessionMeta?.agentKind === 'codex' ||
+          sessionMeta?.agentKind === 'pi'
+            ? {
+                agentKind: sessionMeta.agentKind,
+                ...(sessionMeta.reviewMode === true ? { reviewMode: true as const } : {}),
+                ...(sessionMeta.remoteHostId ? { remoteHostId: sessionMeta.remoteHostId } : {}),
+              }
+            : null;
         const mayListPackageCommands = shouldListPiPackageCommands(
           kind,
           sessionId !== undefined,
-          sessionMeta,
+          piCommandSession,
           params.allowManagedPiPackagePreview !== false,
         );
         let packageCommands: Array<{ name: string; description: string }> = [];
@@ -6598,7 +6740,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 隐式来源的原生默认落点被停用而有启用替代拷贝时,把会话显式改路由过去(下方
     // persistAndHydrateSessionProvider 会把它落库):实际路由层对隐式来源走原生
     // 默认、不查停用标志,仅放行等于继续用停用拷贝付费。
-    if (typeof o.model === 'string' && o.model) {
+    // DSH accepts only the opaque marker at the IPC boundary. It must not be
+    // treated as a user-selectable model or provider route: Main validates
+    // the configured DSH HTTPS endpoint and API key separately at runtime.
+    if (
+      typeof o.model === 'string' &&
+      o.model &&
+      !isManagedDshRuntimeRoute(o.agentKind, o.model)
+    ) {
       let verifiedResume = false;
       if (o.resumeSessionId && typeof o.id === 'string' && o.id) {
         try {
@@ -8170,8 +8319,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     closeSession: (sessionId) => maker.closeSession(sessionId, 'agent-switch'),
     listMessagesForHandoff: (sessionId, after) =>
       listMessagesForAgentHandoff(sessionId, 400, after),
-    findParkedEngineSession: (sessionId, targetDbKind) =>
-      findParkedEngineSession(sessionId, targetDbKind),
+    findParkedEngineSession: async (sessionId, targetDbKind) => {
+      if (targetDbKind === 'dsh') return null;
+      return findParkedEngineSession(sessionId, targetDbKind);
+    },
     applyAgentSwitchToDb: async (sessionId, patch) => {
       const verifiedWindow = lookupVerifiedContextWindow(
         (agentKind, modelId, pid) =>
@@ -9839,6 +9990,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     meta: NonNullable<Awaited<ReturnType<typeof maker.getSessionMeta>>>,
     inheritTargetPlanMode = false,
   ): Promise<AgentInputCreateOpts> {
+    const queuedAgentKind = meta.agentKind;
+    if (queuedAgentKind === 'dsh') {
+      throwIpcError(
+        'UNSUPPORTED_CAPABILITY',
+        'DSH sessions cannot enter the execution queue until their managed host is registered',
+      );
+    }
     const db = getDbClient().drizzle;
     const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1);
     if (!row) {
@@ -9846,7 +10004,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     const createOpts = buildCreateOptsWithStderr({
       id: sessionId,
-      agentKind: meta.agentKind,
+      agentKind: queuedAgentKind,
       workingDir: meta.workDir,
       model: meta.model,
       providerId: row.providerId,
@@ -9876,7 +10034,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (writableDirs.length > 0) createOpts.writableDirs = writableDirs;
     }
     return {
-      agentKind: createOpts.agentKind,
+      agentKind: queuedAgentKind,
       workingDir: createOpts.workingDir,
       model: createOpts.model,
       effort: createOpts.effort,
@@ -10079,8 +10237,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         workerPermissionMode?: unknown;
         deferDelegateTask?: unknown;
       };
-      const workerAgent: AgentKind =
-        body.workerAgent === 'codex' ? 'codex' : body.workerAgent === 'pi' ? 'pi' : 'claude-code';
+      const workerAgent =
+        body.workerAgent === undefined ? 'claude-code' : requireAgentKind(body.workerAgent);
+      if (workerAgent === 'dsh') {
+        throwIpcError(
+          'UNSUPPORTED_CAPABILITY',
+          'DSH is not available for Orca workers until the managed host is enabled',
+        );
+      }
       const delegateTask = typeof body.delegateTask === 'string' ? body.delegateTask : undefined;
       if (
         body.workerPermissionMode !== undefined &&
@@ -10842,6 +11006,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   ipcMain.handle(MAKER_INVOKE.AGENT_RESOURCE_SETTINGS_RESET, async (e) =>
     agentResourceSettingsIpc.reset(e),
   );
+
+  // ─── DSH existing Home selection ───────────────────────────────────────
+  // The adapter deliberately forwards no Renderer-controlled parameters:
+  // account identity is Main-owned, the picker creates the bookmark in Main,
+  // and the wire response is a path/bookmark-free projection only.
+  ipcMain.handle(MAKER_INVOKE.DSH_EXISTING_HOME_GET, (e) => dshExistingHomeIpc.get(e));
+  ipcMain.handle(MAKER_INVOKE.DSH_EXISTING_HOME_SELECT, (e) => dshExistingHomeIpc.select(e));
+  ipcMain.handle(MAKER_INVOKE.DSH_EXISTING_HOME_RESET, (e) => dshExistingHomeIpc.reset(e));
 
   // ─── Idle watcher ────────────────────────────────────────────────────────
   // 只扫描 active team/session，避免已归档 Worker 被终态筛选重新捞起。
@@ -12002,6 +12174,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           }>
         > = {};
         for (const a of agents) {
+          if (a === 'dsh') {
+            throwIpcError(
+              'UNSUPPORTED_CAPABILITY',
+              'DSH model discovery requires the managed host and binding runtime',
+            );
+          }
           const caps = maker.getCapabilities(a);
           // key 必须区分 pi,否则 pi 模型会被塞进 claude_code 键与 CC 模型混淆。
           const key = a === 'codex' ? 'codex' : a === 'pi' ? 'pi' : 'claude_code';
@@ -12463,12 +12641,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         sessionKindRow.contextWindow > 0
           ? sessionKindRow.contextWindow
           : undefined;
-      const cardAgentKind =
-        sessionKindRow?.agentKind === 'codex'
-          ? 'codex'
-          : sessionKindRow?.agentKind === 'pi'
-            ? 'pi'
-            : 'cc';
+      const cardAgentKind = sessionKindRow?.agentKind
+        ? makerToDbAgentKind(dbToMakerAgentKind(sessionKindRow.agentKind))
+        : 'cc';
       broadcastSessionPatched(
         sessionId,
         {
@@ -13587,7 +13762,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return reconcileSessionTurnIdle(sessionId, 'authoritative-idle');
     },
     hasPendingInteraction: hasPendingAgentInteractionForSession,
-    getAgentKind: (sessionId) => getStableSessionForTurnBoundary(sessionId)?.agentKind ?? null,
+    getAgentKind: (sessionId) => {
+      const session = getStableSessionForTurnBoundary(sessionId);
+      return session?.agentKind === 'dsh' ? null : session?.agentKind ?? null;
+    },
     getSdkSessionId: async (sessionId) => {
       const meta = await maker.getSessionMeta(sessionId).catch(() => null);
       return meta?.sdkSessionId;
@@ -14301,9 +14479,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (
       msg.createOpts.agentKind !== 'claude-code' &&
       msg.createOpts.agentKind !== 'codex' &&
-      msg.createOpts.agentKind !== 'pi'
+      msg.createOpts.agentKind !== 'pi' &&
+      msg.createOpts.agentKind !== 'dsh'
     ) {
       throwIpcError('INVALID_PARAMS', 'queued.createOpts.agentKind invalid');
+    }
+    // DSH is deliberately local-only: its signed Helper receives a Main-owned
+    // macOS workspace bookmark and must never be launched through Device Link.
+    // Local renderer prompts use this same validated queue path.
+    if (msg.createOpts.agentKind === 'dsh' && isDeviceLinkInvoke()) {
+      throwIpcError('UNSUPPORTED_CAPABILITY', 'DSH queued input is only available on this Mac');
     }
     const normalized: AgentInputQueuedMessage = { ...msg };
     delete normalized.autoReviewUserText;
@@ -17990,7 +18175,9 @@ async function checkWorkDirExists(
   if (remoteHostId) return true;
   if (!workingDir?.trim()) return true;
   workingDir = workingDirectoryRecovery.resolve(sessionId, workingDir);
-  const source: AgentKind = agentKind === 'codex' || agentKind === 'pi' ? agentKind : 'claude-code';
+  // 缺失字段仅用于兼容历史 session；所有已知 agent(包括尚未绑定的 DSH)都要保留
+  // 原身份，不能为了错误横幅把 DSH 伪装成 Claude Code。
+  const source: AgentKind = agentKind ?? 'claude-code';
   // suppressMissingBroadcast: 调用方(SEND 事务)手里还有 DB 权威值可兜底时,
   // 首检失败只记日志不广播错误横幅——兜底成功的话用户不该看到假错误。
   const suppress = opts?.suppressMissingBroadcast === true;
