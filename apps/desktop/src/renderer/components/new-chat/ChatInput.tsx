@@ -329,6 +329,7 @@ import {
   chatEligibleSourcesForModel,
   effectiveSourceIdForModel,
   isModelProviderAgentKind,
+  type ModelProviderAgentKind,
 } from '@cindy/model-providers';
 import {
   deriveModelsFromProviders,
@@ -830,7 +831,7 @@ type ModelRouteAgentKind = Exclude<AgentKind, 'dsh'>;
 const UNIFIED_AGENT_KINDS: readonly ModelRouteAgentKind[] = ['claude-code', 'codex', 'pi'];
 
 /** AgentKind → NewMaker vendor(useAvailableAgents 用 vendor 口径)。 */
-function agentKindToVendor(kind: AgentKind): 'cc' | 'codex' | 'pi' | 'dsh' {
+function agentKindToVendor(kind: ModelRouteAgentKind): 'cc' | 'codex' | 'pi' {
   return kind === 'claude-code' ? 'cc' : kind;
 }
 
@@ -1680,7 +1681,10 @@ export function ChatInput({
     sessionId && !remoteHostId ? makerChatStore.getAgentSwitchIntent(sessionId) : null;
   const composerSelection = resolveComposerModelSelection({
     current: {
-      agentKind: runtimeAgentKind ?? vendorKeyToAgentKind(vendorKey) ?? 'claude-code',
+      agentKind:
+        (runtimeAgentKind && isModelProviderAgentKind(runtimeAgentKind) ? runtimeAgentKind : null) ??
+        vendorKeyToAgentKind(vendorKey === 'dsh' ? undefined : vendorKey) ??
+        'claude-code',
       model: initialModel ?? localVendorDefaults.model,
       providerId: initialProviderId ?? null,
       effort: initialEffort ?? localVendorDefaults.effort,
@@ -1876,9 +1880,13 @@ export function ChatInput({
   // 当前 activeModel 归属的 agent runtime —— 用于 send 预检里按 (model, agent) 查
   // 「有没有已连接来源」。vendorKey 锁定时直接信任;否则按 capabilities 反推
   // (按 availableModels 归类,不靠 id 前缀猜)。
-  const currentModelAgentKind: AgentKind | null = useMemo(() => {
-    if (runtimeEffective || composerSelection.pending) return composerSelection.display.agentKind;
-    if (agentKind) return agentKind;
+  const currentModelAgentKind: ModelProviderAgentKind | null = useMemo(() => {
+    if (runtimeEffective || composerSelection.pending) {
+      return isModelProviderAgentKind(composerSelection.display.agentKind)
+        ? composerSelection.display.agentKind
+        : null;
+    }
+    if (agentKind && isModelProviderAgentKind(agentKind)) return agentKind;
     if ((ccCaps.capabilities?.availableModels ?? []).some((m) => m.id === activeModel)) {
       return 'claude-code';
     }
@@ -6863,7 +6871,7 @@ export function ChatInput({
               ? {
                   uid: favoriteUid,
                   wireModelId: modelId,
-                  engine: targetAgent === 'claude-code' ? 'cc' : targetAgent,
+                  engine: agentKindToVendor(targetAgent),
                   providerId,
                 }
               : null,
@@ -6896,10 +6904,7 @@ export function ChatInput({
   const composerEngineMarkVendor = isDshManagedRuntime
     ? null
     : sessionId
-      ? (resolveModelSelectorAgentIdentity(
-          runtimeAgentKind,
-          composerSelection.pending ? composerSelection.display.agentKind : null,
-        )?.vendorKey ?? null)
+      ? (resolveModelSelectorAgentIdentity(runtimeAgentKind, composerSelection.pending ? composerSelection.display.agentKind : null)?.vendorKey ?? null)
     : (vendorKey ?? null);
 
   /**
@@ -7027,7 +7032,9 @@ export function ChatInput({
       if (sessionId && sessionAgentSwitchSupported && !remoteHostId && runtimeAgentKind &&
           expectedAgentSwitchRevision === undefined) {
         const intent = makerChatStore.getAgentSwitchIntent(sessionId);
-        return performAgentSwitch(intent?.target ?? runtimeAgentKind, newModelId,
+        const targetAgentKind = intent?.target ?? runtimeAgentKind;
+        if (!isModelProviderAgentKind(targetAgentKind)) return false;
+        return performAgentSwitch(targetAgentKind, newModelId,
           intent ? intent.providerId : effectiveSourceId ?? null);
       }
       const sourceSessionId = sessionId;
@@ -7587,7 +7594,9 @@ export function ChatInput({
       if (sessionId && sessionAgentSwitchSupported && !remoteHostId && runtimeAgentKind &&
           expectedAgentSwitchRevision === undefined) {
         const intent = makerChatStore.getAgentSwitchIntent(sessionId);
-        return performAgentSwitch(intent?.target ?? runtimeAgentKind,
+        const targetAgentKind = intent?.target ?? runtimeAgentKind;
+        if (!isModelProviderAgentKind(targetAgentKind)) return false;
+        return performAgentSwitch(targetAgentKind,
           reconciledModelId ?? intent?.model ?? activeModel, newProviderId, {
             effort: reconciledEffort,
             fastMode: reconciledFast,

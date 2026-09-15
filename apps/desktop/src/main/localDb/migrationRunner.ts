@@ -147,6 +147,82 @@ function sameRuntimeIdentity(
   );
 }
 
+const LEGACY_DSH_MIGRATION_LINEAGE_REPAIRS: ReadonlyArray<{
+  legacy: MigrationRuntimeIdentity;
+  canonical: MigrationRuntimeIdentity;
+}> = [
+  {
+    legacy: {
+      seq: 100,
+      fileName: '0100_dsh-session-bindings.sql',
+      sqlHash: '5d90b333fced1683326cb2e541fdd2bf4ac3e6eb0e36d700d429632d82448021',
+      scriptHash: null,
+    },
+    canonical: {
+      seq: 100,
+      fileName: '0100_segment_messages_fts_cjk.sql',
+      sqlHash: 'b4e0497804e46e0a0b0b8c31975b062152d551bac49c3c2e80932567b4085dcd',
+      scriptHash: '4a3318b13c29dab996e4c785e0e424cf63a905e35a471738b50f25e28def8120',
+    },
+  },
+  {
+    legacy: {
+      seq: 101,
+      fileName: '0101_abnormal_solo.sql',
+      sqlHash: '9c78dbca139861b7bcebd5177a42d39a290022359d15bea2ba08d86b04a144dc',
+      scriptHash: null,
+    },
+    canonical: {
+      seq: 101,
+      fileName: '0101_repair_cjk_fts_missing_rows.sql',
+      sqlHash: 'b4e0497804e46e0a0b0b8c31975b062152d551bac49c3c2e80932567b4085dcd',
+      scriptHash: 'fa7a77fe27809aba9e1bfb9cebe546fa26c1f14b0e41a305fda6ce3c14b28988',
+    },
+  },
+  {
+    legacy: {
+      seq: 102,
+      fileName: '0102_conscious_iron_fist.sql',
+      sqlHash: '014efd0177094fd001334746ef9a2498bcf1e1c6f424ed1a1dc468cc980b52be',
+      scriptHash: null,
+    },
+    canonical: {
+      seq: 102,
+      fileName: '0102_optimal_ender_wiggin.sql',
+      sqlHash: 'b4e0497804e46e0a0b0b8c31975b062152d551bac49c3c2e80932567b4085dcd',
+      scriptHash: 'e5206a470f2bfbbb937c18d776e372986207be5cc0ca481f7faab473815f69f9',
+    },
+  },
+  {
+    legacy: {
+      seq: 103,
+      fileName: '0103_stiff_captain_america.sql',
+      sqlHash: 'ee55b68916f4e0a885a22a541003b6392ca1c385557da78e862909fa74190449',
+      scriptHash: null,
+    },
+    canonical: {
+      seq: 103,
+      fileName: '0103_bot_mode.sql',
+      sqlHash: '17f781990964f826f734710d40eebe8b3830571993c394db935f540062735985',
+      scriptHash: null,
+    },
+  },
+  {
+    legacy: {
+      seq: 104,
+      fileName: '0104_flat_slyde.sql',
+      sqlHash: '495b4d98fddb40e89746053164122c6c76de6c52be8cae43b0a41d6a1693ceb7',
+      scriptHash: null,
+    },
+    canonical: {
+      seq: 104,
+      fileName: '0104_schedule-model-harness.sql',
+      sqlHash: 'b4e0497804e46e0a0b0b8c31975b062152d551bac49c3c2e80932567b4085dcd',
+      scriptHash: '8bfd127690395aac0298708694a9ea2546c0b64f005ea8ac5fef5e8996527ec1',
+    },
+  },
+];
+
 /**
  * 0062 的 companion 曾在已发布版本中只改动了一处注释，产生了短暂的错误指纹。
  * 这里只允许该错误指纹单向收敛回最初发布的 canonical 指纹；其它 identity 变化仍失败关闭。
@@ -155,7 +231,7 @@ function isKnownRuntimeIdentityRepair(
   applied: MigrationRuntimeIdentity,
   canonical: MigrationRuntimeIdentity,
 ): boolean {
-  return (
+  const known0062Repair =
     applied.seq === 62 &&
     applied.fileName === '0062_flaky_mimic.sql' &&
     applied.sqlHash === '77b8741ac31c159eb422746c0165d102ad65693236c80d0ff055fd70cd43fe68' &&
@@ -163,7 +239,14 @@ function isKnownRuntimeIdentityRepair(
     canonical.seq === applied.seq &&
     canonical.fileName === applied.fileName &&
     canonical.sqlHash === applied.sqlHash &&
-    canonical.scriptHash === '0a72ba2d89237b4b7322ffbbeb644c94e01be7d159851e220f51c03edfa80b78'
+    canonical.scriptHash === '0a72ba2d89237b4b7322ffbbeb644c94e01be7d159851e220f51c03edfa80b78';
+  return (
+    known0062Repair ||
+    LEGACY_DSH_MIGRATION_LINEAGE_REPAIRS.some(
+      (repair) =>
+        sameRuntimeIdentity(applied, repair.legacy) &&
+        sameRuntimeIdentity(canonical, repair.canonical),
+    )
   );
 }
 
@@ -174,6 +257,114 @@ function runtimeIdentityMatches(
   return (
     sameRuntimeIdentity(applied, canonical) || isKnownRuntimeIdentityRepair(applied, canonical)
   );
+}
+
+function tableHasColumns(
+  db: Database.Database,
+  tableName: string,
+  expectedColumns: readonly string[],
+): boolean {
+  const actualColumns = new Set(
+    (db.prepare(`PRAGMA table_info('${tableName}')`).all() as Array<{ name: string }>).map(
+      (column) => column.name,
+    ),
+  );
+  return expectedColumns.every((column) => actualColumns.has(column));
+}
+
+function hasLegacyDshMigrationHistory(db: Database.Database): boolean {
+  const history = db
+    .prepare(
+      `SELECT seq, file_name, content_hash
+       FROM migration_history
+       WHERE seq BETWEEN 100 AND 104`,
+    )
+    .all() as Array<{ seq: number; file_name: string; content_hash: string }>;
+  return history.some((row) =>
+    LEGACY_DSH_MIGRATION_LINEAGE_REPAIRS.some(
+      (repair) =>
+        row.seq === repair.legacy.seq &&
+        row.file_name === repair.legacy.fileName &&
+        row.content_hash === repair.legacy.sqlHash,
+    ),
+  );
+}
+
+function ensureLegacyDshSchemaFor0107(db: Database.Database): void {
+  if (!tableHasColumns(db, 'sessions', ['id'])) {
+    throw new Error('legacy DSH migration lineage requires the sessions table');
+  }
+  if (!tableHasColumns(db, 'sessions', ['startup_state'])) {
+    db.exec("ALTER TABLE `sessions` ADD `startup_state` text DEFAULT 'ready' NOT NULL;");
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dsh_session_bindings (
+      cindy_session_id text PRIMARY KEY NOT NULL,
+      runtime_session_id text NOT NULL,
+      host_scope_id text NOT NULL,
+      runtime_release_id text NOT NULL,
+      runtime_version text NOT NULL,
+      controller_api_version integer NOT NULL,
+      capability_fingerprint text NOT NULL,
+      home_mode text NOT NULL,
+      lifecycle_state text DEFAULT 'active' NOT NULL,
+      last_projected_sequence integer DEFAULT 0 NOT NULL,
+      revision integer DEFAULT 1 NOT NULL,
+      created_at integer NOT NULL,
+      updated_at integer NOT NULL,
+      FOREIGN KEY (cindy_session_id) REFERENCES sessions(id) ON UPDATE no action ON DELETE restrict
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_dsh_bindings_scope_runtime
+      ON dsh_session_bindings (host_scope_id, runtime_session_id);
+    CREATE INDEX IF NOT EXISTS idx_dsh_bindings_scope_lifecycle
+      ON dsh_session_bindings (host_scope_id, lifecycle_state);
+    CREATE TABLE IF NOT EXISTS dsh_projection_events (
+      cindy_session_id text NOT NULL,
+      sequence integer NOT NULL,
+      event_json text NOT NULL,
+      event_sha256 text NOT NULL,
+      created_at integer NOT NULL,
+      PRIMARY KEY(cindy_session_id, sequence),
+      FOREIGN KEY (cindy_session_id) REFERENCES dsh_session_bindings(cindy_session_id) ON UPDATE no action ON DELETE restrict
+    );
+    CREATE INDEX IF NOT EXISTS idx_dsh_projection_events_session_sequence
+      ON dsh_projection_events (cindy_session_id, sequence);
+    CREATE TABLE IF NOT EXISTS dsh_prompt_receipts (
+      receipt_id text PRIMARY KEY NOT NULL,
+      cindy_session_id text NOT NULL,
+      state text DEFAULT 'pending' NOT NULL,
+      stop_reason text,
+      created_at integer NOT NULL,
+      resolved_at integer,
+      FOREIGN KEY (cindy_session_id) REFERENCES dsh_session_bindings(cindy_session_id) ON UPDATE no action ON DELETE restrict
+    );
+    CREATE INDEX IF NOT EXISTS idx_dsh_prompt_receipts_session_state_created
+      ON dsh_prompt_receipts (cindy_session_id, state, created_at);
+    CREATE TABLE IF NOT EXISTS dsh_activity_snapshots (
+      cindy_session_id text PRIMARY KEY NOT NULL,
+      host_scope_id text NOT NULL,
+      activity_json text NOT NULL,
+      activity_sha256 text NOT NULL,
+      sequence integer NOT NULL,
+      created_at integer NOT NULL,
+      updated_at integer NOT NULL,
+      FOREIGN KEY (cindy_session_id) REFERENCES dsh_session_bindings(cindy_session_id) ON UPDATE no action ON DELETE restrict
+    );
+    CREATE INDEX IF NOT EXISTS idx_dsh_activity_snapshots_scope_sequence
+      ON dsh_activity_snapshots (host_scope_id, sequence);
+  `);
+  const requiredTables: ReadonlyArray<readonly [string, readonly string[]]> = [
+    ['sessions', ['startup_state']],
+    ['dsh_session_bindings', ['cindy_session_id', 'runtime_session_id', 'host_scope_id']],
+    ['dsh_projection_events', ['cindy_session_id', 'sequence', 'event_json']],
+    ['dsh_prompt_receipts', ['receipt_id', 'cindy_session_id', 'state']],
+    ['dsh_activity_snapshots', ['cindy_session_id', 'host_scope_id', 'sequence']],
+  ];
+  for (const [tableName, columns] of requiredTables) {
+    if (!tableHasColumns(db, tableName, columns)) {
+      throw new Error(`legacy DSH migration lineage has incompatible ${tableName} schema`);
+    }
+  }
 }
 
 function runtimeIdentityListsMatch(
@@ -446,6 +637,11 @@ const FROZEN_REPLAY_DEFECT_GUARDS: Record<string, (db: Database.Database) => boo
     // 与其中断整条迁移链不如按 no-op 跳过;列已存在则为重放,同样跳过。
     if (columns.length === 0) return true;
     return columns.some((column) => column.name === 'notify_wecom_group');
+  },
+  '0107_mixed_norman_osborn.sql': (db) => {
+    if (!hasLegacyDshMigrationHistory(db)) return false;
+    ensureLegacyDshSchemaFor0107(db);
+    return true;
   },
 };
 

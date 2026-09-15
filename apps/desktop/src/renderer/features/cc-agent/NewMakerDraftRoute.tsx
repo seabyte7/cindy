@@ -166,7 +166,6 @@ import {
   type DeferredUiAssignment,
 } from './deferredUiAssignment';
 import { CrossAgentConvertDialog } from '@/components/ui/cross-agent-convert-dialog';
-import type { MakerVendor } from '@/lib/ccAgent.types';
 import { ChevronDown, MessageSquare, MonitorSmartphone } from 'lucide-react';
 import { HomeSuggestionList } from './HomeSuggestionList';
 import { type HomeSuggestionId, homeSuggestionPromptKey } from './homeSuggestions';
@@ -971,6 +970,10 @@ export function NewMakerDraftRoute() {
     if (!dshAllowedAtTarget) result.delete('dsh');
     return result;
   }, [availableVendors, dshAllowedAtTarget]);
+  const availableModelVendors = useMemo<ReadonlySet<SelectableVendor>>(
+    () => new Set([...availableVendors].filter((vendor): vendor is SelectableVendor => vendor !== 'dsh')),
+    [availableVendors],
+  );
   /**
    * 「这份草稿要建到对端设备上」—— 只看 deviceId,**不再要求 workingDir**(#807)。
    *
@@ -1312,10 +1315,10 @@ export function NewMakerDraftRoute() {
         isModelEnabled,
         providers: localProviders,
         providersLoading: localProvidersLoading,
-        availableAgents: availableVendors,
+        availableAgents: availableModelVendors,
         availableAgentsLoaded,
       }),
-    [localProviders, localProvidersLoading, availableVendors, availableAgentsLoaded, defaultVisibilityVersion],
+    [localProviders, localProvidersLoading, availableModelVendors, availableAgentsLoaded, defaultVisibilityVersion],
   );
   useEffect(() => {
     // 远程主机 / device-link 的可用 Harness 与来源属于执行端，不能拿控制端本机登录态替它选。
@@ -2508,6 +2511,7 @@ export function NewMakerDraftRoute() {
         defaultEffort: sshLocalModelDesc?.defaultEffort ?? null,
       });
       try {
+        if (persistedAgentKind === 'dsh') throw new Error(t('newChat.dsh.managedRuntime'));
         const newSession = await createSession({
           agentKind: draftVendor,
           workingDir: target.path,
@@ -4955,6 +4959,7 @@ export function NewMakerDraftRoute() {
           goalWorkingDir = baseRepo;
           setWtCreating(true);
         }
+        if (persistedAgentKind === 'dsh') throw new Error(t('newChat.dsh.managedRuntime'));
         const newSession = await createSession({
           id: goalSessionId,
           agentKind: persistedAgentKind,
@@ -4974,14 +4979,12 @@ export function NewMakerDraftRoute() {
           throw new Error(t('ccAgent.draft.createSessionFailed'));
         }
         // 草稿里选中的那条收藏跟着会话走(见 carryDraftFavoriteAnchorToSession)。
-        if (persistedAgentKind !== 'dsh') {
-          carryDraftFavoriteAnchorToSession(
-            newSession.id,
-            persistedAgentKind,
-            draftInitialModel,
-            chatInitialProviderId ?? null,
-          );
-        }
+        carryDraftFavoriteAnchorToSession(
+          newSession.id,
+          persistedAgentKind,
+          draftInitialModel,
+          chatInitialProviderId ?? null,
+        );
         if (useLocalGoalWorktree) {
           const baseRepo = selectedWorktree.baseRepo!;
           await prepareLocalGoalWorktree({

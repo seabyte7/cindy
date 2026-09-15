@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { isModelVisible, type ProviderView } from '@cindy/model-providers';
+import { isModelProviderAgentKind, isModelVisible, type ProviderView } from '@cindy/model-providers';
 import { defaultBotModelChain } from '../../shared/botDefaultModelChain.js';
 import type { BotModelRoute } from '../../shared/botModelChain.js';
 import { sameModelRoute, type AppDefaultModelSelection } from '../../shared/appDefaultModelSelection.js';
@@ -62,7 +62,9 @@ async function readSelection() {
   const current = getSelectedNewMakerRoute(owner) ?? null;
   const available = availableAppDefaultModels({ providers, currentRoute: current,
     tuning: (agent, providerId, model) => getNewMakerModelTuning(owner, agent, providerId, model),
-    availableAgents: new Set((getMakerIfReady()?.listAvailableAgents() ?? []).map(agent => agent === 'claude-code' ? 'cc' : agent)),
+    availableAgents: new Set<'cc' | 'codex' | 'pi'>((getMakerIfReady()?.listAvailableAgents() ?? [])
+      .filter(isModelProviderAgentKind)
+      .map(agent => agent === 'claude-code' ? 'cc' : agent)),
     enabled: (agent, providerId, model) => isModelVisible(getModelVisibilityOverride(agent, providerId, model.id), model.defaultEnabled),
   });
   return { owner, assertOwner, current, available };

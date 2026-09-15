@@ -42,7 +42,7 @@ export function getReferenceModelPricing(): ModelPricingCatalog {
           const cost = model.cost;
           if (cost?.input === undefined || cost.output === undefined) continue;
           if (![cost.input, cost.output].every(value => Number.isFinite(value) && value >= 0)) continue;
-          (pricing[provider.id] ??= {})[modelPricingKey(model.id, agent as AgentKind)] = {
+          (pricing[provider.id] ??= {})[modelPricingKey(model.id, agent as ModelProviderAgentKind)] = {
             providerId: provider.id, modelId: model.id, currency: 'USD',
             source: 'provider-reference', approximate: true,
             inputPerMtok: cost.input, outputPerMtok: cost.output,
@@ -55,8 +55,8 @@ export function getReferenceModelPricing(): ModelPricingCatalog {
     if (provider.auth?.method !== 'oauth' || !provider.auth.native) continue;
     for (const [agent, models] of Object.entries(provider.models)) {
       for (const model of models ?? []) {
-        const quote = providerReferencePriceQuote(provider.id, model.id, registry, { agent: agent as AgentKind, officialOnly: true });
-        if (quote) (pricing[provider.id] ??= {})[modelPricingKey(model.id, agent as AgentKind)] = quote;
+        const quote = providerReferencePriceQuote(provider.id, model.id, registry, { agent: agent as ModelProviderAgentKind, officialOnly: true });
+        if (quote) (pricing[provider.id] ??= {})[modelPricingKey(model.id, agent as ModelProviderAgentKind)] = quote;
       }
     }
   }
@@ -79,7 +79,7 @@ export function getCodexProviderSubscriptionValuePrice(
   pricing: ModelPricingCatalog | null | undefined,
   at?: string | Date,
   overrides?: ModelPriceOverridesSnapshot,
-  agent: AgentKind = 'codex',
+  agent: ModelProviderAgentKind = 'codex',
 ): ModelPriceQuote | undefined {
   if (providerId === 'xd') return undefined;
   const effective = getModelPriceQuote(pricing, providerId, modelId, agent);

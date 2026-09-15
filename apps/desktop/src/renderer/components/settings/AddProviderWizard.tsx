@@ -109,7 +109,7 @@ function presetRuntimeBaseUrl(
   if (!runtime.baseUrlEditable) return runtime.baseUrl;
   if (edited[agent] !== undefined) return edited[agent]!.trim();
   for (const [sourceAgent, endpoint] of Object.entries(edited)) {
-    const source = preset.runtimes[sourceAgent as AgentKind];
+    const source = preset.runtimes[sourceAgent as ModelProviderAgentKind];
     if (!source || !endpoint) continue;
     const bindings = providerEndpointBindings(source.baseUrl, endpoint.trim());
     if (bindings && source.baseUrl.includes('{')) return bindProviderEndpoint(runtime.baseUrl, bindings);
@@ -433,10 +433,10 @@ export function AddProviderWizard({
         agents: ModelProviderAgentKind[];
         /** 列模型端点上报的上下文窗口,**按 agent 分槽**(同一 id 双端可不同,如
          *  cc=1M / codex=272K);完成创建时按所属 runtime 取值,作为供应商事实单独保存。 */
-        contextWindows?: Partial<Record<AgentKind, number>>;
-        discoveredCosts?: Partial<Record<AgentKind, import("@cindy/model-providers").ModelCost>>;
+        contextWindows?: Partial<Record<ModelProviderAgentKind, number>>;
+        discoveredCosts?: Partial<Record<ModelProviderAgentKind, import("@cindy/model-providers").ModelCost>>;
         discoveredMetadata?: Partial<
-          Record<AgentKind, import('@cindy/model-providers').ModelMetadata>
+          Record<ModelProviderAgentKind, import('@cindy/model-providers').ModelMetadata>
         >;
         /** 附加目录发现出的模型级路由；主 runtime 目录发现的模型保持缺省路由。 */
         routes?: Partial<Record<ModelProviderAgentKind, ProviderModelRouteConfig>>;
@@ -834,7 +834,7 @@ export function AddProviderWizard({
           const choices: typeof picks = new Map();
           const recommendedIds = new Set(Object.values(preset.runtimes).flatMap(rt =>
             rt?.models.filter(m => m.defaultEnabled !== false).map(m => m.id) ?? []));
-          for (const agent of connected.agents) for (const model of connected.models[agent] ?? []) {
+          for (const agent of connected.agents.filter(isModelProviderAgentKind)) for (const model of connected.models[agent] ?? []) {
             const recommended = recommendedIds.has(model.id);
             const existing = choices.get(model.id);
             choices.set(model.id, { name: model.name, checked: recommended, recommended,
@@ -937,13 +937,13 @@ export function AddProviderWizard({
         name: string;
         checked: boolean;
         recommended: boolean;
-        agents: AgentKind[];
-        contextWindows?: Partial<Record<AgentKind, number>>;
-        discoveredCosts?: Partial<Record<AgentKind, import("@cindy/model-providers").ModelCost>>;
+        agents: ModelProviderAgentKind[];
+        contextWindows?: Partial<Record<ModelProviderAgentKind, number>>;
+        discoveredCosts?: Partial<Record<ModelProviderAgentKind, import("@cindy/model-providers").ModelCost>>;
         discoveredMetadata?: Partial<
-          Record<AgentKind, import('@cindy/model-providers').ModelMetadata>
+          Record<ModelProviderAgentKind, import('@cindy/model-providers').ModelMetadata>
         >;
-        routes?: Partial<Record<AgentKind, ProviderModelRouteConfig>>;
+        routes?: Partial<Record<ModelProviderAgentKind, ProviderModelRouteConfig>>;
       }
     >();
     for (const agent of agents) {

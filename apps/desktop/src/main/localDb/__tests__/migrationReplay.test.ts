@@ -6,7 +6,14 @@ import type Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 
 import { createBetterSqliteDatabase } from '../betterSqliteFactory';
-import { listMigrations, runMigrationReplay } from '../migrationRunner';
+import {
+  checkMigrationCompatibility,
+  createMigrationRuntimeManifest,
+  listMigrations,
+  migrationRuntimeManifestPath,
+  prepareMigrationRuntimeManifest,
+  runMigrationReplay,
+} from '../migrationRunner';
 
 const canRunMigrationReplay = process.platform === 'win32' || process.platform === 'darwin';
 const describeMigrationReplay = canRunMigrationReplay ? describe : describe.skip;
@@ -36,13 +43,14 @@ function loadSqliteVec(db: Database.Database): void {
   db.loadExtension(extPath);
 }
 
-function createTempDb(): { db: Database.Database; cleanup: () => void } {
+function createTempDb(): { db: Database.Database; dbPath: string; cleanup: () => void } {
   const dir = mkdtempSync(path.join(tmpdir(), 'xdmaker-migration-replay-'));
   const dbPath = path.join(dir, 'replay.db');
   const db = createBetterSqliteDatabase(dbPath);
   loadSqliteVec(db);
   return {
     db,
+    dbPath,
     cleanup: () => {
       db.close();
       rmSync(dir, { recursive: true, force: true });
@@ -99,6 +107,94 @@ function columnNames(db: Database.Database, tableName: string): string[] {
     .prepare(`PRAGMA table_info('${tableName}')`)
     .all()
     .map((row) => String((row as { name: unknown }).name));
+}
+
+const LEGACY_DSH_COLLISION_IDENTITIES = [
+  {
+    seq: 100,
+    fileName: '0100_dsh-session-bindings.sql',
+    sqlHash: '5d90b333fced1683326cb2e541fdd2bf4ac3e6eb0e36d700d429632d82448021',
+    scriptHash: null,
+  },
+  {
+    seq: 101,
+    fileName: '0101_abnormal_solo.sql',
+    sqlHash: '9c78dbca139861b7bcebd5177a42d39a290022359d15bea2ba08d86b04a144dc',
+    scriptHash: null,
+  },
+  {
+    seq: 102,
+    fileName: '0102_conscious_iron_fist.sql',
+    sqlHash: '014efd0177094fd001334746ef9a2498bcf1e1c6f424ed1a1dc468cc980b52be',
+    scriptHash: null,
+  },
+  {
+    seq: 103,
+    fileName: '0103_stiff_captain_america.sql',
+    sqlHash: 'ee55b68916f4e0a885a22a541003b6392ca1c385557da78e862909fa74190449',
+    scriptHash: null,
+  },
+  {
+    seq: 104,
+    fileName: '0104_flat_slyde.sql',
+    sqlHash: '495b4d98fddb40e89746053164122c6c76de6c52be8cae43b0a41d6a1693ceb7',
+    scriptHash: null,
+  },
+] as const;
+
+function createDshCollisionDatabase(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE dsh_session_bindings (
+      cindy_session_id text PRIMARY KEY NOT NULL,
+      runtime_session_id text NOT NULL,
+      host_scope_id text NOT NULL,
+      runtime_release_id text NOT NULL,
+      runtime_version text NOT NULL,
+      controller_api_version integer NOT NULL,
+      capability_fingerprint text NOT NULL,
+      home_mode text NOT NULL,
+      lifecycle_state text DEFAULT 'active' NOT NULL,
+      last_projected_sequence integer DEFAULT 0 NOT NULL,
+      revision integer DEFAULT 1 NOT NULL,
+      created_at integer NOT NULL,
+      updated_at integer NOT NULL,
+      FOREIGN KEY (cindy_session_id) REFERENCES sessions(id) ON UPDATE no action ON DELETE restrict
+    );
+    CREATE UNIQUE INDEX uniq_dsh_bindings_scope_runtime ON dsh_session_bindings(host_scope_id, runtime_session_id);
+    CREATE INDEX idx_dsh_bindings_scope_lifecycle ON dsh_session_bindings(host_scope_id, lifecycle_state);
+    CREATE TABLE dsh_projection_events (
+      cindy_session_id text NOT NULL,
+      sequence integer NOT NULL,
+      event_json text NOT NULL,
+      event_sha256 text NOT NULL,
+      created_at integer NOT NULL,
+      PRIMARY KEY(cindy_session_id, sequence),
+      FOREIGN KEY (cindy_session_id) REFERENCES dsh_session_bindings(cindy_session_id) ON UPDATE no action ON DELETE restrict
+    );
+    CREATE INDEX idx_dsh_projection_events_session_sequence ON dsh_projection_events(cindy_session_id, sequence);
+    CREATE TABLE dsh_prompt_receipts (
+      receipt_id text PRIMARY KEY NOT NULL,
+      cindy_session_id text NOT NULL,
+      state text DEFAULT 'pending' NOT NULL,
+      stop_reason text,
+      created_at integer NOT NULL,
+      resolved_at integer,
+      FOREIGN KEY (cindy_session_id) REFERENCES dsh_session_bindings(cindy_session_id) ON UPDATE no action ON DELETE restrict
+    );
+    CREATE INDEX idx_dsh_prompt_receipts_session_state_created ON dsh_prompt_receipts(cindy_session_id, state, created_at);
+    CREATE TABLE dsh_activity_snapshots (
+      cindy_session_id text PRIMARY KEY NOT NULL,
+      host_scope_id text NOT NULL,
+      activity_json text NOT NULL,
+      activity_sha256 text NOT NULL,
+      sequence integer NOT NULL,
+      created_at integer NOT NULL,
+      updated_at integer NOT NULL,
+      FOREIGN KEY (cindy_session_id) REFERENCES dsh_session_bindings(cindy_session_id) ON UPDATE no action ON DELETE restrict
+    );
+    CREATE INDEX idx_dsh_activity_snapshots_scope_sequence ON dsh_activity_snapshots(host_scope_id, sequence);
+    ALTER TABLE sessions ADD startup_state text DEFAULT 'ready' NOT NULL;
+  `);
 }
 
 describeMigrationReplay('migration replay', () => {
@@ -264,6 +360,172 @@ describeMigrationReplay('migration replay', () => {
           .all(),
       ).toEqual(['m-cjk']);
     } finally {
+      cleanup();
+    }
+  });
+
+  it('bridges the published DSH 0100-0104 lineage without discarding bindings', () => {
+    const { db, dbPath, cleanup } = createTempDb();
+    const legacyDir = mkdtempSync(path.join(tmpdir(), 'cindy-dsh-collision-pre0100-'));
+    try {
+      for (const migration of listMigrations(drizzleDir())) {
+        if (migration.seq >= 100) continue;
+        copyFileSync(migration.sqlPath, path.join(legacyDir, migration.fileName));
+        if (migration.tsScriptPath) {
+          mkdirSync(path.join(legacyDir, 'scripts'), { recursive: true });
+          copyFileSync(
+            migration.tsScriptPath,
+            path.join(legacyDir, 'scripts', path.basename(migration.tsScriptPath)),
+          );
+        }
+      }
+      runMigrationReplay(db, { drizzleDir: legacyDir });
+      createDshCollisionDatabase(db);
+      db.prepare('INSERT INTO sessions (id, created_at, updated_at) VALUES (?, ?, ?)')
+        .run('dsh-session', 1, 1);
+      db.prepare(
+        `INSERT INTO dsh_session_bindings (
+          cindy_session_id, runtime_session_id, host_scope_id, runtime_release_id, runtime_version,
+          controller_api_version, capability_fingerprint, home_mode, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run('dsh-session', 'native-session', 'scope', 'release', '0.1.2', 1, 'caps', 'cindy-managed', 1, 1);
+      const insertHistory = db.prepare(
+        `INSERT INTO migration_history (seq, file_name, content_hash, applied_at)
+         VALUES (?, ?, ?, ?)`,
+      );
+      for (const identity of LEGACY_DSH_COLLISION_IDENTITIES) {
+        insertHistory.run(identity.seq, identity.fileName, identity.sqlHash, identity.seq);
+      }
+      db.prepare("UPDATE migration_meta SET value = '104' WHERE key = 'schema_version'").run();
+
+      const currentManifest = createMigrationRuntimeManifest(drizzleDir());
+      writeFileSync(
+        migrationRuntimeManifestPath(dbPath),
+        `${JSON.stringify({
+          version: 1,
+          legacyBaselineVersion: -1,
+          migrations: [
+            ...currentManifest.migrations.filter((migration) => migration.seq < 100),
+            ...LEGACY_DSH_COLLISION_IDENTITIES,
+          ],
+        })}\n`,
+        'utf8',
+      );
+
+      expect(() => prepareMigrationRuntimeManifest(dbPath, drizzleDir(), 104)).not.toThrow();
+      const result = runMigrationReplay(db, { drizzleDir: drizzleDir() });
+
+      expect(result.applied.map((migration) => migration.seq)).toEqual(
+        listMigrations(drizzleDir()).filter((migration) => migration.seq > 104).map((migration) => migration.seq),
+      );
+      expect(
+        db.prepare('SELECT cindy_session_id, runtime_session_id, host_scope_id FROM dsh_session_bindings').get(),
+      ).toEqual({ cindy_session_id: 'dsh-session', runtime_session_id: 'native-session', host_scope_id: 'scope' });
+      expect(columnNames(db, 'sessions')).toContain('startup_state');
+      expect(tableExists(db, 'bot_profiles')).toBe(true);
+      expect(
+        db
+          .prepare(
+            `SELECT seq, file_name FROM migration_history
+             WHERE seq BETWEEN 100 AND 104 ORDER BY seq`,
+          )
+          .all(),
+      ).toEqual([
+        { seq: 100, file_name: '0100_segment_messages_fts_cjk.sql' },
+        { seq: 101, file_name: '0101_repair_cjk_fts_missing_rows.sql' },
+        { seq: 102, file_name: '0102_optimal_ender_wiggin.sql' },
+        { seq: 103, file_name: '0103_bot_mode.sql' },
+        { seq: 104, file_name: '0104_schedule-model-harness.sql' },
+      ]);
+      expect(checkMigrationCompatibility(db, drizzleDir(), dbPath)).toMatchObject({ compatible: true });
+    } finally {
+      rmSync(legacyDir, { recursive: true, force: true });
+      cleanup();
+    }
+  });
+
+  it('bridges a DSH database interrupted after its first collided migration', () => {
+    const { db, dbPath, cleanup } = createTempDb();
+    const legacyDir = mkdtempSync(path.join(tmpdir(), 'cindy-dsh-collision-at0100-'));
+    try {
+      for (const migration of listMigrations(drizzleDir())) {
+        if (migration.seq >= 100) continue;
+        copyFileSync(migration.sqlPath, path.join(legacyDir, migration.fileName));
+        if (migration.tsScriptPath) {
+          mkdirSync(path.join(legacyDir, 'scripts'), { recursive: true });
+          copyFileSync(
+            migration.tsScriptPath,
+            path.join(legacyDir, 'scripts', path.basename(migration.tsScriptPath)),
+          );
+        }
+      }
+      runMigrationReplay(db, { drizzleDir: legacyDir });
+      db.exec(`
+        CREATE TABLE dsh_session_bindings (
+          cindy_session_id text PRIMARY KEY NOT NULL,
+          runtime_session_id text NOT NULL,
+          host_scope_id text NOT NULL,
+          runtime_release_id text NOT NULL,
+          runtime_version text NOT NULL,
+          controller_api_version integer NOT NULL,
+          capability_fingerprint text NOT NULL,
+          home_mode text NOT NULL,
+          lifecycle_state text DEFAULT 'active' NOT NULL,
+          last_projected_sequence integer DEFAULT 0 NOT NULL,
+          revision integer DEFAULT 1 NOT NULL,
+          created_at integer NOT NULL,
+          updated_at integer NOT NULL,
+          FOREIGN KEY (cindy_session_id) REFERENCES sessions(id) ON UPDATE no action ON DELETE restrict
+        );
+        CREATE UNIQUE INDEX uniq_dsh_bindings_scope_runtime ON dsh_session_bindings(host_scope_id, runtime_session_id);
+        CREATE INDEX idx_dsh_bindings_scope_lifecycle ON dsh_session_bindings(host_scope_id, lifecycle_state);
+      `);
+      db.prepare('INSERT INTO sessions (id, created_at, updated_at) VALUES (?, ?, ?)')
+        .run('dsh-session', 1, 1);
+      db.prepare(
+        `INSERT INTO dsh_session_bindings (
+          cindy_session_id, runtime_session_id, host_scope_id, runtime_release_id, runtime_version,
+          controller_api_version, capability_fingerprint, home_mode, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run('dsh-session', 'native-session', 'scope', 'release', '0.1.2', 1, 'caps', 'cindy-managed', 1, 1);
+      db.prepare(
+        `INSERT INTO migration_history (seq, file_name, content_hash, applied_at)
+         VALUES (?, ?, ?, ?)`,
+      ).run(
+        LEGACY_DSH_COLLISION_IDENTITIES[0].seq,
+        LEGACY_DSH_COLLISION_IDENTITIES[0].fileName,
+        LEGACY_DSH_COLLISION_IDENTITIES[0].sqlHash,
+        100,
+      );
+      db.prepare("UPDATE migration_meta SET value = '100' WHERE key = 'schema_version'").run();
+
+      const currentManifest = createMigrationRuntimeManifest(drizzleDir());
+      writeFileSync(
+        migrationRuntimeManifestPath(dbPath),
+        `${JSON.stringify({
+          version: 1,
+          legacyBaselineVersion: -1,
+          migrations: [
+            ...currentManifest.migrations.filter((migration) => migration.seq < 100),
+            LEGACY_DSH_COLLISION_IDENTITIES[0],
+          ],
+        })}\n`,
+        'utf8',
+      );
+
+      expect(() => prepareMigrationRuntimeManifest(dbPath, drizzleDir(), 100)).not.toThrow();
+      runMigrationReplay(db, { drizzleDir: drizzleDir() });
+
+      expect(tableExists(db, 'dsh_projection_events')).toBe(true);
+      expect(tableExists(db, 'dsh_prompt_receipts')).toBe(true);
+      expect(tableExists(db, 'dsh_activity_snapshots')).toBe(true);
+      expect(columnNames(db, 'sessions')).toContain('startup_state');
+      expect(
+        db.prepare('SELECT runtime_session_id FROM dsh_session_bindings WHERE cindy_session_id = ?').pluck().get('dsh-session'),
+      ).toBe('native-session');
+      expect(checkMigrationCompatibility(db, drizzleDir(), dbPath)).toMatchObject({ compatible: true });
+    } finally {
+      rmSync(legacyDir, { recursive: true, force: true });
       cleanup();
     }
   });

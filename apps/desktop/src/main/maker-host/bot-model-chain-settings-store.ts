@@ -1,6 +1,6 @@
 import { app } from 'electron';
 import path from 'node:path';
-import { isModelVisible, type ProviderView } from '@cindy/model-providers';
+import { isModelProviderAgentKind, isModelVisible, type ProviderView } from '@cindy/model-providers';
 import { defaultBotModelChain } from '../../shared/botDefaultModelChain.js';
 
 import {
@@ -98,8 +98,10 @@ export async function readBotModelChainSettingsState(
   store.invalidateIfChanged();
   const latest = store.readState();
   if (latest.isCustomized) return latest;
-  const availableAgents = options?.availableAgents ?? new Set(
-    (getMakerIfReady()?.listAvailableAgents() ?? []).map((agent) => agent === 'claude-code' ? 'cc' : agent),
+  const availableAgents = options?.availableAgents ?? new Set<'cc' | 'codex' | 'pi'>(
+    (getMakerIfReady()?.listAvailableAgents() ?? [])
+      .filter(isModelProviderAgentKind)
+      .map((agent) => agent === 'claude-code' ? 'cc' : agent),
   );
   const value = { modelChain: defaultBotModelChain({ providers, providersLoading: false,
     availableAgents, availableAgentsLoaded: true,

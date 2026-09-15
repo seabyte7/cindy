@@ -80,14 +80,15 @@ import {
 } from './modelManagementPresentation';
 
 import {
+  isModelProviderAgentKind,
   isAgentSelectableModel,
   pickRecommendedAgent,
   nativeModelAgents,
   resolveModelIconKind,
 } from '@cindy/model-providers';
-import type { AgentKind, CatalogModel, ProviderView } from '@cindy/model-providers';
+import type { ModelProviderAgentKind, CatalogModel, ProviderView } from '@cindy/model-providers';
 
-const AGENT_LABEL: Record<AgentKind, string> = {
+const AGENT_LABEL: Record<ModelProviderAgentKind, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
   pi: 'Pi',
@@ -160,9 +161,9 @@ export interface UnionModelRow {
   /** 规范化 id(剥掉桥接命名空间前缀后的 canonical key;仅用于合并与搜索,写开关用 byAgent 的真实 id)。 */
   id: string;
   name: string;
-  byAgent: Partial<Record<AgentKind, CatalogModel>>;
+  byAgent: Partial<Record<ModelProviderAgentKind, CatalogModel>>;
   /** 该模型可用的 agent(按 provider.agents 顺序)。 */
-  avail: AgentKind[];
+  avail: ModelProviderAgentKind[];
 }
 
 /**
@@ -171,7 +172,7 @@ export interface UnionModelRow {
  * 到另一 agent 时 id 带前缀(chatgpt/gpt-5.5 vs gpt-5.5),必须归一后合并,
  * 否则并集出现两行、各自被误标单端。
  */
-function canonicalModelKey(provider: ProviderView, agent: AgentKind, id: string): string {
+function canonicalModelKey(provider: ProviderView, agent: ModelProviderAgentKind, id: string): string {
   for (const prefix of provider.routing[agent]?.modelPrefixes ?? []) {
     if (id.startsWith(prefix)) return id.slice(prefix.length);
   }
@@ -183,7 +184,7 @@ function canonicalModelKey(provider: ProviderView, agent: AgentKind, id: string)
 export function buildUnionRows(provider: ProviderView): UnionModelRow[] {
   const rows: UnionModelRow[] = [];
   const byKey = new Map<string, UnionModelRow>();
-  for (const agent of provider.agents) {
+  for (const agent of provider.agents.filter(isModelProviderAgentKind)) {
     for (const m of provider.models[agent] ?? []) {
       const key = canonicalModelKey(provider, agent, m.id);
       const existing = byKey.get(key);
@@ -215,7 +216,7 @@ export function buildUnionRows(provider: ProviderView): UnionModelRow[] {
       if (m) realIds.add(m.id);
     }
   }
-  const anchorAgent = provider.agents[0] ?? 'claude-code';
+  const anchorAgent = provider.agents.find(isModelProviderAgentKind) ?? 'claude-code';
   // 向量清单同理(PR #1707 review):派生侧一直按 isModelDisabled 过滤,但设置页
   // 没有对应的行 —— 停用轴有实现无入口,用户没法单独拦住某个向量型号的付费调用。
   // group 钉 'embedding'(classifyModel 的已知非聊天分类,已有 i18n 标签「向量」)。
@@ -294,7 +295,7 @@ export function canWriteModelVisibility(options: {
 }
 
 /** 该行在指定 agent 下的可见性(不可用 → null)。 */
-function rowEnabled(providerId: string, row: UnionModelRow, agent: AgentKind, userProvider: boolean): boolean | null {
+function rowEnabled(providerId: string, row: UnionModelRow, agent: ModelProviderAgentKind, userProvider: boolean): boolean | null {
   const m = row.byAgent[agent];
   if (!m) return null;
   if (
@@ -363,10 +364,13 @@ export function modelVisibilityTargets(
       model.availability !== 'requires_payment'
     );
   });
-  const native = nativeModelAgents(provider, row.byAgent).filter(agent => usable.includes(agent));
+  const native = nativeModelAgents(provider, row.byAgent)
+    .filter(isModelProviderAgentKind)
+    .filter(agent => usable.includes(agent));
   if (native.length) return native.map(agent => ({ agent, modelId: row.byAgent[agent]!.id }));
   const defaults = usable.filter((agent) => row.byAgent[agent]?.defaultEnabled !== false);
-  const agent = pickRecommendedAgent(provider, row.id, defaults.length ? defaults : usable);
+  const recommended = pickRecommendedAgent(provider, row.id, defaults.length ? defaults : usable);
+  const agent = recommended && isModelProviderAgentKind(recommended) ? recommended : null;
   const model = agent ? row.byAgent[agent] : undefined;
   return agent && model ? [{ agent, modelId: model.id }] : [];
 }
@@ -436,7 +440,7 @@ export function UnifiedModelList({
   compact?: boolean;
   /** Settings deep link target: reveal, focus, and scroll this model row into view. */
   focusModelId?: string;
-  focusAgent?: AgentKind;
+  focusAgent?: ModelProviderAgentKind;
 }) {
   const { t } = useTranslation();
   const { confirm } = useConfirmDialog();
@@ -472,7 +476,7 @@ export function UnifiedModelList({
   const referencePricing = useReferenceModelPricing();
   const providersForPricing = useMemo(() => [provider], [provider]);
   const pricePresentationOf = useCallback(
-    (agent: AgentKind, model: CatalogModel) =>
+    (agent: ModelProviderAgentKind, model: CatalogModel) =>
       resolveModelPricePresentation({
         providerId: provider.id,
         modelId: model.id,
@@ -903,7 +907,9 @@ export function UnifiedModelList({
     const paymentRequired = isRowPaymentRequired(row);
     // 能力注记:多 agent 供应商里缺少任一通道就标(单 agent 供应商头部已说明);
     // 能力模型行不标(它们本来就不参与 agent 维度)。
-    const missingAgents = provider.agents.filter((agent) => !row.avail.includes(agent));
+    const missingAgents = provider.agents
+      .filter(isModelProviderAgentKind)
+      .filter((agent) => !row.avail.includes(agent));
     const capNote =
       !capability && multiAgent && missingAgents.length > 0
         ? t('settings.providers.models.capabilityNote', {

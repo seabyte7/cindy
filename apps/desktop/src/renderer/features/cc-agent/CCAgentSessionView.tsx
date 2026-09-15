@@ -5377,7 +5377,13 @@ export function CCAgentSessionView({
                     )}
                     {!isDshSession && (
                       <TodaySpendChip
-                      vendorKey={normalizeDbAgentKind(displayAgentKind)}
+                      vendorKey={
+                        displayAgentKind === 'claude-code'
+                          ? 'cc'
+                          : displayAgentKind === 'codex' || displayAgentKind === 'pi'
+                            ? displayAgentKind
+                            : undefined
+                      }
                       modelId={agentSwitchIntent?.model ?? session?.model ?? null}
                       providerId={
                         agentSwitchIntent
@@ -5399,12 +5405,23 @@ export function CCAgentSessionView({
                       providerId={session?.providerId}
                       contextTokens={agentStatus.contextTokens}
                       model={agentSwitchIntent?.model ?? session?.model ?? ''}
-                      vendorKey={normalizeDbAgentKind(displayAgentKind)}
+                      vendorKey={
+                        displayAgentKind === 'claude-code'
+                          ? 'cc'
+                          : displayAgentKind === 'codex' || displayAgentKind === 'pi'
+                            ? displayAgentKind
+                            : 'dsh'
+                      }
                       sdkContextWindow={agentStatus.contextWindow}
                       verifiedContextWindow={resolveSessionContextWindow(
                         { providers },
                         {
-                          agentKind: normalizeDbAgentKind(displayAgentKind),
+                          agentKind:
+                            displayAgentKind === 'claude-code'
+                              ? 'cc'
+                              : displayAgentKind === 'dsh'
+                                ? 'dsh'
+                                : displayAgentKind,
                           model: agentSwitchIntent?.model ?? session?.model,
                           providerId: agentSwitchIntent
                             ? agentSwitchIntent.providerId

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { BUNDLED_CATALOG, type AgentKind } from '@cindy/model-providers';
+import { BUNDLED_CATALOG, type ModelProviderAgentKind } from '@cindy/model-providers';
 import { modelPricingKey, providerReferencePriceQuote } from '../../../shared/modelPriceQuote.js';
 import {
   __testing,
@@ -22,7 +22,7 @@ it.each([
   ['claude', 'anthropic', 'claude-sonnet-4-6', 'claude-code'],
   ['direct', 'openai', 'chatgpt/gpt-5.6-luna', 'pi'],
   ['direct', 'xai', 'xai/grok-4.6', 'pi'],
-] as const)('rebases current and historical sparse overrides on official prices: %s %s', (path, providerId, modelId, agent: AgentKind) => {
+] as const)('rebases current and historical sparse overrides on official prices: %s %s', (path, providerId, modelId, agent: ModelProviderAgentKind) => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date('2026-09-11T12:00:00Z'));
   const official = providerReferencePriceQuote(providerId, modelId, registry, { agent, officialOnly: true })!;

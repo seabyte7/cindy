@@ -102,7 +102,7 @@ import { localCliDisplayName, type LocalCliDetection } from '../../../shared/loc
 import { isBuiltinRefreshableProviderId } from '../../../shared/providerModelRefresh';
 import { applyProviderOrder } from '../../../shared/providerOrder';
 import { isModelProviderAgentKind } from '@cindy/model-providers';
-import type { AgentKind, CustomProviderConfig, ProviderView } from '@cindy/model-providers';
+import type { CustomProviderConfig, ModelProviderAgentKind, ProviderView } from '@cindy/model-providers';
 
 // ---------------------------------------------------------------------------
 // 工具
@@ -2020,13 +2020,13 @@ export function ProvidersSection() {
     | {
         mode: 'edit';
         config: CustomProviderConfig;
-        focusAgent?: AgentKind;
+        focusAgent?: ModelProviderAgentKind;
       }
   >(null);
   const [focusedModel, setFocusedModel] = useState<{
     providerId: string;
     modelId: string;
-    agent?: AgentKind;
+    agent?: ModelProviderAgentKind;
   } | null>(null);
   const [providerImportId, setProviderImportId] = useState<string | null>(null);
   const closeProviderImport = useCallback(() => setProviderImportId(null), []);

@@ -57,8 +57,9 @@ export function startMakeCodeSession(sessionId: string, runId: string): Promise<
       const origin = await sessionService.get(sessionId);
       if (!isCurrent() || origin.remoteHostId || origin.deviceLinkDeviceId) return null;
       const profile = origin.runtimeEffective;
-      const agentKind =
-        profile?.agentKind === 'claude-code' ? 'cc' : (profile?.agentKind ?? origin.agentKind);
+      const originAgentKind = profile?.agentKind ?? origin.agentKind;
+      if (originAgentKind === 'dsh') return null;
+      const agentKind = originAgentKind === 'claude-code' ? 'cc' : originAgentKind;
       // Each task works in its own worktree branched from the personal baseline;
       // the managed checkout itself is never a task's working directory.
       update({ codeStartPhase: 'workspace' });

@@ -53,6 +53,7 @@ import { EFFORT_TIER_COLORS } from '@/themes/effortTierColors';
 
 import {
   classifyVisionCapability,
+  isModelProviderAgentKind,
   providerWireProtocolForApi,
   providerBaseUrlForApi,
   clampEffortToSupported,
@@ -62,7 +63,7 @@ import {
   pickRecommendedAgent,
 } from '@cindy/model-providers';
 import type {
-  AgentKind,
+  ModelProviderAgentKind,
   CatalogModel,
   Effort,
   PiModelApi,
@@ -74,7 +75,7 @@ import { modelBrand } from './modelManagementPresentation';
 import { ModelPriceOverrideDialog } from './ModelPriceOverrideDialog';
 import type { UnionModelRow } from './UnifiedModelList';
 
-const AGENT_LABEL: Record<AgentKind, string> = {
+const AGENT_LABEL: Record<ModelProviderAgentKind, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
   pi: 'Pi',
@@ -86,7 +87,7 @@ function editableContextK(tokens: number): string {
   return String(Math.max(1, Math.floor(tokens / 1000)));
 }
 
-const AGENT_MARK: Record<AgentKind, (size: number) => ReactNode> = {
+const AGENT_MARK: Record<ModelProviderAgentKind, (size: number) => ReactNode> = {
   'claude-code': (size) => <ClaudeMark size={size} />,
   codex: (size) => <CodexMark size={size} />,
   pi: (size) => <PiMark size={size} />,
@@ -184,7 +185,7 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** 该行的报价展示（与列表同一份派生结果，避免抽屉自己再算一遍算出别的）。 */
-  pricePresentationOf: (agent: AgentKind, model: CatalogModel) => ModelPricePresentation | null;
+  pricePresentationOf: (agent: ModelProviderAgentKind, model: CatalogModel) => ModelPricePresentation | null;
   /** 准入轴:停用此模型（main 侧 model-disable-store）。 */
   onDisable: (row: UnionModelRow) => void;
   /** 本机 Ollama 专有:删除磁盘上的模型文件。 */
@@ -256,7 +257,7 @@ export function ModelAdvancedDrawer({
     [contextAgent, contextModel, provider.id, row, chatAgents],
   );
   const ctx = useModelContextLimit(open ? contextTarget : null);
-  const setModelApi = async (agent: AgentKind, api: PiModelApi) => {
+  const setModelApi = async (agent: ModelProviderAgentKind, api: PiModelApi) => {
     if (protocolSaving || provider.source !== 'user' || provider.auth?.native || !row?.byAgent[agent]) return;
     const config = providerViewToCustomProviderConfig(provider);
     const runtime = config.runtimes[agent];
@@ -494,7 +495,7 @@ export function ModelAdvancedDrawer({
                           {protocolLabel(protocols.reference)}
                         </span>
                       </div>}
-                      {provider.agents.map((agent) => {
+                      {provider.agents.filter(isModelProviderAgentKind).map((agent) => {
                         const model = row.byAgent[agent];
                         // Missing catalog membership proves no configured route, not upstream incompatibility.
                         const supported = Boolean(model && isAgentSelectableModel(model, { userProvider: provider.source === 'user' }));

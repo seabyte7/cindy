@@ -2,7 +2,7 @@ import {
   isModelSelectableForNewRoute,
   defaultEffortForCapabilities,
   clampEffortToSupported,
-  type AgentKind,
+  type ModelProviderAgentKind,
   type Effort,
   type ProviderView,
 } from '@cindy/model-providers';
@@ -19,7 +19,7 @@ export interface NewMakerDefaultTuple {
 interface ProviderDefaultPolicy {
   providerId: 'openai' | 'anthropic' | 'xai' | 'xd';
   accessKind: 'subscription' | 'managed';
-  agents: readonly AgentKind[];
+  agents: readonly ModelProviderAgentKind[];
   modelIds: readonly string[];
   requireNewSessionDefault?: boolean;
   requireImageInput?: boolean;
@@ -62,7 +62,7 @@ const DEFAULT_POLICIES: readonly ProviderDefaultPolicy[] = [
   },
 ];
 
-function vendorForAgent(agent: AgentKind): NewMakerDefaultTuple['vendor'] {
+function vendorForAgent(agent: ModelProviderAgentKind): NewMakerDefaultTuple['vendor'] {
   return agent === 'claude-code' ? 'cc' : agent;
 }
 
@@ -84,18 +84,18 @@ export function isKnownProductDefaultTupleIdentity(args: {
 }
 
 function supportsImageInput(
-  model: NonNullable<ProviderView['models'][AgentKind]>[number],
+  model: NonNullable<ProviderView['models'][ModelProviderAgentKind]>[number],
 ): boolean {
   return model.supportsImageInput === true || model.modalities?.input.includes('image') === true;
 }
 
 function matchingModel(
   provider: ProviderView,
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
   modelIds: readonly string[],
   requireNewSessionDefault = false,
   requireImageInput = false,
-  enabled?: (agent: AgentKind, providerId: string, model: { id: string; defaultEnabled?: boolean }) => boolean,
+  enabled?: (agent: ModelProviderAgentKind, providerId: string, model: { id: string; defaultEnabled?: boolean }) => boolean,
 ) {
   const models = provider.models[agent] ?? [];
   const preferred = modelIds.map((id) => models.find((model) => model.id === id));
@@ -123,7 +123,7 @@ export function resolveNewMakerDefaultTuples(args: {
   providersLoading: boolean;
   availableAgents: ReadonlySet<MakerVendor>;
   availableAgentsLoaded: boolean;
-  isModelEnabled?: (agent: AgentKind, providerId: string, model: { id: string; defaultEnabled?: boolean }) => boolean;
+  isModelEnabled?: (agent: ModelProviderAgentKind, providerId: string, model: { id: string; defaultEnabled?: boolean }) => boolean;
 }): NewMakerDefaultTuple[] {
   const { providers, providersLoading, availableAgents, availableAgentsLoaded } = args;
   if (providersLoading || !availableAgentsLoaded) return [];

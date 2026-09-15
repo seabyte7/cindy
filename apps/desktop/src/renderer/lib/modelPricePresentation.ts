@@ -18,7 +18,7 @@
 import type { AgentKind } from '@/hooks/useAgentCapabilities';
 import { modelPricePresentation, type ModelPricePresentation } from '@/lib/modelPriceFormat';
 
-import { getModel, type ProviderView } from '@cindy/model-providers';
+import { getModel, isModelProviderAgentKind, type ProviderView } from '@cindy/model-providers';
 
 import { getModelPriceQuote } from '../../shared/modelPriceQuote';
 import type { ModelPricingCatalog } from '../../shared/regionalMoney';
@@ -43,6 +43,7 @@ export function resolveModelPricePresentation({
   gatewayPricing,
   referencePricing,
 }: ModelPricePresentationInput): ModelPricePresentation | null {
+  if (agent && !isModelProviderAgentKind(agent)) return null;
   const pricing = providerId === 'xd' ? gatewayPricing : referencePricing;
   const quote = getModelPriceQuote(pricing, providerId, modelId, agent ?? undefined);
   if (providerId === 'xd' && (!quote || quote.source === 'gateway')) {

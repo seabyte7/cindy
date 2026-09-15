@@ -408,6 +408,7 @@ function sanitize(raw: unknown): NewMakerDraft {
   // seed 就反过来把系统快照认成自定义；这里只服务一次性迁移，不参与新会话默认决策。
   const legacyCcSeedModels = new Set([def.lastByVendor.cc.model, 'claude-sonnet-4-6']);
   const isKnownProductTuple = (slotVendor: DraftPreferenceVendor, prefs: Partial<VendorPrefs>): boolean =>
+    slotVendor !== 'dsh' &&
     typeof prefs.providerId === 'string' &&
     prefs.providerId.length > 0 &&
     typeof prefs.model === 'string' &&
@@ -944,9 +945,10 @@ export function applyAppDefaultModelSelection(selection: AppDefaultModelSelectio
     || Date.now() > selection.expiresAt) return false;
   const stored = readStoredDraftRecord();
   const base = stored ? sanitize(stored) : currentDraft;
+  if (base.vendor === 'dsh') return false;
   const prefs = base.lastByVendor[base.vendor];
   const current: BotModelRoute | null = prefs.model ? {
-    harness: base.vendor === 'cc' || base.vendor === 'orca' ? 'claude' : base.vendor,
+    harness: base.vendor === 'cc' ? 'claude' : base.vendor,
     model: prefs.model, providerId: prefs.providerId ?? null, effort: prefs.effort ?? '',
     fastMode: base.fastModeByModel[prefs.model] === true,
   } : null;

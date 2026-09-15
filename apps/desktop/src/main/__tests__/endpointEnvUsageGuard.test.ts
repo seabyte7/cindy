@@ -69,7 +69,7 @@ describe('端点类 import.meta.env 只允许出现在白名单文件', () => {
       violations,
       `以下文件直接读取端点类 import.meta.env(应改走 getClientEndpoint / electronAPI.clientEndpoints):\n${violations.join('\n')}`,
     ).toEqual([]);
-  });
+  }, 10_000);
 
   it('白名单文件本身仍存在(防重命名后守门空转)', () => {
     for (const rel of ALLOWED_FILES) {

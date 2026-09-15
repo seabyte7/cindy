@@ -10,6 +10,7 @@ import {
 import * as sessionService from '@/lib/sessionService';
 import { onPatch } from '@/lib/sessionsBus';
 import type { Session } from '@/lib/ccAgent.types';
+import { isModelProviderAgentKind } from '@cindy/model-providers';
 import {
   getDataOwnerGeneration,
   isDataOwnerGenerationCurrent,
@@ -116,19 +117,27 @@ export function BotCapabilitySettings({
         const session = await sessionService.get(bot.canonicalSessionId);
         if (!isCurrent()) return;
         const api = window.electronAPI.maker;
+        const sessionAgentKind =
+          session.runtimePending?.profile.agentKind ??
+          session.runtimeEffective?.agentKind ??
+          (session.agentKind === 'codex' || session.agentKind === 'pi'
+            ? session.agentKind
+            : session.agentKind === 'dsh'
+              ? 'dsh'
+              : 'claude-code');
+        if (!isModelProviderAgentKind(sessionAgentKind)) {
+          throw new Error('DSH does not support companion model capabilities');
+        }
         const mcpResult = await api.listCustomMcpServers({
-          agentKind:
-            session.runtimePending?.profile.agentKind ??
-            session.runtimeEffective?.agentKind ??
-            (session.agentKind === 'codex' || session.agentKind === 'pi'
-              ? session.agentKind
-              : 'claude-code'),
+          agentKind: sessionAgentKind,
           botSessionId: bot.canonicalSessionId,
           modelChain: JSON.parse(modelChainKey),
         });
         if (!isCurrent()) return;
         const agentKind = mcpResult.agentKind;
-        if (!agentKind) throw new Error('Missing next-turn route');
+        if (!agentKind || !isModelProviderAgentKind(agentKind)) {
+          throw new Error('Missing supported next-turn route');
+        }
         const results = await Promise.allSettled([
           api.listAgentSkills(agentKind, {
             forceReload: true,

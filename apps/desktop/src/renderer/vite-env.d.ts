@@ -5066,9 +5066,9 @@ interface ElectronAPI {
    * apps/desktop/src/main/maker-ipc/ 的 handlers + apps/desktop/src/main/maker-host/。
    */
   maker: {
-    listAvailableAgents: () => Promise<Array<'claude-code' | 'codex' | 'pi'>>;
+    listAvailableAgents: () => Promise<Array<'claude-code' | 'codex' | 'pi' | 'dsh'>>;
     onAgentsChanged: (cb: () => void) => () => void;
-    getCapabilities: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<unknown>;
+    getCapabilities: (agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh') => Promise<unknown>;
     listBotDelegations: (
       parentSessionId: string,
     ) => Promise<import('../shared/botDelegation').BotDelegationListResult>;
@@ -5107,6 +5107,43 @@ interface ElectronAPI {
         ownerStamp?: import('../shared/dataOwnerPush').DataOwnerPushStamp,
       ) => void,
     ) => () => void;
+    /** Cindy-owned DSH plan/todo state; local desktop only, never ACP data. */
+    readDshActivity: (
+      sessionId: string,
+    ) => Promise<import('../shared/dshActivity').DshActivityReadResult>;
+    createDshPlan: (
+      sessionId: string,
+      label: string,
+    ) => Promise<import('../shared/dshActivity').DshActivityMutationResult>;
+    createDshTodo: (
+      sessionId: string,
+      planActivityId: string,
+      label: string,
+    ) => Promise<import('../shared/dshActivity').DshActivityMutationResult>;
+    completeDshActivity: (
+      sessionId: string,
+      activityId: string,
+    ) => Promise<import('../shared/dshActivity').DshActivityMutationResult>;
+    cancelDshActivity: (
+      sessionId: string,
+      activityId: string,
+    ) => Promise<import('../shared/dshActivity').DshActivityMutationResult>;
+    /** Live DSH choices are opaque Main-issued tokens, never ACP values. */
+    getDshRuntimeConfiguration: (
+      sessionId: string,
+    ) => Promise<import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationSnapshot>;
+    setDshRuntimeConfiguration: (
+      sessionId: string,
+      controlId: import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationId,
+      valueId: string,
+    ) => Promise<import('../shared/dshRuntimeConfiguration').DshRuntimeConfigurationSnapshot>;
+    /** Display-safe status for the Main-owned DSH task factory. */
+    getDshRuntimeStatus: () => Promise<import('../shared/dshRuntimeStatus').DshRuntimeStatus>;
+    retryDshRuntimeRegistration: () => Promise<import('../shared/dshRuntimeStatus').DshRuntimeStatus>;
+    /** Display-safe state only: no local pathname or bookmark crosses this API. */
+    getDshExistingHome: () => Promise<import('../shared/dshExistingHome').DshExistingHomeProjection>;
+    selectDshExistingHome: () => Promise<import('../shared/dshExistingHome').DshExistingHomeProjection>;
+    resetDshExistingHome: () => Promise<import('../shared/dshExistingHome').DshExistingHomeProjection>;
     /** workflow 逐 agent 进度树(只读);读不到 / 解析失败返回 null → 回退 workflow 级卡片。 */
     getWorkflowProgress: (
       sessionId: string,
@@ -5583,8 +5620,9 @@ interface ElectronAPI {
     createSession: (opts: {
       /** 可选: 复用外部 sessionId(本端 chat 用 local-db:sessions:create 拿到的 id) */
       id?: string;
-      agentKind: 'claude-code' | 'codex' | 'pi';
+      agentKind: 'claude-code' | 'codex' | 'pi' | 'dsh';
       workingDir: string;
+      workspaceKind?: 'project' | 'dialogue';
       model: string;
       title?: string;
       parentSessionId?: string;

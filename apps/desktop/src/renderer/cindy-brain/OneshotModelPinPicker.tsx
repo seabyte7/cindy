@@ -28,7 +28,9 @@ export interface OneshotPinOption {
 }
 
 
-function knownAgent(value: string): value is AgentKind {
+type ModelAgentKind = Exclude<AgentKind, 'dsh'>;
+
+function knownAgent(value: string): value is ModelAgentKind {
   return value === 'claude-code' || value === 'codex' || value === 'pi';
 }
 

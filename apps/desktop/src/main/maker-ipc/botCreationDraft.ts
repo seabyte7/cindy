@@ -1,4 +1,4 @@
-import { isModelVisible } from '@cindy/model-providers';
+import { isModelProviderAgentKind, isModelVisible } from '@cindy/model-providers';
 import { getModelVisibilityOverride, waitForModelVisibilityMirror } from '../maker-host/model-visibility-mirror.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
 import fs from 'node:fs/promises';
@@ -86,6 +86,9 @@ export async function generateBotCreationDraft(
   generating = true;
   try {
     const route = input.data.modelRoute;
+    if (!isModelProviderAgentKind(route.agentKind)) {
+      throwIpcError('BOT_CREATION_MODEL_UNAVAILABLE', 'DSH 不能用作伙伴模型');
+    }
     await waitForModelVisibilityMirror();
     const providers = await getDesktopProviderService().listProviders({ allowSideEffects: false });
     assertOwner();
@@ -124,7 +127,14 @@ ${JSON.stringify({ skills, tools, previous: previous ? { ...previous, name: inpu
       signal: AbortSignal.timeout(100000),
       beforeDispatch: async (selection) => {
         assertOwner();
-        assertEnabled(selection);
+        if (!isModelProviderAgentKind(selection.agentKind)) {
+          throwIpcError('BOT_CREATION_MODEL_UNAVAILABLE', 'DSH 不能用作伙伴模型');
+        }
+        assertEnabled({
+          agentKind: selection.agentKind,
+          providerId: selection.providerId,
+          model: selection.model,
+        });
         return true;
       },
     });

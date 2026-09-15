@@ -725,6 +725,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
           if (!lease || typeof lease === 'function')
             throw new Error('Scheduled model selection was not resolved');
           resolvedSelection = lease.selection;
+          if (resolvedSelection.agentKind === 'dsh') {
+            throw new Error('DSH schedules are unavailable until the managed DSH host is registered');
+          }
           schedule = {
             ...schedule,
             agentKind: resolvedSelection.agentKind,
@@ -916,6 +919,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
       (isHeartbeat
         ? (heartbeatAgentKind ?? schedule.agentKind)
         : (schedule.modelAgentKind ?? schedule.agentKind));
+    if (effectiveAgentKind === 'dsh') {
+      throw new Error('DSH schedules are unavailable until the managed DSH host is registered');
+    }
     const rawModel = schedule.model?.trim()
       ? schedule.model
       : isHeartbeat
@@ -1001,22 +1007,26 @@ export class MakerScheduleRunner implements ScheduleRunner {
     if (!isHeartbeat && schedule.modelAgentKind && !resolvedSelection) {
       if (!this.deps.resolveModelSelection)
         throw new Error('Scheduled model selection is not available');
-      resolvedSelection = await this.deps.resolveModelSelection({
+      const nextSelection = await this.deps.resolveModelSelection({
         agentKind: effectiveAgentKind,
         model,
         providerId: createProviderId,
         effort: (schedule.effort as Effort | undefined) ?? null,
         fastMode: fastMode === true,
       });
-      createProviderId = resolvedSelection.providerId;
-      fastMode = resolvedSelection.fastMode;
+      if (nextSelection.agentKind === 'dsh') {
+        throw new Error('DSH schedules are unavailable until the managed DSH host is registered');
+      }
+      resolvedSelection = nextSelection;
+      createProviderId = nextSelection.providerId;
+      fastMode = nextSelection.fastMode;
       schedule = {
         ...schedule,
-        agentKind: resolvedSelection.agentKind,
-        model: resolvedSelection.model,
-        providerId: resolvedSelection.providerId ?? undefined,
-        effort: resolvedSelection.effort ?? undefined,
-        fastMode: resolvedSelection.fastMode,
+        agentKind: nextSelection.agentKind,
+        model: nextSelection.model,
+        providerId: nextSelection.providerId ?? undefined,
+        effort: nextSelection.effort ?? undefined,
+        fastMode: nextSelection.fastMode,
       };
     }
     // issue #456:未门控入口(定时任务 fire)按所选模型自报的 supported efforts 把 effort

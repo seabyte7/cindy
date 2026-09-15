@@ -15969,12 +15969,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // authoritative until a real send holds this same lock and consumes the final choice.
       if (internalOptions.source === 'user' && !internalOptions.applyingUserSelectionOnSend &&
           !runtimeStatus.remoteHostId && !runtimeStatus.orcaRole) {
+        const targetAgentKind = dbToMakerAgentKind(runtimeStatus.agentKind);
+        if (targetAgentKind === 'dsh') {
+          throwIpcError('INVALID_PARAMS', 'DSH does not support generic model selection');
+        }
         assertRuntimeOwnerCurrent();
         clearPendingCredentialSwitchForSession(sessionId, { wake: false });
         const intent = {
           ...(internalOptions.runtimeSource ? { runtimeSource: internalOptions.runtimeSource } : {}),
           sameAgentSelection: true,
-          targetAgentKind: dbToMakerAgentKind(runtimeStatus.agentKind),
+          targetAgentKind,
           model,
           providerId: effectiveProviderId === undefined ? currentProviderId : effectiveProviderId,
           effort: atomicSelection ? atomicSelection.effort ?? undefined : runtimeStatus.effort ?? undefined,

@@ -33,6 +33,7 @@ import { GhostConfirmDialogHost } from '@/cindy-brain/GhostConfirmDialogHost';
 import { ForgeOidcInstallConfirmHost } from '@/cindy-brain/ForgeOidcInstallConfirmHost';
 import { PluginPublisherConfirmHost } from '@/features/plugin/PluginPublisherConfirmHost';
 import { makerChatStore } from '@/lib/makerChatStore';
+import { agentKindToVendor } from '@/components/sidebar/VendorIcon';
 import {
   initializePromptRecommendationStore,
   setPromptRecommendationOwner,
@@ -115,6 +116,7 @@ function syncNewMakerPrefs(appDefaultModelRequestId?: string) {
     // 用户供应商专有的模型（如 deepseek-v4-pro）会被网关 400 拒绝。
     providerId: cc.providerId ?? null,
   });
+  if (draft.vendor === 'dsh') return;
   // main 缓存两用途:① collab worker spawn 读 model/effort/fastMode;② device-link 远程
   // 草稿镜像读全量(model/effort/fast/permission/source)+「是否显式选过模型」。故
   // lastByVendor 覆盖 cc/codex/pi，并带上 permissionMode + providerId(worker spawn
@@ -124,7 +126,7 @@ function syncNewMakerPrefs(appDefaultModelRequestId?: string) {
     ...(appDefaultModelRequestId ? { appDefaultModelRequestId } : {}),
     ownerStamp: { dataOwnerId: owner.dataOwnerId, ownerGeneration: owner.generation },
     selectedRoute: {
-      harness: draft.vendor === 'cc' || draft.vendor === 'orca' ? 'claude' : draft.vendor,
+      harness: draft.vendor === 'cc' ? 'claude' : draft.vendor,
       providerId: selected.providerId ?? null,
       model: selected.model,
       effort: selected.effort ?? '',

@@ -95,7 +95,7 @@ export interface PickedConnectedModel {
  */
 export function pickFirstConnectedModelForAgent(
   providers: readonly ProviderView[],
-  agent: AgentKind,
+  agent: ModelProviderAgentKind,
 ): PickedConnectedModel | null {
   for (const provider of providersByPreference(providers, agent)) {
     const first = firstModelByOrder(provider, agent);

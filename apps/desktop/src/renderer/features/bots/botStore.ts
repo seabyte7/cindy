@@ -354,14 +354,19 @@ export function getEffectiveBotModelChain(
   const availableAgents = getCachedAvailableVendors();
   const draft = getDraftForPreferenceSync();
   const selected = draft.lastByVendor[draft.vendor];
+  const modelAvailableAgents = new Set<'cc' | 'codex' | 'pi'>(
+    [...(availableAgents ?? [])].filter(
+      (vendor): vendor is 'cc' | 'codex' | 'pi' => vendor === 'cc' || vendor === 'codex' || vendor === 'pi',
+    ),
+  );
   return defaultBotModelChain({ providers: providers?.providers ?? [],
     isModelEnabled,
-    preferredRoute: {
-      harness: draft.vendor === 'cc' || draft.vendor === 'orca' ? 'claude' : draft.vendor,
+    preferredRoute: draft.vendor === 'dsh' ? undefined : {
+      harness: draft.vendor === 'cc' ? 'claude' : draft.vendor,
       providerId: selected.providerId ?? null, model: selected.model,
       effort: selected.effort ?? '', fastMode: draft.fastModeByModel[selected.model] === true,
     },
-    providersLoading: !providers, availableAgents: availableAgents ?? new Set(),
+    providersLoading: !providers, availableAgents: modelAvailableAgents,
     availableAgentsLoaded: availableAgents !== null });
 }
 

@@ -1305,7 +1305,7 @@ export function registerProviderHandlers(
           if (!validation.ok) throwIpcError(validation.code, validation.message);
           // Discovery is optional enrichment after consent. Failure must not discard the key:
           // persist a configured connection and let the existing settings page retry discovery.
-          for (const agent of VALID_AGENTS as readonly AgentKind[]) {
+          for (const agent of CONFIG_RUNTIME_AGENTS) {
             const runtime = config.runtimes[agent];
             if (authMethod === 'oauth' || !runtime || runtime.models.length) continue;
             try {
@@ -2438,8 +2438,8 @@ export function registerProviderHandlers(
       try {
         assertProviderMutationOwner(owner);
         stageProviderCredentials(id,
-          (VALID_AGENTS as readonly AgentKind[]).map((agent) => ({ agent, replacement: null })),
-          (VALID_AGENTS as readonly AgentKind[]).map((agent) => ({ agent, replacement: null })),
+          CONFIG_RUNTIME_AGENTS.map((agent) => ({ agent, replacement: null })),
+          CONFIG_RUNTIME_AGENTS.map((agent) => ({ agent, replacement: null })),
           commitRouteMutation);
         // Configuration and stable route ID remain available for reconnect. Publish even when
         // a later catalog refresh fails: the disconnected credential must never be reused.
