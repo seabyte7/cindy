@@ -221,6 +221,7 @@ describe("buildUserProvider (per-runtime)", () => {
 
     expect(provider.agents).toEqual(['dsh']);
     expect(provider.models.dsh).toEqual([]);
+    expect(provider.dshRuntime).toEqual({ baseUrl: 'https://adapter.example/v1' });
     expect(provider.routing.dsh).toBeUndefined();
   });
 

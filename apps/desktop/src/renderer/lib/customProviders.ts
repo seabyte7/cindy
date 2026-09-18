@@ -138,6 +138,12 @@ export function providerViewToCustomProviderConfig(p: ProviderView): CustomProvi
   }
   const runtimes: CustomProviderConfig['runtimes'] = {};
   for (const agent of p.agents) {
+    if (agent === 'dsh') {
+      // DSH is deliberately absent from generic routing. Its endpoint is a
+      // display-safe settings projection, not an inference route descriptor.
+      runtimes.dsh = { baseUrl: p.dshRuntime?.baseUrl ?? '', models: [] };
+      continue;
+    }
     const routing = p.routing[agent];
     const models = p.models[agent] ?? [];
     runtimes[agent] = {

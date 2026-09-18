@@ -370,6 +370,23 @@ describe('providerViewToCustomProviderConfig Pi catalog metadata', () => {
 });
 
 describe('providerViewToCustomProviderConfig', () => {
+  it('round-trips a DSH endpoint without inventing a generic routing descriptor', () => {
+    const raw = {
+      id: 'dsh-local',
+      name: 'DSH Local',
+      runtimes: {
+        codex: { baseUrl: 'https://api.example/v1', models: [] },
+        dsh: { baseUrl: 'https://adapter.example/v1', models: [] },
+      },
+    };
+    const view = { ...buildUserProvider(raw), connected: true } as ProviderView;
+
+    expect(view.dshRuntime).toEqual({ baseUrl: raw.runtimes.dsh.baseUrl });
+    expect(view.routing.dsh).toBeUndefined();
+    expect(providerViewToCustomProviderConfig(view).runtimes.dsh).toEqual(raw.runtimes.dsh);
+    expect(providerViewToCustomProviderConfig(view).runtimes.codex).toEqual(raw.runtimes.codex);
+  });
+
   it.each(['claude', 'xai'] as const)('preserves the %s account binding when renaming an all-Harness view', native => {
     const id = `${native}-second`;
     const config = providerViewToCustomProviderConfig({

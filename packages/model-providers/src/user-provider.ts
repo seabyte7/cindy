@@ -680,6 +680,9 @@ export function buildUserProvider(
         : { method: "apiKey" },
     // API key / 无鉴权代理都属于用户自备接口；通用 OAuth 可能订阅也可能按量，未声明前不猜。
     ...(isOAuth ? {} : { access: { kind: "api" as const } }),
+    ...(config.runtimes.dsh
+      ? { dshRuntime: { baseUrl: config.runtimes.dsh.baseUrl } }
+      : {}),
     routing,
     models,
   };

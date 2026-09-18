@@ -531,6 +531,9 @@ function projectInvokeResultForTunnel(
     ) {
       rest.logoKind = logoKind;
     }
+    // DSH endpoint is only for the local settings edit round-trip. The
+    // controller renders provider metadata but must not receive local route details.
+    delete rest.dshRuntime;
     rest.models = projectModelsForController(p.models);
     rest.routing = projectRoutingForDisplay(p.routing);
     return rest;

@@ -520,6 +520,12 @@ export interface Provider {
   /** 用户使用该供应商时的额度来源；旧目录可缺省，由 source 从 bundled 同 id 条目补齐。 */
   access?: ProviderAccess;
   /**
+   * 本机设置页用于回填 DSH 连接配置的非敏感元数据。DSH 不是普通模型路由，
+   * 因此该字段不能改为 `routing.dsh`；API key、headers 等凭证绝不进入此投影。
+   * device-link 投影必须剥离此字段。
+   */
+  dshRuntime?: Readonly<{ baseUrl: string }>;
+  /**
    * 该供应商用于「起会话标题」一次性轻任务的最经济模型 id（须存在于本供应商任一 agent 的
    * `models` 里）。host 侧标题 oneShot（见 apps/desktop title-one-shot）按本字段选模型、取该
    * 模型在目录里的最低 effort 档、走单次 HTTP 请求生成标题。缺省 = 该供应商不参与智能起名

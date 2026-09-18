@@ -251,6 +251,20 @@ describe('projectInvokeResultForTunnel — maker:provider:list 投影', () => {
     expect(providers[0].routing).toBeUndefined();
   });
 
+  it('剥离仅供本机设置页回填的 DSH endpoint', () => {
+    const { providers } = project({
+      providers: [{
+        id: 'dsh-local',
+        name: 'DSH Local',
+        connected: true,
+        agents: ['dsh'],
+        dshRuntime: { baseUrl: 'https://adapter.example/v1' },
+        models: { dsh: [] },
+      }],
+    });
+    expect(providers[0]).not.toHaveProperty('dshRuntime');
+  });
+
   it('保留 provider 的其它显示字段（id / name / connected / agents 原样透传）', () => {
     const { providers } = project({ providers: [xdProviderWithFullRouting()] });
     expect(providers[0]).toMatchObject({
