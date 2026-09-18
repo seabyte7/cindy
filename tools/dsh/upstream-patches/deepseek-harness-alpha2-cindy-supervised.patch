@@ -1,0 +1,288 @@
+diff --git a/packages/subprocess/subprocess-local/tests/spawn.spec.ts b/packages/subprocess/subprocess-local/tests/spawn.spec.ts
+index d57e66a..7432925 100644
+--- a/packages/subprocess/subprocess-local/tests/spawn.spec.ts
++++ b/packages/subprocess/subprocess-local/tests/spawn.spec.ts
+@@ -1314,6 +1314,33 @@ describe('abort edge cases', () => {
+ })
+ 
+ describe('environment and spill-file hardening', () => {
++  it('uses the Main-approved Cindy tool PATH without forwarding its activation variable', () => {
++    const previousPath = process.env.PATH
++    const previousToolPath = process.env.CINDY_DSH_TOOL_PATH
++    const previousProviderKey = process.env.CINDY_DSH_PROVIDER_API_KEY
++    const previousLeaseToken = process.env.CINDY_DSH_INTERNAL_LEASE_TOKEN
++    process.env.PATH = '/ambient-path-must-not-reach-tools'
++    process.env.CINDY_DSH_TOOL_PATH = '/usr/bin:/bin:/opt/homebrew/bin'
++    process.env.CINDY_DSH_PROVIDER_API_KEY = 'test-only-provider-secret'
++    process.env.CINDY_DSH_INTERNAL_LEASE_TOKEN = 'test-only-internal-token'
++    try {
++      const env = childEnv()
++      expect(env.PATH).toBe('/usr/bin:/bin:/opt/homebrew/bin')
++      expect(env).not.toHaveProperty('CINDY_DSH_TOOL_PATH')
++      expect(env).not.toHaveProperty('CINDY_DSH_PROVIDER_API_KEY')
++      expect(env).not.toHaveProperty('CINDY_DSH_INTERNAL_LEASE_TOKEN')
++    } finally {
++      if (previousPath === undefined) delete process.env.PATH
++      else process.env.PATH = previousPath
++      if (previousToolPath === undefined) delete process.env.CINDY_DSH_TOOL_PATH
++      else process.env.CINDY_DSH_TOOL_PATH = previousToolPath
++      if (previousProviderKey === undefined) delete process.env.CINDY_DSH_PROVIDER_API_KEY
++      else process.env.CINDY_DSH_PROVIDER_API_KEY = previousProviderKey
++      if (previousLeaseToken === undefined) delete process.env.CINDY_DSH_INTERNAL_LEASE_TOKEN
++      else process.env.CINDY_DSH_INTERNAL_LEASE_TOKEN = previousLeaseToken
++    }
++  })
++
+   it('scrubs credential-shaped and ambient DSH env vars from child processes', async () => {
+     process.env.DSH_TEST_API_KEY = 'super-secret'
+     process.env.DSH_TEST_TOKEN = 'also-secret'
+diff --git a/packages/subprocess/subprocess/src/index.ts b/packages/subprocess/subprocess/src/index.ts
+index 6dbbc62..ff0c7d5 100644
+--- a/packages/subprocess/subprocess/src/index.ts
++++ b/packages/subprocess/subprocess/src/index.ts
+@@ -46,6 +46,9 @@ export type {
+  */
+ export const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i
+ 
++/** Main-owned, already-validated command lookup path for Cindy-launched tools. */
++export const CINDY_DSH_TOOL_PATH_ENV = 'CINDY_DSH_TOOL_PATH'
++
+ /**
+  * The ambient parent environment minus credential-shaped names and minus all
+  * `DSH_*` names — the canonical base every harness child starts from. `PATH`,
+@@ -65,8 +68,12 @@ export const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i
+  */
+ export function scrubbedParentEnv(): Record<string, string> {
+   const env: Record<string, string> = {}
++  const cindyToolPath = process.env[CINDY_DSH_TOOL_PATH_ENV]
+   for (const [key, value] of Object.entries(process.env)) {
+-    if (value !== undefined && !SENSITIVE_ENV_PATTERN.test(key) && !key.toUpperCase().startsWith(DSH_ENV_PREFIX)) env[key] = value
++    if (key.startsWith('CINDY_DSH_')) continue
++    if (value !== undefined && !SENSITIVE_ENV_PATTERN.test(key) && !key.toUpperCase().startsWith(DSH_ENV_PREFIX)) {
++      env[key] = key === 'PATH' && cindyToolPath !== undefined ? cindyToolPath : value
++    }
+   }
+   // A child Node ignores the inherited proxy variables unless the flag this adds is set, so an MCP
+   // stdio server or subagent CLI would connect directly while its parent proxies. The same overlay
+diff --git a/scripts/build-exe-for-python-sdk.ts b/scripts/build-exe-for-python-sdk.ts
+index fc06183..406cdbf 100644
+--- a/scripts/build-exe-for-python-sdk.ts
++++ b/scripts/build-exe-for-python-sdk.ts
+@@ -7,6 +7,7 @@
+  */
+ 
+ import { spawn } from 'node:child_process'
++import { createHash } from 'node:crypto'
+ import { existsSync, statSync } from 'node:fs'
+ import { chmod, copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+ import { basename, dirname, extname, join, resolve, sep } from 'node:path'
+@@ -24,6 +25,8 @@ const ENTRY_BIN = 'runtime-bootstrap.mjs'
+ const OUTPUT_BASENAME = 'deepseek-harness-sdk-runtime'
+ /** Default Node major; SEA mode requires at least Node 22. */
+ const DEFAULT_NODE_RANGE = 'node24'
++/** Pinned for Cindy's frozen pkg toolchain. */
++const PKG_SPEC = '@yao-pkg/pkg@6.21.0'
+ const OUT_DIR = 'dist-exe'
+ /** Python package destination; created when absent. */
+ const PYTHON_RUNTIME_DIR = 'python/sdk-runtime/src/deepseek_harness_runtime/runtime'
+@@ -80,7 +83,7 @@ function isArch(value: string): value is Arch {
+  */
+ class Target {
+   private constructor(
+-    /** pkg Node range (`node<major>`). */
++    /** pkg Node range (`node<major>` or exact `node<major>.<minor>.<patch>`). */
+     readonly nodeRange: string,
+     /** pkg platform tag. */
+     readonly platform: Platform,
+@@ -95,7 +98,7 @@ class Target {
+ 
+   /**
+    * Parse one target spec, rejecting malformed triples and unsupported platform or architecture.
+-   * @param spec - the raw triple, e.g. `node24-linux-x64`.
++   * @param spec - the raw triple, e.g. `node24-linux-x64` or `node24.20.0-linux-x64`.
+    * @returns the parsed target.
+    */
+   static parse(spec: string): Target {
+@@ -104,8 +107,8 @@ class Target {
+     if (parts.length !== 3 || nodeRange === undefined || platform === undefined || arch === undefined) {
+       throw new Error(`build-exe-for-python-sdk: target ${JSON.stringify(spec)} must be <nodeRange>-<platform>-<arch>, e.g. node24-linux-x64.`)
+     }
+-    if (!/^node\d+$/.test(nodeRange)) {
+-      throw new Error(`build-exe-for-python-sdk: target ${JSON.stringify(spec)}: node range must look like node24, got ${JSON.stringify(nodeRange)}.`)
++    if (!/^node\d+(?:\.\d+\.\d+)?$/.test(nodeRange)) {
++      throw new Error(`build-exe-for-python-sdk: target ${JSON.stringify(spec)}: node range must look like node24 or node24.20.0, got ${JSON.stringify(nodeRange)}.`)
+     }
+     if (!isPlatform(platform)) {
+       throw new Error(`build-exe-for-python-sdk: target ${JSON.stringify(spec)}: platform must be one of ${PLATFORMS.join(', ')}, got ${JSON.stringify(platform)}.`)
+@@ -268,7 +271,10 @@ class SingleExeBuild {
+ 
+   /** Verify the closure before compiling or packaging. */
+   async verifyClosure(): Promise<void> {
+-    await this.runPnpm('runtime dependency closure', ['run', 'verify-runtime-closure'])
++    await this.run('runtime dependency closure', process.execPath, [
++      resolve(root, 'node_modules', '.pnpm', 'tsx@4.22.4', 'node_modules', 'tsx', 'dist', 'cli.mjs'),
++      'scripts/verify-runtime-closure.ts',
++    ])
+   }
+ 
+   /** Build all package artifacts unless `--skip-build` was passed. */
+@@ -291,12 +297,11 @@ class SingleExeBuild {
+       '--filter',
+       DEPLOY_ROOT_PACKAGE,
+       'deploy',
+-      '--legacy',
++      '--config.inject-workspace-packages=true',
+       '--prod',
+       // Production deployment omits workspace tooling such as Electron's patched signer.
+       '--config.allow-unused-patches=true',
+       '--config.node-linker=hoisted',
+-      '--config.auto-install-peers=false',
+       '--config.link-workspace-packages=true',
+       this.staging,
+     ])
+@@ -306,7 +311,111 @@ class SingleExeBuild {
+       for (const name of DEPLOY_ONLY_DOCS) console.log(`build-exe-for-python-sdk: [dry-run] rm -f ${join(this.staging, name)}`)
+     } else {
+       await Promise.all(DEPLOY_ONLY_DOCS.map(name => rm(join(this.staging, name), { force: true })))
++      await this.sealStagedNativeAddonLoader()
++    }
++  }
++
++  /** Bind the ACP bootstrap add-on to Cindy's signed App Sandbox cache. */
++  private async sealStagedNativeAddonLoader(): Promise<void> {
++    const loader = join(this.staging, 'node_modules', 'node-addon-native-custom-loader', 'lib', 'index.js')
++    const original = await readFile(loader, 'utf8')
++    const digest = createHash('sha256').update(original).digest('hex')
++    if (digest !== 'f123e237d3402700f438df1c6a41cb2076262630d800032e3c978f3fd7777445') {
++      throw new Error(`build-exe-for-python-sdk: native loader source digest differs from the reviewed input: ${digest}`)
++    }
++    const patched = original
++      .replace(
++        "function nativeCacheEnabled() {\n    return process.env.NARB_DISABLE_NATIVE_CACHE !== '1';\n}",
++        "function nativeCacheEnabled() {\n    return process.env.NARB_DISABLE_NATIVE_CACHE !== '1';\n}\nfunction sealedNativeCacheEnabled() {\n    return process.env.CINDY_DSH_SEALED_NATIVE_CACHE === '1';\n}",
++      )
++      .replace(
++        "    if (!nativeCacheEnabled())\n        return sourcePath;\n    try {",
++        "    if (!nativeCacheEnabled())\n        return sourcePath;\n    const sealedCache = sealedNativeCacheEnabled();\n    try {",
++      )
++      .replace(
++        "        if (node_fs_1.default.existsSync(destination)) {\n            // A cached file exists at the expected path.",
++        "        if (node_fs_1.default.existsSync(destination)) {\n            if (sealedCache)\n                return destination;\n            // A cached file exists at the expected path.",
++      )
++      .replace(
++        "        node_fs_1.default.mkdirSync(destinationDir, { recursive: true });",
++        "        if (sealedCache) {\n            throw new Error(`sealed native cache entry is missing: ${destination}`);\n        }\n        node_fs_1.default.mkdirSync(destinationDir, { recursive: true });",
++      )
++      .replace(
++        "    catch {\n        return sourcePath;\n    }",
++        "    catch (error) {\n        if (sealedCache)\n            throw error;\n        return sourcePath;\n    }",
++      )
++    const patchedDigest = createHash('sha256').update(patched).digest('hex')
++    if (patchedDigest !== 'ee302f3b0a4348db1844784b82e3bb76882b383bea564ac70fabd96f80b61dea') {
++      throw new Error(`build-exe-for-python-sdk: native loader patch does not produce its reviewed output: ${patchedDigest}`)
++    }
++    await writeFile(loader, patched)
++  }
++
++  /** Stage pkg's native dlopen closure beside the runtime for signed packaging. */
++  private async stageSealedPkgNativeCache(): Promise<void> {
++    const sourceRoot = join(this.staging, 'node_modules')
++    const destinationRoot = join(root, PYTHON_RUNTIME_DIR, 'pkg-native-cache')
++    const files = await this.listRegularFiles(sourceRoot)
++    const one = (label: string, predicate: (candidate: string) => boolean): string => {
++      const matches = files.filter(predicate)
++      if (matches.length !== 1) {
++        throw new Error(`build-exe-for-python-sdk: expected one ${label} for the sealed pkg cache, found ${matches.length}.`)
++      }
++      return matches[0]!
++    }
++    const sharp = one('sharp darwin-arm64 addon', candidate => /\/\@img\/sharp-darwin-arm64\/lib\/sharp-darwin-arm64-[^/]+\.node$/.test(candidate))
++    const libvips = one('sharp darwin-arm64 libvips dylib', candidate => /\/\@img\/sharp-libvips-darwin-arm64\/lib\/libvips-cpp\.[^/]+\.dylib$/.test(candidate))
++    const koffi = one('koffi darwin-arm64 addon', candidate => /\/\@koromix\/koffi-darwin-arm64\/darwin_arm64\/koffi\.node$/.test(candidate))
++    const pty = one('node-pty darwin-arm64 addon', candidate => /\/node-pty\/prebuilds\/darwin-arm64\/pty\.node$/.test(candidate))
++    const system = one('system darwin-arm64 addon', candidate => /\/\@deepseek-ai\/node-addon-system-darwin-arm64\/bin\/system\.node$/.test(candidate))
++    const selected = [
++      { native: sharp, support: [libvips] },
++      { native: koffi, support: [] },
++      { native: pty, support: [] },
++      { native: system, support: [] },
++    ]
++    if (this.cli.dryRun) {
++      console.log(`build-exe-for-python-sdk: [dry-run] stage ${selected.length} sealed darwin-arm64 pkg native cache entries`)
++      return
++    }
++    await rm(destinationRoot, { recursive: true, force: true })
++    for (const entry of selected) {
++      const digest = createHash('sha256').update(await readFile(entry.native)).digest('hex')
++      for (const source of [entry.native, ...entry.support]) {
++        const relative = source.slice(sourceRoot.length + 1)
++        if (!relative || relative.startsWith('..') || !relative.includes(sep)) {
++          throw new Error(`build-exe-for-python-sdk: sealed pkg cache source is outside node_modules: ${source}`)
++        }
++        const destination = join(destinationRoot, 'pkg', digest, relative)
++        await mkdir(dirname(destination), { recursive: true })
++        await copyFile(source, destination)
++        await chmod(destination, 0o644)
++      }
++    }
++    console.log(`build-exe-for-python-sdk: staged sealed darwin-arm64 pkg native cache at ${destinationRoot}`)
++  }
++
++  /** Recursively enumerate regular staging files while rejecting links and special files. */
++  private async listRegularFiles(directory: string): Promise<string[]> {
++    const result: string[] = []
++    const visit = async (current: string): Promise<void> => {
++      for (const entry of (await readdir(current, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))) {
++        const candidate = join(current, entry.name)
++        const metadata = await lstat(candidate)
++        if (metadata.isSymbolicLink()) {
++          throw new Error(`build-exe-for-python-sdk: sealed pkg cache source contains a symlink: ${candidate}`)
++        }
++        if (metadata.isDirectory()) {
++          await visit(candidate)
++        } else if (metadata.isFile()) {
++          result.push(candidate)
++        } else {
++          throw new Error(`build-exe-for-python-sdk: sealed pkg cache source contains a non-regular file: ${candidate}`)
++        }
++      }
+     }
++    await visit(directory)
++    return result
+   }
+ 
+   /**
+@@ -426,9 +535,9 @@ class SingleExeBuild {
+     const product = target.platform === 'win' ? `${productBase}.exe` : productBase
+     await this.prepareNativePty(target)
+     if (!this.cli.dryRun) await mkdir(this.outDir, { recursive: true })
+-    await this.runPnpm(`pkg ${target.spec}`, [
+-      'exec',
+-      'pkg',
++    await this.runSealedPkg(`pkg ${target.spec}`, [
++      'dlx',
++      PKG_SPEC,
+       this.staging,
+       '--sea',
+       '--targets',
+@@ -579,6 +688,20 @@ class SingleExeBuild {
+       await chmod(destination, statSync(path).mode & 0o777)
+       console.log(`build-exe-for-python-sdk: synced ${destination}`)
+     }
++    await this.stageSealedPkgNativeCache()
++  }
++
++  /** Mark only the SEA pkg child for Cindy's reviewed sealed-prelude adaptation. */
++  private async runSealedPkg(label: string, args: string[]): Promise<void> {
++    const name = 'CINDY_DSH_SEALED_PKG_CACHE_BUILD'
++    const previous = process.env[name]
++    process.env[name] = '1'
++    try {
++      await this.runPnpm(label, args)
++    } finally {
++      if (previous === undefined) delete process.env[name]
++      else process.env[name] = previous
++    }
+   }
+ 
+   /**

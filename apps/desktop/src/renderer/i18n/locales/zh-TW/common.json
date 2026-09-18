@@ -1682,7 +1682,8 @@
         "dialog": {
           "createTitle": "新增自定義供應商",
           "editTitle": "編輯連線設定",
-          "desc": "配置與 OpenAI / Anthropic 相容的供應商。"
+          "desc": "配置與 OpenAI / Anthropic 相容的供應商。",
+          "dshDesc": "設定 DeepSeek Harness 的獨立連線。"
         },
         "imageGenerationReload": {
           "title": "重新載入 Codex",
@@ -1905,13 +1906,19 @@
         },
         "dsh": {
           "label": "DeepSeek Harness",
-          "description": "選用。為 DeepSeek Harness 設定一個獨立的 HTTPS 端點和 API 金鑰；絕不會重複使用其他 runtime 的憑證。",
+          "description": "選用。為 DeepSeek Harness 設定獨立的 HTTPS 端點和 API 金鑰；不會重複使用其他 runtime 的憑證。",
+          "protocol": "上游協定",
+          "protocolValue": "DeepSeek Messages（DSH 原生）",
+          "protocolHelp": "目前的 DSH 版本固定使用 Messages 協定，不需要填寫 Codex 的協定、請求路徑或請求標頭。",
           "endpoint": "DSH 端點",
-          "endpointPlaceholder": "https://api.deepseek.com",
+          "endpointPlaceholder": "https://api.deepseek.com/anthropic",
+          "endpointHelp": "使用 DeepSeek 官方服務時請填寫 https://api.deepseek.com/anthropic；DSH 會自動附加 /v1/messages。",
           "apiKey": "DSH API 金鑰",
           "apiKeyPlaceholder": "DSH API 金鑰",
           "apiKeyHelp": "端點未變時可留白並保留本機已儲存的金鑰；變更端點必須重新輸入金鑰。",
           "authRequired": "DeepSeek Harness 需要 API 金鑰驗證。",
+          "runtimeChoices": "模型與推理強度",
+          "runtimeChoicesHelp": "不需要在這裡手動維護模型。建立 DSH 任務後，Cindy 會讀取該任務執行階段實際提供的模型與推理強度選項。",
           "runtimeStatus": {
             "title": "執行環境狀態",
             "retry": "重試",
@@ -10191,6 +10198,10 @@
         "model": "模型",
         "reasoning_effort": "推理強度"
       }
+    },
+    "dshTaskControls": {
+      "ariaLabel": "DSH 任務控制",
+      "trigger": "DSH 控制"
     }
   },
   "effortLevels": {

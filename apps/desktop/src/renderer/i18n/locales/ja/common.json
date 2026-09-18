@@ -1682,7 +1682,8 @@
         "dialog": {
           "createTitle": "カスタムプロバイダーを追加",
           "editTitle": "接続設定を編集",
-          "desc": "OpenAI / Anthropic 互換のプロバイダーを設定します。"
+          "desc": "OpenAI / Anthropic 互換のプロバイダーを設定します。",
+          "dshDesc": "DeepSeek Harness の独立した接続を設定します。"
         },
         "imageGenerationReload": {
           "title": "Codex を再読み込み",
@@ -1906,12 +1907,18 @@
         "dsh": {
           "label": "DeepSeek Harness",
           "description": "任意です。DeepSeek Harness 専用の HTTPS エンドポイントと API キーを設定します。他のランタイムの認証情報を再利用することはありません。",
+          "protocol": "上流プロトコル",
+          "protocolValue": "DeepSeek Messages（DSH ネイティブ）",
+          "protocolHelp": "現在の DSH バージョンは Messages プロトコルを使用します。Codex のプロトコル、リクエストパス、ヘッダー設定は不要です。",
           "endpoint": "DSH エンドポイント",
-          "endpointPlaceholder": "https://api.deepseek.com",
+          "endpointPlaceholder": "https://api.deepseek.com/anthropic",
+          "endpointHelp": "DeepSeek 公式サービスでは https://api.deepseek.com/anthropic を使用してください。DSH が /v1/messages を追加します。",
           "apiKey": "DSH API キー",
           "apiKeyPlaceholder": "DSH API キー",
           "apiKeyHelp": "エンドポイントが未変更なら空欄のままでローカル保存済みのキーを保持します。変更時は新しいキーが必要です。",
           "authRequired": "DeepSeek Harness には API キー認証が必要です。",
+          "runtimeChoices": "モデルと推論強度",
+          "runtimeChoicesHelp": "ここでモデルを手動管理する必要はありません。DSH タスク開始後、そのタスクのランタイムが提示するモデルと推論強度を Cindy が読み取ります。",
           "runtimeStatus": {
             "title": "ランタイムの状態",
             "retry": "再試行",
@@ -10191,6 +10198,10 @@
         "model": "モデル",
         "reasoning_effort": "推論強度"
       }
+    },
+    "dshTaskControls": {
+      "ariaLabel": "DSH タスクコントロール",
+      "trigger": "DSH コントロール"
     }
   },
   "effortLevels": {

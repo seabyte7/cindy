@@ -1682,7 +1682,8 @@
         "dialog": {
           "createTitle": "Add a custom provider",
           "editTitle": "Edit connection settings",
-          "desc": "Configure an OpenAI / Anthropic-compatible provider."
+          "desc": "Configure an OpenAI / Anthropic-compatible provider.",
+          "dshDesc": "Configure an independent DeepSeek Harness connection."
         },
         "imageGenerationReload": {
           "title": "Reload Codex",
@@ -1905,13 +1906,19 @@
         },
         "dsh": {
           "label": "DeepSeek Harness",
-          "description": "Optional. Configure one dedicated HTTPS endpoint and API key for DeepSeek Harness. It never reuses credentials from the other runtimes.",
+          "description": "Optional. Configure a dedicated HTTPS endpoint and API key for DeepSeek Harness. It never reuses credentials from another runtime.",
+          "protocol": "Upstream protocol",
+          "protocolValue": "DeepSeek Messages (native DSH)",
+          "protocolHelp": "This DSH version uses the Messages protocol. Codex protocol, request-path, and header fields do not apply.",
           "endpoint": "DSH endpoint",
-          "endpointPlaceholder": "https://api.deepseek.com",
+          "endpointPlaceholder": "https://api.deepseek.com/anthropic",
+          "endpointHelp": "For the official DeepSeek service, use https://api.deepseek.com/anthropic. DSH appends /v1/messages.",
           "apiKey": "DSH API key",
           "apiKeyPlaceholder": "DSH API key",
           "apiKeyHelp": "For an unchanged endpoint, leave this blank to retain its locally stored key. Changing the endpoint requires a new key.",
           "authRequired": "DeepSeek Harness requires API key authentication.",
+          "runtimeChoices": "Model and reasoning effort",
+          "runtimeChoicesHelp": "Models are not maintained here. After a DSH task starts, Cindy reads the model and reasoning choices advertised by that task's runtime.",
           "runtimeStatus": {
             "title": "Runtime status",
             "retry": "Retry",
@@ -10206,6 +10213,10 @@
         "model": "Model",
         "reasoning_effort": "Reasoning effort"
       }
+    },
+    "dshTaskControls": {
+      "ariaLabel": "DSH task controls",
+      "trigger": "DSH controls"
     }
   },
   "effortLevels": {

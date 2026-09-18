@@ -784,6 +784,27 @@ describe('newMakerDraft store', () => {
     });
   });
 
+  it('选择 DSH 后持久化，重新加载草稿仍使用 DSH', async () => {
+    const first = await loadModule();
+    first.switchVendor('dsh');
+    expect(first.getDraft().vendor).toBe('dsh');
+
+    vi.resetModules();
+    const reloaded = await loadModule();
+    expect(reloaded.getDraft()).toMatchObject({
+      vendor: 'dsh',
+      lastByVendor: {
+        dsh: {
+          model: 'cindy-dsh-managed',
+          effort: 'medium',
+          permissionMode: 'auto',
+          planMode: false,
+          providerId: null,
+        },
+      },
+    });
+  });
+
   it('switchVendor:相同 vendor 不变(no-op,避免误覆盖)', async () => {
     const { getDraft, switchVendor } = await loadModule();
     const before = getDraft().lastByVendor.cc;

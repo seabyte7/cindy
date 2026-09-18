@@ -73,12 +73,12 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     // DSH is a fixed managed runtime rather than a generic model catalog
     // consumer, so it keeps AgentSelect visible even when the unified panel is
     // active for the other engines.
-    expect(source).toContain('unifiedModelPanelActive && !isDshDraft ? undefined : (');
+    expect(source).toContain('const showNewMakerAgentSelect = shouldShowNewMakerAgentSelect({');
     expect(source).toMatch(
-      /middleToolbarSlot=\{\s*\n\s*unifiedModelPanelActive && !isDshDraft \? undefined : \(/,
+      /middleToolbarSlot=\{\s*\n\s*showNewMakerAgentSelect \? \(/,
     );
     expect(source).toMatch(
-      /compactMiddleToolbarSlot=\{\s*\n\s*unifiedModelPanelActive && !isDshDraft \? undefined : \(/,
+      /compactMiddleToolbarSlot=\{\s*\n\s*showNewMakerAgentSelect \? \(/,
     );
     // 新旧用户只按能力启用，不读取历史样式偏好。
     expect(source).toMatch(/const unifiedModelPanelActive = unifiedModelPanelEnabled;/);

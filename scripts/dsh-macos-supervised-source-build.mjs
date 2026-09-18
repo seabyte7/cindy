@@ -274,7 +274,7 @@ export function buildMacosSupervisedDshRuntime(options) {
   const pnpmTarball = assertRegularFile(options.pnpmTarball, 'pnpm tarball');
   const outputDir = assertFreshOutputDirectory(options.outputDir);
   const release = readSourceRelease(releasePath);
-  const target = assertMacosSourceBuildHost(release);
+  const target = assertMacosSourceBuildHost(release, options.host ?? process);
 
   // These checks occur before the one permitted mutation (applying the
   // release-declared adaptations) to the caller's disposable source checkout.

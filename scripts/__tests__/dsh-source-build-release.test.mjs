@@ -73,14 +73,19 @@ test('checked-in source release schema is valid and declares the user-approved i
 
 test('macOS supervised source release seals bootstrap and pkg native-cache inputs', () => {
   const release = readSourceRelease(supervisedReleasePath);
-  assert.equal(release.releaseId, 'cindy-dsh-0.1.2-alpha.3-build.11-macos-supervised');
-  assert.equal(release.source.adaptations.length, 6);
-  assert.equal(release.source.adaptations[1].files[0].afterSha256, '24f669441b20804bd77c604199726309abd38de9507b55ee7ab5fdcca65d2f8b');
-  assert.equal(release.source.adaptations[2].files[0].afterSha256, 'd642e64042b88820baf4a510299a8c4d3362fdf52a9d4616c29f8ba0bade2526');
-  assert.equal(release.source.adaptations[3].files[0].afterSha256, '3887a86b4a153cab3c839cb9b35cd360f3d61a9c6216e5bf6e11bf8f10d3603c');
+  const adaptationPatch = fs.readFileSync(
+    path.join(repoRoot, release.source.adaptations[0].patch.path),
+    'utf8',
+  );
+  assert.equal(release.releaseId, 'cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised');
+  assert.equal(release.source.adaptations.length, 1);
   assert.deepEqual(
-    release.source.adaptations[4].files.map((file) => [file.path, file.afterSha256]),
-    [['scripts/build-exe-for-python-sdk.ts', '12c35d322a35bc2742479ab1973afb60702bf0fefc2fbe2bedec7e21e5f6f8e9']],
+    release.source.adaptations[0].files.map((file) => [file.path, file.afterSha256]),
+    [
+      ['scripts/build-exe-for-python-sdk.ts', 'd720fc949c98621dcac2cbcd37f62f1aa5e1614c7a752967b1ae6d3529e3c9e5'],
+      ['packages/subprocess/subprocess/src/index.ts', '441c14ca9a3c6462bf36385b49162d16d1623ad580397339be93348bd7ec195f'],
+      ['packages/subprocess/subprocess-local/tests/spawn.spec.ts', '05b7cf6f6f188e9c7c85e84477415543b9c024c2b7ee654bd112604e83124db9'],
+    ],
   );
   assert.equal(
     release.source.adaptations.some((adaptation) =>
@@ -91,19 +96,17 @@ test('macOS supervised source release seals bootstrap and pkg native-cache input
   assert.deepEqual(release.targets['darwin-arm64'].nativeAddons, [
     {
       sourcePath: 'node/node_modules/node-addon-require-builtin-darwin-arm64/prebuilt/darwin-arm64-napi-v9.node',
-      cachePath: 'node-addon-require-builtin-darwin-arm64/0.1.5/darwin-arm64/darwin-arm64-napi-v9.node',
+      cachePath: 'node-addon-require-builtin-darwin-arm64/0.1.6/darwin-arm64/darwin-arm64-napi-v9.node',
     },
   ]);
   assert.deepEqual(release.targets['darwin-arm64'].pkgNativeCache, {
     sourceDirectory: 'pkg-native-cache',
     cacheDirectory: 'pkg',
   });
-  assert.deepEqual(
-    release.source.adaptations[5].files.map((file) => [file.path, file.afterSha256]),
-    [
-      ['packages/subprocess/subprocess/src/index.ts', '243d09b87dc67c8d2326494c4373882158e430c57291cd3cb255d0bde0cb8c60'],
-      ['packages/subprocess/subprocess-local/tests/spawn.spec.ts', 'd774f5d7fe7a95d43619a91771ed813d35d14d118a0a3a4513d7884991c466bb'],
-    ],
+  assert.match(
+    adaptationPatch,
+    /node-addon-system-darwin-arm64\\\/bin\\\/system\\\.node/,
+    'the alpha.2 persistence add-on must be present in the signed sealed cache',
   );
 });
 

@@ -1,4 +1,7 @@
-import { setProviderPresentation, retainProviderPresentationAfterAuthChange } from '../maker-host/provider-presentation-store.js';
+import {
+  setProviderPresentation,
+  retainProviderPresentationAfterAuthChange,
+} from '../maker-host/provider-presentation-store.js';
 /**
  * provider:* IPC handlers。
  *
@@ -33,6 +36,7 @@ import {
 
 import type { LocalCliDetection } from '../../shared/localCliDetect.js';
 import { MANAGED_OLLAMA_PROVIDER_ID } from '../../shared/localModelRuntime.js';
+import { normalizeDshMessagesBaseUrl } from '../../shared/dshProviderEndpoint.js';
 import type {
   CodexImageGenerationRestartPolicy,
   CustomProviderUpdateOptions,
@@ -69,6 +73,7 @@ import {
   customProviderExists,
   deleteCustomProvider,
   getCustomProvider,
+  listCustomProviders,
   updateCustomProvider,
   validateCustomProviderConfig,
 } from '../maker-host/custom-provider-store.js';
@@ -240,10 +245,12 @@ function oauthDescriptorSignature(config: CustomProviderConfig | null): string |
 
 function oauthRuntimeEndpointSignature(config: CustomProviderConfig | null): string | null {
   if (config?.auth?.method !== 'oauth') return null;
-  return JSON.stringify((['claude-code', 'codex', 'pi'] as const).map((agent) => {
-    const runtime = config.runtimes?.[agent];
-    return { agent, baseUrl: runtime?.baseUrl ?? null, modelsUrl: runtime?.modelsUrl ?? null };
-  }));
+  return JSON.stringify(
+    (['claude-code', 'codex', 'pi'] as const).map((agent) => {
+      const runtime = config.runtimes?.[agent];
+      return { agent, baseUrl: runtime?.baseUrl ?? null, modelsUrl: runtime?.modelsUrl ?? null };
+    }),
+  );
 }
 
 /** Never expose runtime header credentials to WebViews or synthetic remote events. */
@@ -274,7 +281,10 @@ export interface ProviderHandlerDeps {
    * PROVIDER_LIST 附带回传,供 device-link 控制端(手机)按被控端用户开关过滤模型列表;
    * key = `${agent}:${providerId}:${modelId}`,与 renderer modelVisibilityPrefs.keyOf 一致。
    */
-  getModelVisibilityOverrides(providers: readonly ProviderView[], trusted: boolean): Record<string, boolean> | Promise<Record<string, boolean>>;
+  getModelVisibilityOverrides(
+    providers: readonly ProviderView[],
+    trusted: boolean,
+  ): Record<string, boolean> | Promise<Record<string, boolean>>;
   /** CRUD 成功后重算 active-catalog（生产 = refreshCustomProvidersIntoCatalog）。 */
   refreshCatalog(): Promise<void>;
   /**
@@ -300,11 +310,12 @@ export interface ProviderHandlerDeps {
   /**
    * Optional Main-only hook for a provider type that owns an independently
    * supervised runtime. It runs only after the durable CRUD mutation and
-   * catalog refresh; failures are deliberately contained by that runtime's
-   * own availability gate and must not turn a saved Settings edit into a
-   * renderer-visible partial failure.
+   * catalog refresh. The handler waits for a completed reconciliation so the
+   * Renderer can project its display-safe result, but any failure is still
+   * contained by that runtime's availability gate and never rolls back a
+   * durable Settings mutation.
    */
-  onProviderConfigurationChanged?(): void;
+  onProviderConfigurationChanged?(): void | Promise<unknown>;
   /** Current selectable catalog ids, used to validate visible provider order entries. */
   listProviderIds(): string[];
   /** Merge the currently visible order into the persisted observed-provider order. */
@@ -449,10 +460,19 @@ export interface ProviderHandlerDeps {
    * 能区分「跟随默认」与「设了一个刚好等于默认的值」。write 传 null = 恢复默认(删 override)。
    * 可选 —— 未注入(单测最小桩)时对应 handler 报 INTERNAL 而不是静默成功。
    */
-  readCodexContextWindowInfo?(target: ModelPriceOverrideTarget, sessionId?: string): Promise<CodexContextWindowInfo | null>;
+  readCodexContextWindowInfo?(
+    target: ModelPriceOverrideTarget,
+    sessionId?: string,
+  ): Promise<CodexContextWindowInfo | null>;
   readModelContextLimit?(target: ModelPriceOverrideTarget): ModelContextLimitView;
-  validateModelContextLimit?(targets: readonly ModelPriceOverrideTarget[], limit: number): Promise<void>;
-  writeModelContextLimit?(targets: readonly ModelPriceOverrideTarget[], limit: number | null): void | Promise<void>;
+  validateModelContextLimit?(
+    targets: readonly ModelPriceOverrideTarget[],
+    limit: number,
+  ): Promise<void>;
+  writeModelContextLimit?(
+    targets: readonly ModelPriceOverrideTarget[],
+    limit: number | null,
+  ): void | Promise<void>;
 }
 
 /** 上下文上限的读回视图(与写入返回同形，UI 一次拿齐当前值与是否自定义)。 */
@@ -502,12 +522,20 @@ function parseTestInput(input: unknown): ProviderTestInput | null {
         return null;
     }
     if (spec.wireProtocol !== undefined) {
-      const allowed =
-        ['openai-responses', 'openai-chat', 'anthropic-messages', 'google-generative-ai'];
+      const allowed = [
+        'openai-responses',
+        'openai-chat',
+        'anthropic-messages',
+        'google-generative-ai',
+      ];
       if (typeof spec.wireProtocol !== 'string' || !allowed.includes(spec.wireProtocol))
         return null;
     }
-    if (spec.api !== undefined && (typeof spec.api !== 'string' || !(PI_MODEL_APIS as readonly string[]).includes(spec.api))) return null;
+    if (
+      spec.api !== undefined &&
+      (typeof spec.api !== 'string' || !(PI_MODEL_APIS as readonly string[]).includes(spec.api))
+    )
+      return null;
     if (spec.catalogPresetId !== undefined && typeof spec.catalogPresetId !== 'string') return null;
     if (spec.requestPath !== undefined && !isProviderRequestPath(spec.requestPath)) return null;
     return {
@@ -565,8 +593,12 @@ function parseModelsFetchInput(input: unknown): ProviderModelsFetchSpec | null {
   if (spec.apiKey !== undefined && spec.apiKey !== null && typeof spec.apiKey !== 'string')
     return null;
   if (spec.wireProtocol !== undefined) {
-    const allowed =
-      ['openai-responses', 'openai-chat', 'anthropic-messages', 'google-generative-ai'];
+    const allowed = [
+      'openai-responses',
+      'openai-chat',
+      'anthropic-messages',
+      'google-generative-ai',
+    ];
     if (typeof spec.wireProtocol !== 'string' || !allowed.includes(spec.wireProtocol)) return null;
   }
   if (spec.headers !== undefined) {
@@ -731,6 +763,37 @@ export function registerProviderHandlers(
       finishRouteMutation();
     }
   };
+  // A DSH runtime is a single, Main-selected profile, not an ordinary
+  // per-provider model route. Create/update/delete calls therefore share this
+  // small gate even when the submitted config removes DSH: a removal racing a
+  // new assignment must not leave two rows configured at once.
+  let dshConfigurationMutationTail = Promise.resolve();
+  const withDshConfigurationMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const previous = dshConfigurationMutationTail;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    dshConfigurationMutationTail = previous.catch(() => undefined).then(() => gate);
+    try {
+      await previous.catch(() => undefined);
+      return await operation();
+    } finally {
+      release();
+    }
+  };
+  const assertDshConfigurationIsUnique = async (config: CustomProviderConfig): Promise<void> => {
+    if (!config.runtimes.dsh) return;
+    const existing = (await listCustomProviders()).find(
+      (provider) => provider.id !== config.id && provider.runtimes.dsh,
+    );
+    if (existing) {
+      throwIpcError(
+        'ALREADY_EXISTS',
+        'DeepSeek Harness can be configured by only one custom provider',
+      );
+    }
+  };
   type KeySnapshot = {
     agent: AgentKind;
     previous: string | null | UnrecoverableProviderCredential;
@@ -746,7 +809,10 @@ export function registerProviderHandlers(
     const prevRt = previous?.runtimes[agent];
     const nextRt = config.runtimes[agent];
     if (!prevRt || !nextRt) return false;
-    const norm = (value: string | null | undefined): string => (value ?? '').trim();
+    const norm = (value: string | null | undefined): string => {
+      const normalized = (value ?? '').trim();
+      return agent === 'dsh' ? normalizeDshMessagesBaseUrl(normalized) : normalized;
+    };
     return (
       norm(prevRt.baseUrl) !== norm(nextRt.baseUrl) ||
       norm(prevRt.modelsUrl) !== norm(nextRt.modelsUrl)
@@ -1062,10 +1128,18 @@ export function registerProviderHandlers(
 
   const assertOptionalRequestedOwner = (input: unknown): void => {
     if (input === undefined) return;
-    if (!input || typeof input !== 'object' || Array.isArray(input)) throwIpcError('INVALID_PARAMS', 'Invalid owner scope');
+    if (!input || typeof input !== 'object' || Array.isArray(input))
+      throwIpcError('INVALID_PARAMS', 'Invalid owner scope');
     const scope = input as Record<string, unknown>;
-    if ((scope.dataOwnerId !== null && typeof scope.dataOwnerId !== 'string') || !Number.isSafeInteger(scope.ownerGeneration)) throwIpcError('INVALID_PARAMS', 'Invalid owner scope');
-    assertRequestedProviderOwner(scope.dataOwnerId as string | null, scope.ownerGeneration as number);
+    if (
+      (scope.dataOwnerId !== null && typeof scope.dataOwnerId !== 'string') ||
+      !Number.isSafeInteger(scope.ownerGeneration)
+    )
+      throwIpcError('INVALID_PARAMS', 'Invalid owner scope');
+    assertRequestedProviderOwner(
+      scope.dataOwnerId as string | null,
+      scope.ownerGeneration as number,
+    );
   };
 
   // 只读聚合：远端还需等待当前账号的模型开关就绪；失败不可伪装为全部关闭。
@@ -1094,7 +1168,10 @@ export function registerProviderHandlers(
         modelVisibilityOverrides = await deps.getModelVisibilityOverrides(providers, trusted);
       } catch (error) {
         if (isIpcError(error) && error.code === 'MODEL_VISIBILITY_NOT_READY') {
-          throwIpcError('MODEL_VISIBILITY_NOT_READY', 'Model preferences are still synchronizing. Retry shortly.');
+          throwIpcError(
+            'MODEL_VISIBILITY_NOT_READY',
+            'Model preferences are still synchronizing. Retry shortly.',
+          );
         }
         throw error;
       }
@@ -1188,11 +1265,13 @@ export function registerProviderHandlers(
       }
     }
     try {
-      deps.onProviderConfigurationChanged?.();
+      await deps.onProviderConfigurationChanged?.();
     } catch {
       // The DSH runtime gate is post-commit and fail-closed; Settings CRUD
       // has already succeeded and must not be retroactively reported failed.
-      log.warn('optional provider runtime reconciliation failed after committed configuration change');
+      log.warn(
+        'optional provider runtime reconciliation failed after committed configuration change',
+      );
     }
     deps.broadcastChanged();
   }
@@ -1262,7 +1341,10 @@ export function registerProviderHandlers(
           const visibleProviderId = builtinApiKeyPresentationId(draft.provider);
           await retainProviderPresentationAfterAuthChange(visibleProviderId);
           const currentOwner = providerImportScope();
-          if (currentOwner.dataOwnerId === ownerAtIngress.dataOwnerId && currentOwner.generation === ownerAtIngress.generation) {
+          if (
+            currentOwner.dataOwnerId === ownerAtIngress.dataOwnerId &&
+            currentOwner.generation === ownerAtIngress.generation
+          ) {
             deps.broadcastChanged();
           }
           return { ok: true, providerId: visibleProviderId, authMethod: 'apiKey' };
@@ -1388,9 +1470,14 @@ export function registerProviderHandlers(
   // 保留曾出现但当前隐藏的项，并把第一次出现的项追加到末尾。
   registry.handle(MAKER_INVOKE.PROVIDER_PRESENTATION_SET, async (event, input: unknown) => {
     assertTrustedProviderMutationSender(event);
-    if (!input || typeof input !== 'object' || Array.isArray(input)) throwIpcError('INVALID_PARAMS', 'Invalid presentation');
+    if (!input || typeof input !== 'object' || Array.isArray(input))
+      throwIpcError('INVALID_PARAMS', 'Invalid presentation');
     const value = input as Record<string, unknown>;
-    if (typeof value.ownerGeneration !== 'number' || !Number.isSafeInteger(value.ownerGeneration) || (value.dataOwnerId !== null && typeof value.dataOwnerId !== 'string')) {
+    if (
+      typeof value.ownerGeneration !== 'number' ||
+      !Number.isSafeInteger(value.ownerGeneration) ||
+      (value.dataOwnerId !== null && typeof value.dataOwnerId !== 'string')
+    ) {
       throwIpcError('INVALID_PARAMS', 'Owner required');
     }
     const providerId = value.providerId ?? 'openai';
@@ -1401,7 +1488,12 @@ export function registerProviderHandlers(
     if (!provider || provider.id === 'xd') {
       throwIpcError('INVALID_PARAMS', 'Provider does not support presentation overrides');
     }
-    if (value.action === 'rename' && typeof value.name === 'string' && value.name.trim() && value.name.length <= 128) {
+    if (
+      value.action === 'rename' &&
+      typeof value.name === 'string' &&
+      value.name.trim() &&
+      value.name.length <= 128
+    ) {
       if (provider.source === 'builtin') {
         await setProviderPresentation(providerId, { name: value.name });
       } else {
@@ -1411,7 +1503,8 @@ export function registerProviderHandlers(
           assertOptionalRequestedOwner(value);
           const current = await getCustomProvider(id);
           assertOptionalRequestedOwner(value);
-          if (!current || !await updateCustomProvider(id, { ...current, name })) throwIpcError('NOT_FOUND', 'Provider not found');
+          if (!current || !(await updateCustomProvider(id, { ...current, name })))
+            throwIpcError('NOT_FOUND', 'Provider not found');
           assertOptionalRequestedOwner(value);
           await refreshCatalogAfterCommit();
         });
@@ -1768,19 +1861,31 @@ export function registerProviderHandlers(
       throwIpcError('INVALID_PARAMS', 'invalid related context targets');
     }
     const targets = [target, ...related.map(parsePriceTarget)];
-    if (targets.some((t) => t.providerId !== target.providerId) ||
-        new Set(targets.map((t) => t.agent)).size !== targets.length) {
-      throwIpcError('INVALID_PARAMS', 'context targets must name distinct harnesses of one provider');
+    if (
+      targets.some((t) => t.providerId !== target.providerId) ||
+      new Set(targets.map((t) => t.agent)).size !== targets.length
+    ) {
+      throwIpcError(
+        'INVALID_PARAMS',
+        'context targets must name distinct harnesses of one provider',
+      );
     }
     return targets;
   };
   const assertContextOwner = (input: unknown): void => {
     const owner = input as { dataOwnerId?: unknown; ownerGeneration?: unknown } | null;
-    if (!owner || (owner.dataOwnerId !== null && typeof owner.dataOwnerId !== 'string') ||
-        !Number.isInteger(owner.ownerGeneration) || (owner.ownerGeneration as number) < 0) {
+    if (
+      !owner ||
+      (owner.dataOwnerId !== null && typeof owner.dataOwnerId !== 'string') ||
+      !Number.isInteger(owner.ownerGeneration) ||
+      (owner.ownerGeneration as number) < 0
+    ) {
       throwIpcError('INVALID_PARAMS', 'context mutation requires an owner stamp');
     }
-    assertRequestedProviderOwner(owner.dataOwnerId as string | null, owner.ownerGeneration as number);
+    assertRequestedProviderOwner(
+      owner.dataOwnerId as string | null,
+      owner.ownerGeneration as number,
+    );
   };
   const readContextTargets = (targets: ModelPriceOverrideTarget[]): ModelContextLimitView => {
     const { read } = requireContextLimitDeps();
@@ -1808,10 +1913,18 @@ export function registerProviderHandlers(
     const view = readContextTargets(targets);
     if (targets.length === 1 && targets[0]!.agent === 'codex') {
       const sessionId = (input as { sessionId?: unknown }).sessionId;
-      if (sessionId !== undefined && (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 200)) {
+      if (
+        sessionId !== undefined &&
+        (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 200)
+      ) {
         throwIpcError('INVALID_PARAMS', 'invalid context session id');
       }
-      return { ...view, codexContext: await deps.readCodexContextWindowInfo?.(targets[0]!, sessionId as string | undefined) ?? null };
+      return {
+        ...view,
+        codexContext:
+          (await deps.readCodexContextWindowInfo?.(targets[0]!, sessionId as string | undefined)) ??
+          null,
+      };
     }
     return view;
   });
@@ -1828,7 +1941,10 @@ export function registerProviderHandlers(
       // **不 clamp 到模型窗口** —— 路由把窗口配错时用户得能强行往上填(UI 侧给警示)。
       if (
         limitInput !== null &&
-        (typeof limitInput !== 'number' || !Number.isSafeInteger(limitInput) || limitInput < 1_000 || limitInput > 100_000_000)
+        (typeof limitInput !== 'number' ||
+          !Number.isSafeInteger(limitInput) ||
+          limitInput < 1_000 ||
+          limitInput > 100_000_000)
       ) {
         throwIpcError('INVALID_PARAMS', 'context limit must be a positive number or null');
       }
@@ -1916,53 +2032,57 @@ export function registerProviderHandlers(
     }
     const separated = splitCustomProviderHeaders(config);
     const ownerAtIngress = captureProviderOwnerSession();
-    return withProviderConfigMutation(config.id, async (commitRouteMutation) => {
-      let codexHostPrepared = false;
-      assertProviderMutationOwner(ownerAtIngress);
-      if (await customProviderExists(config.id)) {
-        throwIpcError('ALREADY_EXISTS', `custom provider '${config.id}' already exists`);
-      }
-      // 前面的异步存在性查询期间可能换号；写 key/header 前复核。
-      assertProviderMutationOwner(ownerAtIngress);
-      const targetCodexConfigSignature =
-        deps.codexCustomProviderConfigSignature?.(separated.config) ?? '';
-      const preparation = await prepareCodexCustomProviderChange(
-        targetCodexConfigSignature.length > 0,
-        options,
-        ownerAtIngress,
-      );
-      if (preparation.confirmation) return preparation.confirmation;
-      codexHostPrepared = preparation.prepared;
-      try {
-        const credentialSnapshots = stageProviderCredentials(
-          config.id,
-          planProviderKeyMutations(config, keys, 'create'),
-          planProviderHeaderMutations(config, separated.headers, 'create'),
-          commitRouteMutation,
-        );
-        try {
-          await createCustomProvider(separated.config);
-          assertProviderMutationOwner(ownerAtIngress);
-        } catch (error) {
-          // 换号后不在 B 的 secret store 执行 A 的回滚。
-          assertProviderMutationOwner(ownerAtIngress);
-          if (!restoreProviderCredentials(config.id, credentialSnapshots)) {
-            commitRouteMutation();
-            throwIpcError(
-              'INTERNAL',
-              'provider creation failed and credentials could not be rolled back',
-            );
-          }
-          throw error;
+    return withDshConfigurationMutation(() =>
+      withProviderConfigMutation(config.id, async (commitRouteMutation) => {
+        let codexHostPrepared = false;
+        assertProviderMutationOwner(ownerAtIngress);
+        if (await customProviderExists(config.id)) {
+          throwIpcError('ALREADY_EXISTS', `custom provider '${config.id}' already exists`);
         }
+        // 前面的异步存在性查询期间可能换号；写 key/header 前复核。
         assertProviderMutationOwner(ownerAtIngress);
-        await afterChange(codexHostPrepared, commitRouteMutation);
+        await assertDshConfigurationIsUnique(config);
         assertProviderMutationOwner(ownerAtIngress);
-        return { ok: true };
-      } finally {
-        if (codexHostPrepared) deps.cancelCodexCustomProviderHostChange?.();
-      }
-    });
+        const targetCodexConfigSignature =
+          deps.codexCustomProviderConfigSignature?.(separated.config) ?? '';
+        const preparation = await prepareCodexCustomProviderChange(
+          targetCodexConfigSignature.length > 0,
+          options,
+          ownerAtIngress,
+        );
+        if (preparation.confirmation) return preparation.confirmation;
+        codexHostPrepared = preparation.prepared;
+        try {
+          const credentialSnapshots = stageProviderCredentials(
+            config.id,
+            planProviderKeyMutations(config, keys, 'create'),
+            planProviderHeaderMutations(config, separated.headers, 'create'),
+            commitRouteMutation,
+          );
+          try {
+            await createCustomProvider(separated.config);
+            assertProviderMutationOwner(ownerAtIngress);
+          } catch (error) {
+            // 换号后不在 B 的 secret store 执行 A 的回滚。
+            assertProviderMutationOwner(ownerAtIngress);
+            if (!restoreProviderCredentials(config.id, credentialSnapshots)) {
+              commitRouteMutation();
+              throwIpcError(
+                'INTERNAL',
+                'provider creation failed and credentials could not be rolled back',
+              );
+            }
+            throw error;
+          }
+          assertProviderMutationOwner(ownerAtIngress);
+          await afterChange(codexHostPrepared, commitRouteMutation);
+          assertProviderMutationOwner(ownerAtIngress);
+          return { ok: true };
+        } finally {
+          if (codexHostPrepared) deps.cancelCodexCustomProviderHostChange?.();
+        }
+      }),
+    );
   }
   registry.handle(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, createProviderFromInput);
 
@@ -1989,237 +2109,255 @@ export function registerProviderHandlers(
     }
     let separated = splitCustomProviderHeaders(config);
     const ownerAtIngress = captureProviderOwnerSession();
-    return withProviderConfigMutation(config.id, async (commitRouteMutation) => {
-      let generation: symbol | null = null;
-      let codexHostPrepared = false;
-      try {
-        // per-provider 队列等待结束后才读取该 owner 的 DB / secrets。
-        assertProviderMutationOwner(ownerAtIngress);
-        const previous = await getCustomProvider(config.id);
-        assertProviderMutationOwner(ownerAtIngress);
-        if (!previous) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
-        if (resolveLatest) {
-          // Main-only key import merges under the same queue, never from a stale UI snapshot.
-          config = resolveLatest(previous);
-          const latestValidation = validateCustomProviderConfig(config, { allowLegacyXai: true });
-          if (!latestValidation.ok) throwIpcError(latestValidation.code, latestValidation.message);
-          separated = splitCustomProviderHeaders(config);
-        }
-        // 即便 OAuth 描述符没变，runtime / model 编辑也必须让旧登录尾部的自动发现失效，
-        // 否则旧 endpoint 的迟到结果可能合并进刚保存的新配置。
-        generation = beginOAuthMutation(config.id);
-        const authMethodChanged =
-          (previous.auth?.method ?? 'apiKey') !== (config.auth?.method ?? 'apiKey');
-        const oauthDescriptorChanged =
-          oauthDescriptorSignature(previous) !== oauthDescriptorSignature(config);
-        const oauthBindingChanged =
-          oauthDescriptorChanged
-          || oauthRuntimeEndpointSignature(previous) !== oauthRuntimeEndpointSignature(config);
-        const shouldResetOAuth = authMethodChanged || oauthBindingChanged;
-        // API key 的写 / 删与配置更新处于同一 main 队列；若后续 OAuth 清理或 DB 写失败，
-        // 用原值回滚，确保并发窗口不能把另一份配置和密钥拼在一起。
-        // key/header 的 storage key 按当前 owner 动态解析，写入前必须仍是发起方。
-        assertProviderMutationOwner(ownerAtIngress);
-        const keyMutations = effectiveProviderKeyMutations(
-          config.id,
-          planProviderKeyMutations(config, keys, 'update', previous),
-        );
-        const headerMutations = effectiveProviderHeaderMutations(
-          config.id,
-          planProviderHeaderMutations(config, separated.headers, 'update', previous),
-        );
-        const codexCredentialGenerationChanged =
-          keyMutations.some((mutation) => mutation.agent === 'codex') ||
-          headerMutations.some((mutation) => mutation.agent === 'codex') ||
-          authMethodChanged ||
-          (config.auth?.method === 'oauth' && oauthBindingChanged);
-        const previousCodexConfigSignature =
-          deps.codexCustomProviderConfigSignature?.(previous) ?? '';
-        const targetCodexConfigSignature =
-          deps.codexCustomProviderConfigSignature?.(separated.config) ?? '';
-        const codexHostChangeRequired =
-          previousCodexConfigSignature !== targetCodexConfigSignature ||
-          (codexCredentialGenerationChanged &&
-            (previousCodexConfigSignature.length > 0 || targetCodexConfigSignature.length > 0));
-        const preparation = await prepareCodexCustomProviderChange(
-          codexHostChangeRequired,
-          options,
-          ownerAtIngress,
-        );
-        if (preparation.confirmation) return preparation.confirmation;
-        codexHostPrepared = preparation.prepared;
-        const credentialSnapshots = stageProviderCredentials(
-          config.id,
-          keyMutations,
-          headerMutations,
-          commitRouteMutation,
-        );
-        // 先阻止在途 flow 写回，再改描述符；否则旧 flow 可能在 clear 后迟到落一枚旧 token。
-        if (shouldResetOAuth) deps.oauthCancel(config.id);
-        // 旧 client / endpoint 下签发的 token 不能沿用到新 OAuth 描述符；切到 API key /
-        // 无鉴权时也清掉不再可达的 blob。删除失败时必须在配置变更前中止，避免重启后
-        // 旧 token 被新 client / endpoint 重新激活。
-        let restoreOAuthCredentials: (() => boolean) | null = null;
-        let updated: CustomProviderConfig | null;
+    return withDshConfigurationMutation(() =>
+      withProviderConfigMutation(config.id, async (commitRouteMutation) => {
+        let generation: symbol | null = null;
+        let codexHostPrepared = false;
         try {
-          if (shouldResetOAuth) {
-            assertProviderMutationOwner(ownerAtIngress);
-            restoreOAuthCredentials = deps.removeOAuthCredentials(config.id);
-            if (!restoreOAuthCredentials) {
-              throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
+          // per-provider 队列等待结束后才读取该 owner 的 DB / secrets。
+          assertProviderMutationOwner(ownerAtIngress);
+          const previous = await getCustomProvider(config.id);
+          assertProviderMutationOwner(ownerAtIngress);
+          if (!previous) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
+          if (resolveLatest) {
+            // Main-only key import merges under the same queue, never from a stale UI snapshot.
+            config = resolveLatest(previous);
+            const latestValidation = validateCustomProviderConfig(config, { allowLegacyXai: true });
+            if (!latestValidation.ok)
+              throwIpcError(latestValidation.code, latestValidation.message);
+            separated = splitCustomProviderHeaders(config);
+          }
+          await assertDshConfigurationIsUnique(config);
+          assertProviderMutationOwner(ownerAtIngress);
+          // 即便 OAuth 描述符没变，runtime / model 编辑也必须让旧登录尾部的自动发现失效，
+          // 否则旧 endpoint 的迟到结果可能合并进刚保存的新配置。
+          generation = beginOAuthMutation(config.id);
+          const authMethodChanged =
+            (previous.auth?.method ?? 'apiKey') !== (config.auth?.method ?? 'apiKey');
+          const oauthDescriptorChanged =
+            oauthDescriptorSignature(previous) !== oauthDescriptorSignature(config);
+          const oauthBindingChanged =
+            oauthDescriptorChanged ||
+            oauthRuntimeEndpointSignature(previous) !== oauthRuntimeEndpointSignature(config);
+          const shouldResetOAuth = authMethodChanged || oauthBindingChanged;
+          // API key 的写 / 删与配置更新处于同一 main 队列；若后续 OAuth 清理或 DB 写失败，
+          // 用原值回滚，确保并发窗口不能把另一份配置和密钥拼在一起。
+          // key/header 的 storage key 按当前 owner 动态解析，写入前必须仍是发起方。
+          assertProviderMutationOwner(ownerAtIngress);
+          const keyMutations = effectiveProviderKeyMutations(
+            config.id,
+            planProviderKeyMutations(config, keys, 'update', previous),
+          );
+          const headerMutations = effectiveProviderHeaderMutations(
+            config.id,
+            planProviderHeaderMutations(config, separated.headers, 'update', previous),
+          );
+          const codexCredentialGenerationChanged =
+            keyMutations.some((mutation) => mutation.agent === 'codex') ||
+            headerMutations.some((mutation) => mutation.agent === 'codex') ||
+            authMethodChanged ||
+            (config.auth?.method === 'oauth' && oauthBindingChanged);
+          const previousCodexConfigSignature =
+            deps.codexCustomProviderConfigSignature?.(previous) ?? '';
+          const targetCodexConfigSignature =
+            deps.codexCustomProviderConfigSignature?.(separated.config) ?? '';
+          const codexHostChangeRequired =
+            previousCodexConfigSignature !== targetCodexConfigSignature ||
+            (codexCredentialGenerationChanged &&
+              (previousCodexConfigSignature.length > 0 || targetCodexConfigSignature.length > 0));
+          const preparation = await prepareCodexCustomProviderChange(
+            codexHostChangeRequired,
+            options,
+            ownerAtIngress,
+          );
+          if (preparation.confirmation) return preparation.confirmation;
+          codexHostPrepared = preparation.prepared;
+          const credentialSnapshots = stageProviderCredentials(
+            config.id,
+            keyMutations,
+            headerMutations,
+            commitRouteMutation,
+          );
+          // 先阻止在途 flow 写回，再改描述符；否则旧 flow 可能在 clear 后迟到落一枚旧 token。
+          if (shouldResetOAuth) deps.oauthCancel(config.id);
+          // 旧 client / endpoint 下签发的 token 不能沿用到新 OAuth 描述符；切到 API key /
+          // 无鉴权时也清掉不再可达的 blob。删除失败时必须在配置变更前中止，避免重启后
+          // 旧 token 被新 client / endpoint 重新激活。
+          let restoreOAuthCredentials: (() => boolean) | null = null;
+          let updated: CustomProviderConfig | null;
+          try {
+            if (shouldResetOAuth) {
+              assertProviderMutationOwner(ownerAtIngress);
+              restoreOAuthCredentials = deps.removeOAuthCredentials(config.id);
+              if (!restoreOAuthCredentials) {
+                throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
+              }
             }
+            updated = await updateCustomProvider(config.id, separated.config);
+            assertProviderMutationOwner(ownerAtIngress);
+          } catch (err) {
+            // 若 DB 写入 await 期间换号，不能把 A 的凭证补偿写入 B。
+            assertProviderMutationOwner(ownerAtIngress);
+            const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
+            const credentialsRestored = restoreProviderCredentials(config.id, credentialSnapshots);
+            if (!oauthRestored || !credentialsRestored) {
+              commitRouteMutation();
+              throwIpcError(
+                'INTERNAL',
+                'provider update failed and existing credentials could not be restored',
+              );
+            }
+            throw err;
           }
-          updated = await updateCustomProvider(config.id, separated.config);
-          assertProviderMutationOwner(ownerAtIngress);
-        } catch (err) {
-          // 若 DB 写入 await 期间换号，不能把 A 的凭证补偿写入 B。
-          assertProviderMutationOwner(ownerAtIngress);
-          const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
-          const credentialsRestored = restoreProviderCredentials(config.id, credentialSnapshots);
-          if (!oauthRestored || !credentialsRestored) {
-            commitRouteMutation();
-            throwIpcError(
-              'INTERNAL',
-              'provider update failed and existing credentials could not be restored',
-            );
+          if (!updated) {
+            assertProviderMutationOwner(ownerAtIngress);
+            const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
+            const credentialsRestored = restoreProviderCredentials(config.id, credentialSnapshots);
+            if (!oauthRestored || !credentialsRestored) {
+              commitRouteMutation();
+              throwIpcError(
+                'INTERNAL',
+                'provider disappeared during update and existing credentials could not be restored',
+              );
+            }
+            throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
           }
-          throw err;
+          assertProviderMutationOwner(ownerAtIngress);
+          await afterChange(
+            codexHostPrepared,
+            codexHostChangeRequired ? commitRouteMutation : undefined,
+          );
+          assertProviderMutationOwner(ownerAtIngress);
+          return { ok: true };
+        } finally {
+          if (codexHostPrepared) deps.cancelCodexCustomProviderHostChange?.();
+          if (generation !== null) finishOAuthMutation(config.id, generation);
         }
-        if (!updated) {
-          assertProviderMutationOwner(ownerAtIngress);
-          const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
-          const credentialsRestored = restoreProviderCredentials(config.id, credentialSnapshots);
-          if (!oauthRestored || !credentialsRestored) {
-            commitRouteMutation();
-            throwIpcError(
-              'INTERNAL',
-              'provider disappeared during update and existing credentials could not be restored',
-            );
-          }
-          throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
-        }
-        assertProviderMutationOwner(ownerAtIngress);
-        await afterChange(
-          codexHostPrepared,
-          codexHostChangeRequired ? commitRouteMutation : undefined,
-        );
-        assertProviderMutationOwner(ownerAtIngress);
-        return { ok: true };
-      } finally {
-        if (codexHostPrepared) deps.cancelCodexCustomProviderHostChange?.();
-        if (generation !== null) finishOAuthMutation(config.id, generation);
-      }
-    });
+      }),
+    );
   }
   registry.handle(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, (event, input, keys, options) =>
     updateProviderFromInput(event, input, keys, options),
   );
 
-  registry.handle(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, async (event, providerId: unknown, ownerScope?: unknown, optionsInput?: unknown) => {
-    assertTrustedProviderMutationSender(event);
-    assertOptionalRequestedOwner(ownerScope);
-    const options = parseCustomProviderUpdateOptions(optionsInput);
-    if (!options) throwIpcError('INVALID_PARAMS', 'Invalid provider change options');
-    if (typeof providerId !== 'string' || providerId.length === 0) {
-      throwIpcError('INVALID_PARAMS', 'providerId required');
-    }
-    const runtimeProviderId = runtimeCustomProviderId(providerId);
-    const ownerAtIngress = captureProviderOwnerSession();
-    return withProviderConfigMutation(providerId, async (commitRouteMutation) => {
-      let codexHostPrepared = false;
-      // 同类 delete 也会在 per-provider 队列后写 owner-scoped 凭证。
-      assertProviderMutationOwner(ownerAtIngress);
-      const previous = await getCustomProvider(providerId);
-      assertProviderMutationOwner(ownerAtIngress);
-      const codexHostChangeRequired = Boolean(
-        previous && (deps.codexCustomProviderConfigSignature?.(previous) ?? '').length > 0,
-      );
-      const preparation = await prepareCodexCustomProviderChange(
-        codexHostChangeRequired,
-        options,
-        ownerAtIngress,
-      );
-      if (preparation.confirmation) return preparation.confirmation;
-      codexHostPrepared = preparation.prepared;
-      const generation = beginOAuthMutation(providerId);
-      try {
-        if (previous?.auth?.native === 'codex') {
-          await deps.retireCodexAccount?.(providerId);
-          assertProviderMutationOwner(ownerAtIngress);
-        }
-        deps.oauthCancel(providerId);
-        const credentialSnapshots = stageProviderCredentials(
-          providerId,
-          CONFIG_RUNTIME_AGENTS.map((agent) => ({
-            agent,
-            replacement: null,
-          })),
-          planProviderHeaderMutations(
-            { id: providerId, name: providerId, runtimes: {} },
-            {},
-            'delete',
-          ),
-          commitRouteMutation,
-        );
-        // OAuth 形态自定义供应商的凭证 blob 一并清掉（apiKey 形态无 blob，幂等无害）。
-        let restoreOAuthCredentials: (() => boolean) | null = null;
-        let restoreDisableOverrides: (() => boolean) | null = null;
-        let restorePriceOverrides: (() => boolean) | null = null;
-        // 整个删除事务(清 override → 删凭证 → 删配置 → 刷目录)在 disable 写队列**内**
-        // 执行,持队列直到 afterChange 刷完 active-catalog:只把清理入队的话,清理落盘
-        // 后队列即释放,「删除完成前」的窗口里并发 MODEL_DISABLE_SET 仍能从未刷新的
-        // listProviders() 里找到该 provider、预埋新 override,同 id 重建照旧复活停用
-        // 状态。整体持锁后,并发写会排到目录刷新之后,成员校验自然拒绝
-        // (PR #744 review 第二十二轮)。队列内不得再调 enqueueDisableWrite(自等死锁),
-        // 清理与恢复都直接调用。
-        await enqueueDisableWrite(async () => {
-          // 进入 disable 全局队列后可能再次换号；以下会写 owner-scoped override/OAuth blob。
-          assertProviderMutationOwner(ownerAtIngress);
-          try {
-            // 停用 override 清理进事务(第二十轮):放在配置删除之前,后续任一步失败
-            // 由恢复函数把停用状态原样写回;清理自身抛错时事务未产生破坏,删除中止,
-            // 不再出现「配置删了、override 残留」让同 id 重建复活旧停用状态。
-            restoreDisableOverrides =
-              deps.stageClearProviderDisableOverrides?.(runtimeProviderId) ?? null;
-            restorePriceOverrides =
-              deps.stageClearProviderModelPriceOverrides?.(runtimeProviderId) ?? null;
-            assertProviderMutationOwner(ownerAtIngress);
-            restoreOAuthCredentials = deps.removeOAuthCredentials(providerId);
-            if (!restoreOAuthCredentials) {
-              throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
-            }
-            await deleteCustomProvider(providerId);
-            if (providerId === MANAGED_OLLAMA_PROVIDER_ID) notifyManagedOllamaRemoved();
-            assertProviderMutationOwner(ownerAtIngress);
-          } catch (err) {
-            assertProviderMutationOwner(ownerAtIngress);
-            const overridesRestored = !restoreDisableOverrides || restoreDisableOverrides();
-            const pricesRestored = !restorePriceOverrides || restorePriceOverrides();
-            const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
-            const credentialsRestored = restoreProviderCredentials(providerId, credentialSnapshots);
-            if (!oauthRestored || !credentialsRestored || !overridesRestored || !pricesRestored) {
-              commitRouteMutation();
-              throwIpcError(
-                'INTERNAL',
-                'provider deletion failed and existing credentials could not be restored',
-              );
-            }
-            throw err;
-          }
-          // 在队列内尝试刷新目录；刷新失败不撤销已经提交的删除。
-          // 凭证/override 的恢复只覆盖删除本身失败的场景。
-          assertProviderMutationOwner(ownerAtIngress);
-          await afterChange(codexHostPrepared, commitRouteMutation);
-          assertProviderMutationOwner(ownerAtIngress);
-          deps.broadcastPricingChanged();
-        });
-        return { ok: true };
-      } finally {
-        if (codexHostPrepared) deps.cancelCodexCustomProviderHostChange?.();
-        finishOAuthMutation(providerId, generation);
+  registry.handle(
+    MAKER_INVOKE.PROVIDER_CUSTOM_DELETE,
+    async (event, providerId: unknown, ownerScope?: unknown, optionsInput?: unknown) => {
+      assertTrustedProviderMutationSender(event);
+      assertOptionalRequestedOwner(ownerScope);
+      const options = parseCustomProviderUpdateOptions(optionsInput);
+      if (!options) throwIpcError('INVALID_PARAMS', 'Invalid provider change options');
+      if (typeof providerId !== 'string' || providerId.length === 0) {
+        throwIpcError('INVALID_PARAMS', 'providerId required');
       }
-    });
-  });
+      const runtimeProviderId = runtimeCustomProviderId(providerId);
+      const ownerAtIngress = captureProviderOwnerSession();
+      return withDshConfigurationMutation(() =>
+        withProviderConfigMutation(providerId, async (commitRouteMutation) => {
+          let codexHostPrepared = false;
+          // 同类 delete 也会在 per-provider 队列后写 owner-scoped 凭证。
+          assertProviderMutationOwner(ownerAtIngress);
+          const previous = await getCustomProvider(providerId);
+          assertProviderMutationOwner(ownerAtIngress);
+          const codexHostChangeRequired = Boolean(
+            previous && (deps.codexCustomProviderConfigSignature?.(previous) ?? '').length > 0,
+          );
+          const preparation = await prepareCodexCustomProviderChange(
+            codexHostChangeRequired,
+            options,
+            ownerAtIngress,
+          );
+          if (preparation.confirmation) return preparation.confirmation;
+          codexHostPrepared = preparation.prepared;
+          const generation = beginOAuthMutation(providerId);
+          try {
+            if (previous?.auth?.native === 'codex') {
+              await deps.retireCodexAccount?.(providerId);
+              assertProviderMutationOwner(ownerAtIngress);
+            }
+            deps.oauthCancel(providerId);
+            const credentialSnapshots = stageProviderCredentials(
+              providerId,
+              CONFIG_RUNTIME_AGENTS.map((agent) => ({
+                agent,
+                replacement: null,
+              })),
+              planProviderHeaderMutations(
+                { id: providerId, name: providerId, runtimes: {} },
+                {},
+                'delete',
+              ),
+              commitRouteMutation,
+            );
+            // OAuth 形态自定义供应商的凭证 blob 一并清掉（apiKey 形态无 blob，幂等无害）。
+            let restoreOAuthCredentials: (() => boolean) | null = null;
+            let restoreDisableOverrides: (() => boolean) | null = null;
+            let restorePriceOverrides: (() => boolean) | null = null;
+            // 整个删除事务(清 override → 删凭证 → 删配置 → 刷目录)在 disable 写队列**内**
+            // 执行,持队列直到 afterChange 刷完 active-catalog:只把清理入队的话,清理落盘
+            // 后队列即释放,「删除完成前」的窗口里并发 MODEL_DISABLE_SET 仍能从未刷新的
+            // listProviders() 里找到该 provider、预埋新 override,同 id 重建照旧复活停用
+            // 状态。整体持锁后,并发写会排到目录刷新之后,成员校验自然拒绝
+            // (PR #744 review 第二十二轮)。队列内不得再调 enqueueDisableWrite(自等死锁),
+            // 清理与恢复都直接调用。
+            await enqueueDisableWrite(async () => {
+              // 进入 disable 全局队列后可能再次换号；以下会写 owner-scoped override/OAuth blob。
+              assertProviderMutationOwner(ownerAtIngress);
+              try {
+                // 停用 override 清理进事务(第二十轮):放在配置删除之前,后续任一步失败
+                // 由恢复函数把停用状态原样写回;清理自身抛错时事务未产生破坏,删除中止,
+                // 不再出现「配置删了、override 残留」让同 id 重建复活旧停用状态。
+                restoreDisableOverrides =
+                  deps.stageClearProviderDisableOverrides?.(runtimeProviderId) ?? null;
+                restorePriceOverrides =
+                  deps.stageClearProviderModelPriceOverrides?.(runtimeProviderId) ?? null;
+                assertProviderMutationOwner(ownerAtIngress);
+                restoreOAuthCredentials = deps.removeOAuthCredentials(providerId);
+                if (!restoreOAuthCredentials) {
+                  throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
+                }
+                await deleteCustomProvider(providerId);
+                if (providerId === MANAGED_OLLAMA_PROVIDER_ID) notifyManagedOllamaRemoved();
+                assertProviderMutationOwner(ownerAtIngress);
+              } catch (err) {
+                assertProviderMutationOwner(ownerAtIngress);
+                const overridesRestored = !restoreDisableOverrides || restoreDisableOverrides();
+                const pricesRestored = !restorePriceOverrides || restorePriceOverrides();
+                const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
+                const credentialsRestored = restoreProviderCredentials(
+                  providerId,
+                  credentialSnapshots,
+                );
+                if (
+                  !oauthRestored ||
+                  !credentialsRestored ||
+                  !overridesRestored ||
+                  !pricesRestored
+                ) {
+                  commitRouteMutation();
+                  throwIpcError(
+                    'INTERNAL',
+                    'provider deletion failed and existing credentials could not be restored',
+                  );
+                }
+                throw err;
+              }
+              // 在队列内尝试刷新目录；刷新失败不撤销已经提交的删除。
+              // 凭证/override 的恢复只覆盖删除本身失败的场景。
+              assertProviderMutationOwner(ownerAtIngress);
+              await afterChange(codexHostPrepared, commitRouteMutation);
+              assertProviderMutationOwner(ownerAtIngress);
+              deps.broadcastPricingChanged();
+            });
+            return { ok: true };
+          } finally {
+            if (codexHostPrepared) deps.cancelCodexCustomProviderHostChange?.();
+            finishOAuthMutation(providerId, generation);
+          }
+        }),
+      );
+    },
+  );
 
   // 只读：目录 presets 段（创建对话框「从模板创建」消费）。
   registry.handle(
@@ -2376,16 +2514,30 @@ export function registerProviderHandlers(
           ownerAtIngress,
         );
         codexHostPrepared = preparation.prepared;
-        const result = await deps.oauthLogin(id, () => isOAuthMutationCurrent(id, generation), (url) => {
-          // Only the initiating local renderer gets this ephemeral authorization URL.
-          if (!ownerId || !sender || !isOAuthMutationCurrent(id, generation) ||
-              !providerMutationOwnerMatches(ownerAtIngress)) return;
-          try {
-            sender.send?.(MAKER_PUSH.PROVIDER_OAUTH_PROGRESS, {
-              providerId: id, ownerId, phase: 'browser-url', url,
-            });
-          } catch { /* A closed renderer must not interrupt credential cleanup. */ }
-        });
+        const result = await deps.oauthLogin(
+          id,
+          () => isOAuthMutationCurrent(id, generation),
+          (url) => {
+            // Only the initiating local renderer gets this ephemeral authorization URL.
+            if (
+              !ownerId ||
+              !sender ||
+              !isOAuthMutationCurrent(id, generation) ||
+              !providerMutationOwnerMatches(ownerAtIngress)
+            )
+              return;
+            try {
+              sender.send?.(MAKER_PUSH.PROVIDER_OAUTH_PROGRESS, {
+                providerId: id,
+                ownerId,
+                phase: 'browser-url',
+                url,
+              });
+            } catch {
+              /* A closed renderer must not interrupt credential cleanup. */
+            }
+          },
+        );
         if (isOAuthMutationCurrent(id, generation)) {
           if (result.ok) {
             finishRouteMutation.commit?.();
@@ -2419,88 +2571,99 @@ export function registerProviderHandlers(
       }
     },
   );
-  registry.handle(MAKER_INVOKE.PROVIDER_CUSTOM_DISCONNECT, async (event, providerId: unknown, ownerScope?: unknown, optionsInput?: unknown) => {
-    assertTrustedProviderMutationSender(event);
-    assertOptionalRequestedOwner(ownerScope);
-    const options = parseCustomProviderUpdateOptions(optionsInput);
-    if (!options) throwIpcError('INVALID_PARAMS', 'Invalid provider change options');
-    const id = storedCustomProviderId(requireProviderId(providerId));
-    const owner = captureProviderOwnerSession();
-    return withProviderConfigMutation(id, async (commitRouteMutation) => {
-      assertProviderMutationOwner(owner);
-      const config = await getCustomProvider(id);
-      assertProviderMutationOwner(owner);
-      if (!config || (config.auth && config.auth.method !== 'apiKey')) throwIpcError('INVALID_PARAMS', 'API connection required');
-      const preparation = await prepareCodexCustomProviderChange(
-        deps.hasAppliedCodexCustomProviderImageGeneration?.(id) === true, options, owner,
-      );
-      if (preparation.confirmation) return preparation.confirmation;
-      try {
+  registry.handle(
+    MAKER_INVOKE.PROVIDER_CUSTOM_DISCONNECT,
+    async (event, providerId: unknown, ownerScope?: unknown, optionsInput?: unknown) => {
+      assertTrustedProviderMutationSender(event);
+      assertOptionalRequestedOwner(ownerScope);
+      const options = parseCustomProviderUpdateOptions(optionsInput);
+      if (!options) throwIpcError('INVALID_PARAMS', 'Invalid provider change options');
+      const id = storedCustomProviderId(requireProviderId(providerId));
+      const owner = captureProviderOwnerSession();
+      return withProviderConfigMutation(id, async (commitRouteMutation) => {
         assertProviderMutationOwner(owner);
-        stageProviderCredentials(id,
-          CONFIG_RUNTIME_AGENTS.map((agent) => ({ agent, replacement: null })),
-          CONFIG_RUNTIME_AGENTS.map((agent) => ({ agent, replacement: null })),
-          commitRouteMutation);
-        // Configuration and stable route ID remain available for reconnect. Publish even when
-        // a later catalog refresh fails: the disconnected credential must never be reused.
-        commitRouteMutation();
-        await afterChange(preparation.prepared, commitRouteMutation);
-        return { ok: true };
-      } finally {
-        if (preparation.prepared) deps.cancelCodexCustomProviderHostChange?.();
-      }
-    });
-  });
-  registry.handle(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, async (event, providerId: unknown, ownerScope?: unknown, optionsInput?: unknown) => {
-    assertTrustedProviderMutationSender(event);
-    assertOptionalRequestedOwner(ownerScope);
-    const options = parseCustomProviderUpdateOptions(optionsInput);
-    if (!options) throwIpcError('INVALID_PARAMS', 'Invalid provider change options');
-    const id = requireProviderId(providerId);
-    const ownerAtIngress = captureProviderOwnerSession();
-    let generation: symbol | null = null;
-    try {
-      return await withProviderConfigMutation(id, async (commitRouteMutation) => {
-        let codexHostPrepared = false;
+        const config = await getCustomProvider(id);
+        assertProviderMutationOwner(owner);
+        if (!config || (config.auth && config.auth.method !== 'apiKey'))
+          throwIpcError('INVALID_PARAMS', 'API connection required');
+        const preparation = await prepareCodexCustomProviderChange(
+          deps.hasAppliedCodexCustomProviderImageGeneration?.(id) === true,
+          options,
+          owner,
+        );
+        if (preparation.confirmation) return preparation.confirmation;
         try {
-          const preparation = await prepareCodexCustomProviderChange(
-            deps.hasAppliedCodexCustomProviderImageGeneration?.(id) === true,
-            options,
-            ownerAtIngress,
+          assertProviderMutationOwner(owner);
+          stageProviderCredentials(
+            id,
+            CONFIG_RUNTIME_AGENTS.map((agent) => ({ agent, replacement: null })),
+            CONFIG_RUNTIME_AGENTS.map((agent) => ({ agent, replacement: null })),
+            commitRouteMutation,
           );
-          if (preparation.confirmation) return preparation.confirmation;
-          generation = beginOAuthMutation(id);
-          codexHostPrepared = preparation.prepared;
-          // Do not alter OAuth flow or credential state until the local Codex Host has crossed the
-          // hard-stop boundary. Failed Host retirement must leave the old generation usable.
-          deps.oauthCancel(id);
-          try {
-            await deps.oauthLogout(id);
-          } catch (err) {
-            // oauthLogout may have removed the credential before reporting failure. Publish the
-            // uncertain generation and release the stopped Host guard so no old decision can resume.
-            commitRouteMutation();
-            if (codexHostPrepared) {
-              if (!deps.finalizeCodexCustomProviderHostChange) {
-                throwIpcError('INTERNAL', 'local Codex Host reload is unavailable');
-              }
-              await deps.finalizeCodexCustomProviderHostChange();
-              codexHostPrepared = false;
-            }
-            throw err;
-          }
-          await afterChange(codexHostPrepared, commitRouteMutation);
+          // Configuration and stable route ID remain available for reconnect. Publish even when
+          // a later catalog refresh fails: the disconnected credential must never be reused.
+          commitRouteMutation();
+          await afterChange(preparation.prepared, commitRouteMutation);
           return { ok: true };
-        } catch (err) {
-          throwIpcError('INTERNAL', err instanceof Error ? err.message : String(err));
         } finally {
-          if (codexHostPrepared) deps.cancelCodexCustomProviderHostChange?.();
+          if (preparation.prepared) deps.cancelCodexCustomProviderHostChange?.();
         }
       });
-    } finally {
-      if (generation !== null) finishOAuthMutation(id, generation);
-    }
-  });
+    },
+  );
+  registry.handle(
+    MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT,
+    async (event, providerId: unknown, ownerScope?: unknown, optionsInput?: unknown) => {
+      assertTrustedProviderMutationSender(event);
+      assertOptionalRequestedOwner(ownerScope);
+      const options = parseCustomProviderUpdateOptions(optionsInput);
+      if (!options) throwIpcError('INVALID_PARAMS', 'Invalid provider change options');
+      const id = requireProviderId(providerId);
+      const ownerAtIngress = captureProviderOwnerSession();
+      let generation: symbol | null = null;
+      try {
+        return await withProviderConfigMutation(id, async (commitRouteMutation) => {
+          let codexHostPrepared = false;
+          try {
+            const preparation = await prepareCodexCustomProviderChange(
+              deps.hasAppliedCodexCustomProviderImageGeneration?.(id) === true,
+              options,
+              ownerAtIngress,
+            );
+            if (preparation.confirmation) return preparation.confirmation;
+            generation = beginOAuthMutation(id);
+            codexHostPrepared = preparation.prepared;
+            // Do not alter OAuth flow or credential state until the local Codex Host has crossed the
+            // hard-stop boundary. Failed Host retirement must leave the old generation usable.
+            deps.oauthCancel(id);
+            try {
+              await deps.oauthLogout(id);
+            } catch (err) {
+              // oauthLogout may have removed the credential before reporting failure. Publish the
+              // uncertain generation and release the stopped Host guard so no old decision can resume.
+              commitRouteMutation();
+              if (codexHostPrepared) {
+                if (!deps.finalizeCodexCustomProviderHostChange) {
+                  throwIpcError('INTERNAL', 'local Codex Host reload is unavailable');
+                }
+                await deps.finalizeCodexCustomProviderHostChange();
+                codexHostPrepared = false;
+              }
+              throw err;
+            }
+            await afterChange(codexHostPrepared, commitRouteMutation);
+            return { ok: true };
+          } catch (err) {
+            throwIpcError('INTERNAL', err instanceof Error ? err.message : String(err));
+          } finally {
+            if (codexHostPrepared) deps.cancelCodexCustomProviderHostChange?.();
+          }
+        });
+      } finally {
+        if (generation !== null) finishOAuthMutation(id, generation);
+      }
+    },
+  );
   registry.handle(
     MAKER_INVOKE.PROVIDER_OAUTH_CANCEL,
     async (event, providerId: unknown, rawOptions?: unknown) => {

@@ -1,4 +1,11 @@
-import { providerEndpointBindings, BUNDLED_CATALOG, classifyModel, isChatEligible, isAgentSelectableModel, mergeModelMetadata } from '@cindy/model-providers';
+import {
+  providerEndpointBindings,
+  BUNDLED_CATALOG,
+  classifyModel,
+  isChatEligible,
+  isAgentSelectableModel,
+  mergeModelMetadata,
+} from '@cindy/model-providers';
 /**
  * Connection credentials and advanced routing only. Model capabilities are imported into the
  * shared catalog and edited through standard model settings. Stored per-runtime credentials,
@@ -53,6 +60,8 @@ import {
   type RuntimeKeys,
 } from '@/lib/customProviders';
 import type { CodexImageGenerationRestartPolicy } from '@/../shared/customProviderUpdate';
+import type { DshRuntimeStatus } from '@/../shared/dshRuntimeStatus';
+import { normalizeDshMessagesBaseUrl } from '@/../shared/dshProviderEndpoint';
 import { uniqueCustomProviderId } from '@/lib/customProviderId';
 import {
   areProviderRequestUrlsAllowed,
@@ -111,10 +120,12 @@ import {
  * 走 pi 原生 provider 直连(不过 anthropic-compat 代理),故 pi tab 额外提供显式 api 选择器。
  */
 type DialogAgentKind = Extract<AgentKind, 'claude-code' | 'codex' | 'pi'>;
+type RuntimeTab = DialogAgentKind | 'dsh';
 
 const AGENTS: DialogAgentKind[] = ['claude-code', 'codex', 'pi'];
 
 const VISIBLE_AGENTS: DialogAgentKind[] = AGENTS;
+const RUNTIME_TABS: RuntimeTab[] = [...VISIBLE_AGENTS, 'dsh'];
 
 const DIALOG_FOCUSABLE_SELECTOR = [
   'button:not([disabled])',
@@ -143,6 +154,30 @@ const TAB_META: Record<
     Mark: PiMark,
     labelKey: 'settings.providers.custom.protocol.pi',
     helpKey: 'settings.providers.custom.protocol.piDesc',
+  },
+};
+
+/** DSH shares the compact mono mark treatment of the other runtime tabs. */
+function DshMark({
+  size = 14,
+  className,
+}: {
+  size?: number;
+  className?: string;
+  variant?: 'mono' | 'brand';
+}) {
+  return <Sparkles size={size} className={className} aria-hidden />;
+}
+
+const RUNTIME_TAB_META: Record<
+  RuntimeTab,
+  { Mark: typeof ClaudeMark; labelKey: string; helpKey: string }
+> = {
+  ...TAB_META,
+  dsh: {
+    Mark: DshMark,
+    labelKey: 'settings.providers.custom.dsh.label',
+    helpKey: 'settings.providers.custom.dsh.description',
   },
 };
 
@@ -181,9 +216,7 @@ interface ModelPickerState {
   query: string;
 }
 type DialogChildLayer =
-  | { kind: 'preset-menu' }
-  | { kind: 'model-picker'; value: ModelPickerState }
-  | null;
+  { kind: 'preset-menu' } | { kind: 'model-picker'; value: ModelPickerState } | null;
 interface HeaderRow {
   name: string;
   value: string;
@@ -198,6 +231,26 @@ interface RuntimeFields extends RuntimeFillDraft {
   catalogPresetId?: string;
   /** Codex Responses runtime 级原生图片生成能力。 */
   supportsImageGeneration: boolean;
+}
+
+/**
+ * DSH has a fixed Main-owned profile rather than a generic model-provider
+ * route. Keep this draft separate from the model tabs so unsupported protocol,
+ * model, header, and discovery fields can never enter its persisted shape.
+ */
+interface DshRuntimeFields {
+  baseUrl: string;
+  /** Never hydrate an existing DSH credential into Renderer state. */
+  apiKey: string;
+}
+
+function initDshRuntime(initial?: CustomProviderConfig): DshRuntimeFields {
+  return {
+    baseUrl: initial?.runtimes.dsh
+      ? normalizeDshMessagesBaseUrl(initial.runtimes.dsh.baseUrl)
+      : '',
+    apiKey: '',
+  };
 }
 
 function canRuntimeUseNativeImageGeneration(runtime: RuntimeFields): boolean {
@@ -432,11 +485,27 @@ export function ProviderConnectionDialog({
   const [name, setName] = useState(initial?.name ?? '');
   const [manualModel, setManualModel] = useState('');
   const [rt, setRt] = useState<Record<DialogAgentKind, RuntimeFields>>(() => initRuntimes(initial));
-  const [activeTab, setActiveTab] = useState<DialogAgentKind>(
-    () =>
-      (focusAgent && VISIBLE_AGENTS.includes(focusAgent as DialogAgentKind) ? focusAgent as DialogAgentKind : null) ??
-      ((initial && VISIBLE_AGENTS.find((a) => initial.runtimes[a])) || 'claude-code'),
-  );
+  const [dsh, setDsh] = useState<DshRuntimeFields>(() => initDshRuntime(initial));
+  const [dshRuntimeStatus, setDshRuntimeStatus] = useState<DshRuntimeStatus | null>(null);
+  const [dshStatusLoading, setDshStatusLoading] = useState(true);
+  const [dshRetrying, setDshRetrying] = useState(false);
+  const initialGenericTab =
+    (focusAgent && VISIBLE_AGENTS.includes(focusAgent as DialogAgentKind)
+      ? (focusAgent as DialogAgentKind)
+      : null) ??
+    ((initial && VISIBLE_AGENTS.find((a) => initial.runtimes[a])) || 'claude-code');
+  const [activeTab, setActiveTab] = useState<DialogAgentKind>(() => initialGenericTab);
+  const [activeRuntimeTab, setActiveRuntimeTab] = useState<RuntimeTab>(() => {
+    if (focusAgent === 'dsh') return 'dsh';
+    if (focusAgent && VISIBLE_AGENTS.includes(focusAgent as DialogAgentKind)) {
+      return focusAgent as DialogAgentKind;
+    }
+    // A saved DSH route alongside retired generic routes is the interrupted
+    // migration shape. Default it to DSH so an ordinary Save completes the
+    // conversion; an explicit generic focus still remains authoritative.
+    if (initial?.runtimes.dsh) return 'dsh';
+    return initialGenericTab;
+  });
   const [hasKey, setHasKey] = useState<Record<DialogAgentKind, boolean>>({
     'claude-code': false,
     codex: false,
@@ -458,6 +527,42 @@ export function ProviderConnectionDialog({
     authModeRef.current = mode;
     setAuthModeState(mode);
   }, []);
+  const loadDshRuntimeStatus = useCallback(async (): Promise<DshRuntimeStatus | null> => {
+    const maker = window.electronAPI.maker;
+    if (typeof maker.getDshRuntimeStatus !== 'function') {
+      setDshRuntimeStatus(null);
+      setDshStatusLoading(false);
+      return null;
+    }
+    setDshStatusLoading(true);
+    try {
+      const status = await maker.getDshRuntimeStatus();
+      setDshRuntimeStatus(status);
+      return status;
+    } catch {
+      // This projection is optional diagnostic UI. Its absence must not turn
+      // provider editing into an unavailable action.
+      setDshRuntimeStatus(null);
+      return null;
+    } finally {
+      setDshStatusLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    void loadDshRuntimeStatus();
+  }, [loadDshRuntimeStatus]);
+  const retryDshRuntimeRegistration = useCallback(async () => {
+    const maker = window.electronAPI.maker;
+    if (typeof maker.retryDshRuntimeRegistration !== 'function' || dshRetrying) return;
+    setDshRetrying(true);
+    try {
+      setDshRuntimeStatus(await maker.retryDshRuntimeRegistration());
+    } catch {
+      setDshRuntimeStatus(null);
+    } finally {
+      setDshRetrying(false);
+    }
+  }, [dshRetrying]);
   const [oauthFlow, setOauthFlow] = useState<'authorization-code' | 'device-code'>(
     initialOAuth?.flow === 'device-code' ? 'device-code' : 'authorization-code',
   );
@@ -477,7 +582,9 @@ export function ProviderConnectionDialog({
   const [imageGenerationHelpHovered, setImageGenerationHelpHovered] = useState(false);
   const [imageGenerationHelpFocused, setImageGenerationHelpFocused] = useState(false);
   // 预设模板（仅新建态展示；目录 presets 段，随 OSS 热更）。
-  const [presets, setPresets] = useState<ProviderPreset[]>(() => [...(BUNDLED_CATALOG.presets ?? [])]);
+  const [presets, setPresets] = useState<ProviderPreset[]>(() => [
+    ...(BUNDLED_CATALOG.presets ?? []),
+  ]);
   const [appliedPreset, setAppliedPreset] = useState<string | null>(null);
   // 嵌套 dismiss layer 互斥且由表单统一持有：Radix Popover 只负责呈现，
   // 不再让退场中的菜单与新打开的模型选择器同时成为 Escape owner。
@@ -680,9 +787,7 @@ export function ProviderConnectionDialog({
         ? document.activeElement
         : null;
     const frame = requestAnimationFrame(() => {
-      (
-        dialogPanelRef.current?.querySelector<HTMLInputElement>('input')
-      )?.focus();
+      dialogPanelRef.current?.querySelector<HTMLInputElement>('input')?.focus();
     });
     return () => {
       cancelAnimationFrame(frame);
@@ -767,9 +872,7 @@ export function ProviderConnectionDialog({
         wireProtocol: rc.wireProtocol ?? defaultWireFor(agent),
         authMode: savedAuthMode,
         apiKey: loadedKeyRef.current[agent] ?? '',
-        ...(agent === 'pi'
-          ? { modelPiApi: firstProviderChatModel(rc.models)?.piApi }
-          : {}),
+        ...(agent === 'pi' ? { modelPiApi: firstProviderChatModel(rc.models)?.piApi } : {}),
         modelRoute: firstProviderChatModel(rc.models)?.route,
         modelApi: firstProviderChatModel(rc.models)?.api,
         catalogPresetId: rc.catalogPresetId,
@@ -856,7 +959,14 @@ export function ProviderConnectionDialog({
                   name: m.name,
                   discoveredMetadata: {},
                   ...(m.mode ? { mode: m.mode } : {}),
-                  ...(m.modalities ? { modalities: { input: [...m.modalities.input], output: [...m.modalities.output] } } : {}),
+                  ...(m.modalities
+                    ? {
+                        modalities: {
+                          input: [...m.modalities.input],
+                          output: [...m.modalities.output],
+                        },
+                      }
+                    : {}),
                   ...(m.officialDocs ? { officialDocs: m.officialDocs } : {}),
                   ...(m.api ? { api: m.api } : {}),
                   ...(m.piApi ? { piApi: m.piApi } : {}),
@@ -881,7 +991,10 @@ export function ProviderConnectionDialog({
       // 的 runtime 上,handleSave 的守卫拦不住"用户已经看不到"的这条草稿,表单
       // 卡死报错却找不到对应输入框(review P1)。
       const first = configuredPresetAgents(p)[0];
-      if (first) setActiveTab(first);
+      if (first) {
+        setActiveTab(first);
+        setActiveRuntimeTab(first);
+      }
       // 预设整体替换名称/鉴权/全部 runtime:任何既有字段错误的指向(字段值、
       // 行结构、tab)都已失效。程序化赋值不触发输入的 change,须在此显式清除
       // (review P1)。
@@ -1172,28 +1285,34 @@ export function ProviderConnectionDialog({
   /** 切换协议时保留用户已填写的 endpoint，仅使旧测试结果失效。 */
   const changeWireProtocol = useCallback(
     (agent: DialogAgentKind, wireProtocol: ProviderWireProtocol) => {
-      setRtSynced((prev) => prev[agent].catalogPresetId || prev[agent].wireProtocol === wireProtocol ? prev : ({
-        ...prev,
-        [agent]: {
-          ...prev[agent],
-          wireProtocol,
-          requestPath: '',
-        },
-      }));
+      setRtSynced((prev) =>
+        prev[agent].catalogPresetId || prev[agent].wireProtocol === wireProtocol
+          ? prev
+          : {
+              ...prev,
+              [agent]: {
+                ...prev[agent],
+                wireProtocol,
+                requestPath: '',
+              },
+            },
+      );
       setTest((prev) => ({ ...prev, [agent]: IDLE_TEST }));
     },
     [setRtSynced],
   );
 
   const f = rt[activeTab];
-  const boundPreset = presets.find(preset => preset.id === f.catalogPresetId);
+  const boundPreset = presets.find((preset) => preset.id === f.catalogPresetId);
   const templateBound = Boolean(f.catalogPresetId);
   const endpointTemplate = boundPreset?.runtimes[activeTab]?.baseUrl;
   const fixedTemplateEndpoint = templateBound && !endpointTemplate?.includes('{');
   // Google inference and discovery already resolve to this native endpoint. The old
   // compatibility base remains stored as a template reference, never an editable choice.
-  const displayedBaseUrl = fixedTemplateEndpoint && f.catalogPresetId === 'google-gemini-api'
-    ? resolveProviderConnectionProbeRoute(activeTab, f, presets)?.baseUrl ?? f.baseUrl : f.baseUrl;
+  const displayedBaseUrl =
+    fixedTemplateEndpoint && f.catalogPresetId === 'google-gemini-api'
+      ? (resolveProviderConnectionProbeRoute(activeTab, f, presets)?.baseUrl ?? f.baseUrl)
+      : f.baseUrl;
   const canShowImageGenerationAdvanced =
     activeTab === 'codex' && canRuntimeUseNativeImageGeneration(f);
   useEffect(() => {
@@ -1202,10 +1321,18 @@ export function ProviderConnectionDialog({
   }, [canShowImageGenerationAdvanced, resetImageGenerationHelp, showImageGenerationAdvanced]);
 
   // Account/location edits must stay within the declared endpoint template.
-  const matchesEndpointTemplate = useCallback((agent: DialogAgentKind, fields: RuntimeFields) => {
-    const template = presets.find(preset => preset.id === fields.catalogPresetId)?.runtimes[agent]?.baseUrl;
-    return !template?.includes('{') || providerEndpointBindings(template, fields.baseUrl.trim()) !== null;
-  }, [presets]);
+  const matchesEndpointTemplate = useCallback(
+    (agent: DialogAgentKind, fields: RuntimeFields) => {
+      const template = presets.find((preset) => preset.id === fields.catalogPresetId)?.runtimes[
+        agent
+      ]?.baseUrl;
+      return (
+        !template?.includes('{') ||
+        providerEndpointBindings(template, fields.baseUrl.trim()) !== null
+      );
+    },
+    [presets],
+  );
 
   const handleTest = useCallback(async () => {
     const agent = activeTab;
@@ -1327,7 +1454,10 @@ export function ProviderConnectionDialog({
       toast.error(t('settings.providers.custom.fetch.needBaseUrl'));
       return;
     }
-    if (!matchesEndpointTemplate(agent, rf) || !areProviderRequestUrlsAllowed(authMode, baseUrl, rf.modelsUrl)) {
+    if (
+      !matchesEndpointTemplate(agent, rf) ||
+      !areProviderRequestUrlsAllowed(authMode, baseUrl, rf.modelsUrl)
+    ) {
       toast.error(t('settings.providers.custom.errors.baseUrlInvalid'));
       return;
     }
@@ -1380,10 +1510,10 @@ export function ProviderConnectionDialog({
             modalities: m.modalities,
             officialDocs: m.officialDocs,
             discoveredMetadata: m.discoveredMetadata,
-          discoveredCost: m.discoveredCost,
+            discoveredCost: m.discoveredCost,
             nameExplicit: m.nameExplicit,
             ...(m.api ? { api: m.api } : {}),
-          ...(agent === 'pi' && m.piApi ? { piApi: m.piApi } : {}),
+            ...(agent === 'pi' && m.piApi ? { piApi: m.piApi } : {}),
             ...(m.route ? { route: { ...m.route } } : {}),
             ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
             ...(typeof m.defaultEnabled === 'boolean' ? { defaultEnabled: m.defaultEnabled } : {}),
@@ -1417,8 +1547,10 @@ export function ProviderConnectionDialog({
             return {
               id: m.id,
               name: cur?.name || m.name,
-              discoveredMetadata: mergeModelMetadata(cur?.discoveredMetadata,
-                m.discoveredMetadata ?? { contextWindow: m.contextWindow }),
+              discoveredMetadata: mergeModelMetadata(
+                cur?.discoveredMetadata,
+                m.discoveredMetadata ?? { contextWindow: m.contextWindow },
+              ),
               discoveredCost: m.discoveredCost,
               mode: cur?.mode,
               modalities: cur?.modalities,
@@ -1428,7 +1560,9 @@ export function ProviderConnectionDialog({
               ...(agent === 'pi' && cur?.piApi ? { piApi: cur.piApi } : {}),
               ...(cur?.route ? { route: { ...cur.route } } : {}),
               ...(contextWindow !== undefined ? { contextWindow } : {}),
-              ...(typeof cur?.defaultEnabled === 'boolean' ? { defaultEnabled: cur.defaultEnabled } : {}),
+              ...(typeof cur?.defaultEnabled === 'boolean'
+                ? { defaultEnabled: cur.defaultEnabled }
+                : {}),
               ...(cur?.supportsImageInput !== undefined
                 ? { supportsImageInput: cur.supportsImageInput }
                 : {}),
@@ -1451,6 +1585,7 @@ export function ProviderConnectionDialog({
         // 弹层锁定所属 runtime：把背景 Tab 同步切回请求的 runtime（标题也带 runtime 名），
         // 请求期间切过 Tab 也不会在错误上下文里确认。
         setActiveTab(agent);
+        setActiveRuntimeTab(agent);
       } else {
         toast.error(t(`providerError.${result.code ?? 'UNKNOWN'}`));
       }
@@ -1465,7 +1600,18 @@ export function ProviderConnectionDialog({
       modelFetchInFlightRef.current = false;
       setFetchingModels((prev) => ({ ...prev, [agent]: false }));
     }
-  }, [activeTab, authMode, rt, fetchingModels, initial, picker, runtimeFill, savedBaselineFor, t, matchesEndpointTemplate]);
+  }, [
+    activeTab,
+    authMode,
+    rt,
+    fetchingModels,
+    initial,
+    picker,
+    runtimeFill,
+    savedBaselineFor,
+    t,
+    matchesEndpointTemplate,
+  ]);
 
   /**
    * 勾选弹层确认：勾选集写回该 runtime 的模型行。基于**确认时的最新表单行**合并，
@@ -1579,8 +1725,11 @@ export function ProviderConnectionDialog({
       try {
         await updateCustomProvider({ ...initial, name: trimmedName }, {});
         onSaved();
-      } catch { toast.error(t('settings.providers.custom.toast.saveFailed')); }
-      finally { setSaving(false); }
+      } catch {
+        toast.error(t('settings.providers.custom.toast.saveFailed'));
+      } finally {
+        setSaving(false);
+      }
       return;
     }
     if (editing && authMode === 'apiKey' && !keyHydrationReady) {
@@ -1600,34 +1749,43 @@ export function ProviderConnectionDialog({
       });
       if (failedEndpointEdit) {
         setActiveTab(failedEndpointEdit);
+        setActiveRuntimeTab(failedEndpointEdit);
         toast.error(t('settings.providers.custom.runtimeFill.keysUnavailable'));
         return;
       }
     }
     const runtimes: CustomProviderConfig['runtimes'] = {};
     const keys: RuntimeKeys = {};
-    for (const a of VISIBLE_AGENTS) {
+    // Selecting DeepSeek Harness is an explicit conversion of this provider, not an
+    // edit of one tab alongside hidden generic runtimes. Only serialize the DSH
+    // profile below so Main can atomically remove the retired runtime credentials.
+    const replacingLegacyRuntimesWithDsh = activeRuntimeTab === 'dsh';
+    for (const a of replacingLegacyRuntimesWithDsh ? [] : VISIBLE_AGENTS) {
       const rf = rt[a];
       if (!rf.baseUrl.trim()) continue; // 该 runtime 未配置
       try {
         const u = new URL(rf.baseUrl.trim());
         if (u.protocol !== 'http:' && u.protocol !== 'https:') {
           setActiveTab(a);
+          setActiveRuntimeTab(a);
           reportFieldError(`${a}:baseUrl`, t('settings.providers.custom.errors.baseUrlInvalid'));
           return;
         }
       } catch {
         setActiveTab(a);
+        setActiveRuntimeTab(a);
         reportFieldError(`${a}:baseUrl`, t('settings.providers.custom.errors.baseUrlInvalid'));
         return;
       }
       if (!areProviderRequestUrlsAllowed(authMode, rf.baseUrl, rf.modelsUrl)) {
         setActiveTab(a);
+        setActiveRuntimeTab(a);
         reportFieldError(`${a}:baseUrl`, t('settings.providers.custom.errors.baseUrlInvalid'));
         return;
       }
       if (!matchesEndpointTemplate(a, rf)) {
         setActiveTab(a);
+        setActiveRuntimeTab(a);
         reportFieldError(`${a}:baseUrl`, t('settings.providers.custom.errors.baseUrlInvalid'));
         return;
       }
@@ -1663,6 +1821,7 @@ export function ProviderConnectionDialog({
       const requestPath = a === 'pi' ? '' : rf.requestPath.trim();
       if (requestPath && !isProviderRequestPath(requestPath)) {
         setActiveTab(a);
+        setActiveRuntimeTab(a);
         reportFieldError(
           `${a}:requestPath`,
           t('settings.providers.custom.errors.requestPathInvalid'),
@@ -1672,10 +1831,8 @@ export function ProviderConnectionDialog({
       // OAuth 形态模型可留空——授权成功后自动发现并持久化（与内置订阅统一）。
       if (models.length === 0 && authMode !== 'oauth') {
         setActiveTab(a);
-        reportFieldError(
-          `${a}:manualModel`,
-          t('settings.providers.custom.errors.modelRequired'),
-        );
+        setActiveRuntimeTab(a);
+        reportFieldError(`${a}:manualModel`, t('settings.providers.custom.errors.modelRequired'));
         return;
       }
       const headers: Record<string, string> = {};
@@ -1726,9 +1883,38 @@ export function ProviderConnectionDialog({
         keys[a] = rf.apiKey.trim();
       }
     }
+    const dshBaseUrl = normalizeDshMessagesBaseUrl(dsh.baseUrl);
+    if (dshBaseUrl) {
+      if (authMode !== 'apiKey') {
+        reportFieldError('dsh:apiKey', t('settings.providers.custom.errors.dshAuthApiKeyRequired'));
+        return;
+      }
+      let dshEndpointValid = false;
+      try {
+        const url = new URL(dshBaseUrl);
+        dshEndpointValid =
+          url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash;
+      } catch {
+        dshEndpointValid = false;
+      }
+      if (!dshEndpointValid) {
+        reportFieldError('dsh:baseUrl', t('settings.providers.custom.errors.dshEndpointInvalid'));
+        return;
+      }
+      const existingDshBaseUrl = initial?.runtimes.dsh
+        ? normalizeDshMessagesBaseUrl(initial.runtimes.dsh.baseUrl)
+        : '';
+      const dshEndpointChanged = dshBaseUrl !== existingDshBaseUrl;
+      if ((!editing || dshEndpointChanged) && !dsh.apiKey.trim()) {
+        reportFieldError('dsh:apiKey', t('settings.providers.custom.errors.dshApiKeyRequired'));
+        return;
+      }
+      runtimes.dsh = { baseUrl: dshBaseUrl, models: [] };
+      if (dsh.apiKey.trim()) keys.dsh = dsh.apiKey.trim();
+    }
     if (Object.keys(runtimes).length === 0) {
       reportFieldError(
-        `${activeTab}:baseUrl`,
+        activeRuntimeTab === 'dsh' ? 'dsh:baseUrl' : `${activeTab}:baseUrl`,
         t('settings.providers.custom.errors.runtimeRequired'),
       );
       return;
@@ -1751,13 +1937,7 @@ export function ProviderConnectionDialog({
         oauthFlow === 'device-code'
           ? oauthFields.deviceAuthorizationUrl.trim()
           : oauthFields.authorizeUrl.trim();
-      if (
-        !flowUrl ||
-        !tokenUrl ||
-        !clientId ||
-        !httpsOk(flowUrl) ||
-        !httpsOk(tokenUrl)
-      ) {
+      if (!flowUrl || !tokenUrl || !clientId || !httpsOk(flowUrl) || !httpsOk(tokenUrl)) {
         const invalid =
           !flowUrl || !httpsOk(flowUrl)
             ? oauthFlow === 'device-code'
@@ -1831,7 +2011,6 @@ export function ProviderConnectionDialog({
           setSaving(false);
           return;
         }
-        toast.success(t('settings.providers.custom.toast.updated'));
       } else {
         const result = await createCustomProvider(config, keys, { source: 'manual-settings' });
         if (result?.ok === false) {
@@ -1840,7 +2019,25 @@ export function ProviderConnectionDialog({
           setSaving(false);
           return;
         }
-        toast.success(t('settings.providers.custom.toast.created'));
+      }
+      // Provider CRUD waits for Main's DSH admission attempt. Re-read its
+      // display-safe projection before the dialog unmounts so a persisted
+      // route is never presented as a usable runtime when registration failed
+      // or must wait for active DSH tasks to close.
+      const dshStatusAfterSave = activeRuntimeTab === 'dsh' ? await loadDshRuntimeStatus() : null;
+      toast.success(
+        t(
+          editing
+            ? 'settings.providers.custom.toast.updated'
+            : 'settings.providers.custom.toast.created',
+        ),
+      );
+      if (dshStatusAfterSave && dshStatusAfterSave.registration !== 'task-factory-ready') {
+        toast.warning(
+          t(
+            `settings.providers.custom.dsh.runtimeStatus.registration.${dshStatusAfterSave.registration}`,
+          ),
+        );
       }
       // 成功:onSaved 关闭弹窗(父级 setDialog(null) 卸载本组件)。不在此 setSaving(false)——
       // 让按钮维持 spinner 直到卸载,避免「spinner→普通态」闪一帧(规则 7)。
@@ -1854,10 +2051,12 @@ export function ProviderConnectionDialog({
   }, [
     name,
     activeTab,
+    activeRuntimeTab,
     rowId,
     reportFieldError,
     keyHydrationReady,
     rt,
+    dsh,
     authMode,
     oauthFlow,
     oauthFields,
@@ -1867,6 +2066,7 @@ export function ProviderConnectionDialog({
     existingIds,
     matchesEndpointTemplate,
     onSaved,
+    loadDshRuntimeStatus,
     keyHydrationFailed,
     showAdvanced,
     savedBaselineFor,
@@ -1931,6 +2131,15 @@ export function ProviderConnectionDialog({
   const keyPlaceholder = activeKeyCanRemainSaved
     ? t('settings.providers.custom.fields.apiKeyEditPlaceholder')
     : t('settings.providers.custom.fields.apiKeyPlaceholder');
+  const dshConfigurationStatusText = dshRuntimeStatus
+    ? dshRuntimeStatus.configuration.status === 'ready'
+      ? t('settings.providers.custom.dsh.runtimeStatus.configuration.ready', {
+          provider: dshRuntimeStatus.configuration.providerName,
+        })
+      : t(
+          `settings.providers.custom.dsh.runtimeStatus.configuration.${dshRuntimeStatus.configuration.reason}`,
+        )
+    : t('settings.providers.custom.dsh.runtimeStatus.unavailable');
 
   const renderImageGenerationHelpContent = () => {
     const idPrefix = 'custom-provider-image-generation-help';
@@ -2039,10 +2248,7 @@ export function ProviderConnectionDialog({
           }
           const key = fieldError.id.slice(formId.length + 1);
           const agent = key.slice(0, key.indexOf(':'));
-          if (
-            key === `${agent}:add-model` &&
-            target.id.startsWith(`${formId}-${agent}:model:`)
-          ) {
+          if (key === `${agent}:add-model` && target.id.startsWith(`${formId}-${agent}:model:`)) {
             setFieldError(null);
           }
         }}
@@ -2068,11 +2274,15 @@ export function ProviderConnectionDialog({
           </div>
         </div>
 
-        {/* Body (scrollable) */}
-        <div className="flex min-h-0 flex-col gap-4 overflow-y-auto px-4 pb-2 pt-1">
-          <p className="text-13 leading-[1.55] text-[var(--settings-section-desc)]">
-            {t('settings.providers.custom.dialog.desc')}
-          </p>
+          {/* Body (scrollable) */}
+          <div className="flex min-h-0 flex-col gap-4 overflow-y-auto px-4 pb-2 pt-1">
+            <p className="text-13 leading-[1.55] text-[var(--settings-section-desc)]">
+              {t(
+                activeRuntimeTab === 'dsh'
+                  ? 'settings.providers.custom.dialog.dshDesc'
+                  : 'settings.providers.custom.dialog.desc',
+              )}
+            </p>
 
           {/* 预设模板（仅新建态、有预设时显示）：下拉选择，选中即预填 baseUrl / 模型清单，
               用户只补 key。列表已按厂商首字母分组排序（同厂商国内/海外相邻，按构建区域排序）。 */}
@@ -2121,686 +2331,884 @@ export function ProviderConnectionDialog({
           </div>
 
           {/* 鉴权形态：API 密钥 / OAuth / 无鉴权。 */}
-          {!initial?.auth?.native && <>
-          <div className="flex flex-col gap-2">
-            <FieldLabel>{t('settings.providers.custom.authMode.label')}</FieldLabel>
-            <div className="flex flex-wrap gap-1.5">
-              {(['apiKey', 'oauth', 'none'] as const).map((m) => (
-                <button
-                  key={m}
-                  aria-pressed={authMode === m}
-                  type="button"
-                  onClick={() => {
-                    changeAuthMode(m);
-                    setTest({ 'claude-code': IDLE_TEST, codex: IDLE_TEST, pi: IDLE_TEST });
-                  }}
-                  className={cn(
-                    'rounded-full border px-3 py-1.5 text-12 font-medium transition-colors',
-                    authMode === m
-                      ? 'border-[var(--settings-input-border-focus)] text-[var(--settings-section-title)]'
-                      : 'border-[var(--settings-input-border)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
-                  )}
-                  style={
-                    authMode === m ? { backgroundColor: 'var(--surface-elevated)' } : undefined
-                  }
-                >
-                  {t(`settings.providers.custom.authMode.${m}`)}
-                </button>
-              ))}
-            </div>
-            {authMode === 'oauth' && (
-              <>
-                <span className="text-12 leading-snug text-[var(--text-tertiary)]">
-                  {t('settings.providers.custom.authMode.oauthHelp')}
-                </span>
-                <div className="flex flex-col gap-[7px]">
-                  <FieldLabel>{t('settings.providers.custom.authMode.flowLabel')}</FieldLabel>
-                  <div className="flex gap-1.5">
-                    {(['authorization-code', 'device-code'] as const).map((flow) => (
-                      <button
-                        key={flow}
-                        aria-pressed={oauthFlow === flow}
-                        type="button"
-                        onClick={() => setOauthFlow(flow)}
-                        className={cn(
-                          'rounded-full border px-3 py-1.5 text-12 font-medium transition-colors',
-                          oauthFlow === flow
-                            ? 'border-[var(--settings-input-border-focus)] text-[var(--settings-section-title)]'
-                            : 'border-[var(--settings-input-border)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
-                        )}
-                        style={
-                          oauthFlow === flow
-                            ? { backgroundColor: 'var(--surface-elevated)' }
-                            : undefined
-                        }
-                      >
-                        {t(`settings.providers.custom.authMode.flow.${flow}`)}
-                      </button>
-                    ))}
-                  </div>
+          {!initial?.auth?.native && (
+            <>
+              <div className="flex flex-col gap-2">
+                <FieldLabel>{t('settings.providers.custom.authMode.label')}</FieldLabel>
+                <div className="flex flex-wrap gap-1.5">
+                  {(['apiKey', 'oauth', 'none'] as const).map((m) => (
+                    <button
+                      key={m}
+                      aria-pressed={authMode === m}
+                      type="button"
+                      onClick={() => {
+                        changeAuthMode(m);
+                        setTest({ 'claude-code': IDLE_TEST, codex: IDLE_TEST, pi: IDLE_TEST });
+                      }}
+                      className={cn(
+                        'rounded-full border px-3 py-1.5 text-12 font-medium transition-colors',
+                        authMode === m
+                          ? 'border-[var(--settings-input-border-focus)] text-[var(--settings-section-title)]'
+                          : 'border-[var(--settings-input-border)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
+                      )}
+                      style={
+                        authMode === m ? { backgroundColor: 'var(--surface-elevated)' } : undefined
+                      }
+                    >
+                      {t(`settings.providers.custom.authMode.${m}`)}
+                    </button>
+                  ))}
                 </div>
-                {(
-                  [
-                    [
-                      oauthFlow === 'device-code' ? 'deviceAuthorizationUrl' : 'authorizeUrl',
-                      oauthFlow === 'device-code'
-                        ? 'https://auth.example.com/oauth2/device'
-                        : 'https://auth.example.com/oauth2/authorize',
-                    ],
-                    ['tokenUrl', 'https://auth.example.com/oauth2/token'],
-                    ['clientId', 'client_id'],
-                    ['scopes', 'openid offline_access ...'],
-                  ] as const
-                ).map(([field, ph]) => (
-                  <div key={field} className="flex flex-col gap-[7px]">
+                {authMode === 'oauth' && (
+                  <>
+                    <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                      {t('settings.providers.custom.authMode.oauthHelp')}
+                    </span>
+                    <div className="flex flex-col gap-[7px]">
+                      <FieldLabel>{t('settings.providers.custom.authMode.flowLabel')}</FieldLabel>
+                      <div className="flex gap-1.5">
+                        {(['authorization-code', 'device-code'] as const).map((flow) => (
+                          <button
+                            key={flow}
+                            aria-pressed={oauthFlow === flow}
+                            type="button"
+                            onClick={() => setOauthFlow(flow)}
+                            className={cn(
+                              'rounded-full border px-3 py-1.5 text-12 font-medium transition-colors',
+                              oauthFlow === flow
+                                ? 'border-[var(--settings-input-border-focus)] text-[var(--settings-section-title)]'
+                                : 'border-[var(--settings-input-border)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
+                            )}
+                            style={
+                              oauthFlow === flow
+                                ? { backgroundColor: 'var(--surface-elevated)' }
+                                : undefined
+                            }
+                          >
+                            {t(`settings.providers.custom.authMode.flow.${flow}`)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    {(
+                      [
+                        [
+                          oauthFlow === 'device-code' ? 'deviceAuthorizationUrl' : 'authorizeUrl',
+                          oauthFlow === 'device-code'
+                            ? 'https://auth.example.com/oauth2/device'
+                            : 'https://auth.example.com/oauth2/authorize',
+                        ],
+                        ['tokenUrl', 'https://auth.example.com/oauth2/token'],
+                        ['clientId', 'client_id'],
+                        ['scopes', 'openid offline_access ...'],
+                      ] as const
+                    ).map(([field, ph]) => (
+                      <div key={field} className="flex flex-col gap-[7px]">
+                        <FormField
+                          id={fieldId(`oauth:${field}`)}
+                          label={t(`settings.providers.custom.authMode.fields.${field}`)}
+                          error={errorFor(`oauth:${field}`)}
+                          required
+                          reserveFeedback
+                        >
+                          {(control) => (
+                            <SettingsTextInput
+                              {...control}
+                              surface="ivory"
+                              value={oauthFields[field]}
+                              onChange={(v) => setOauthFields((prev) => ({ ...prev, [field]: v }))}
+                              placeholder={ph}
+                            />
+                          )}
+                        </FormField>
+                      </div>
+                    ))}
+                  </>
+                )}
+                {authMode === 'none' && (
+                  <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                    {t('settings.providers.custom.authMode.noneHelp')}
+                  </span>
+                )}
+              </div>
+
+              {/* DSH is a fixed Main-owned profile. It is a visible runtime tab,
+              but never inherits generic protocols or credentials. */}
+              {activeRuntimeTab === 'dsh' && (
+                <div
+                  className="order-2 flex flex-col gap-4 rounded-[12px] p-4"
+                  style={{
+                    backgroundColor: 'var(--surface)',
+                    border: '1px solid var(--settings-theme-card-border)',
+                  }}
+                >
+                  <div className="flex flex-col gap-1">
+                    <FieldLabel>{t('settings.providers.custom.dsh.label')}</FieldLabel>
+                    <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                      {t('settings.providers.custom.dsh.description')}
+                    </span>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <FieldLabel>{t('settings.providers.custom.dsh.protocol')}</FieldLabel>
+                    <div className="flex min-h-10 items-center rounded-[10px] border border-[var(--settings-input-border)] bg-[var(--surface-chip)] px-3 text-13 font-medium text-[var(--text-primary)]">
+                      {t('settings.providers.custom.dsh.protocolValue')}
+                    </div>
+                    <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                      {t('settings.providers.custom.dsh.protocolHelp')}
+                    </span>
+                  </div>
+                  <FormField
+                    id={fieldId('dsh:baseUrl')}
+                    label={t('settings.providers.custom.dsh.endpoint')}
+                    error={errorFor('dsh:baseUrl')}
+                    hint={t('settings.providers.custom.dsh.endpointHelp')}
+                    reserveFeedback
+                  >
+                    {(control) => (
+                      <SettingsTextInput
+                        {...control}
+                        surface="ivory"
+                        value={dsh.baseUrl}
+                        onChange={(baseUrl) => setDsh((current) => ({ ...current, baseUrl }))}
+                        placeholder={t('settings.providers.custom.dsh.endpointPlaceholder')}
+                      />
+                    )}
+                  </FormField>
+                  {authMode === 'apiKey' ? (
                     <FormField
-                      id={fieldId(`oauth:${field}`)}
-                      label={t(`settings.providers.custom.authMode.fields.${field}`)}
-                      error={errorFor(`oauth:${field}`)}
-                      required
+                      id={fieldId('dsh:apiKey')}
+                      label={t('settings.providers.custom.dsh.apiKey')}
+                      error={errorFor('dsh:apiKey')}
+                      hint={t('settings.providers.custom.dsh.apiKeyHelp')}
                       reserveFeedback
                     >
                       {(control) => (
                         <SettingsTextInput
                           {...control}
                           surface="ivory"
-                          value={oauthFields[field]}
-                          onChange={(v) => setOauthFields((prev) => ({ ...prev, [field]: v }))}
-                          placeholder={ph}
+                          value={dsh.apiKey}
+                          onChange={(apiKey) => setDsh((current) => ({ ...current, apiKey }))}
+                          placeholder={t('settings.providers.custom.dsh.apiKeyPlaceholder')}
+                          mono
+                          secret
+                          secretTipContentClassName="z-[10001]"
+                        />
+                      )}
+                    </FormField>
+                  ) : (
+                    <span className="text-12 leading-snug text-[var(--error-fg)]">
+                      {t('settings.providers.custom.dsh.authRequired')}
+                    </span>
+                  )}
+                  <div className="flex flex-col gap-1.5">
+                    <FieldLabel>{t('settings.providers.custom.dsh.runtimeChoices')}</FieldLabel>
+                    <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                      {t('settings.providers.custom.dsh.runtimeChoicesHelp')}
+                    </span>
+                  </div>
+                  <div
+                    className="flex flex-col gap-1.5 border-t border-[var(--settings-theme-card-border)] pt-3"
+                    aria-live="polite"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <FieldLabel>
+                        {t('settings.providers.custom.dsh.runtimeStatus.title')}
+                      </FieldLabel>
+                      {dshRuntimeStatus?.actions.canRetryRegistration && (
+                        <button
+                          type="button"
+                          onClick={() => void retryDshRuntimeRegistration()}
+                          disabled={dshRetrying}
+                          className="flex items-center gap-1 rounded-full px-2 py-1 text-12 font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--settings-section-title)] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {dshRetrying ? <Spinner size={13} /> : <RefreshCw size={13} />}
+                          {t('settings.providers.custom.dsh.runtimeStatus.retry')}
+                        </button>
+                      )}
+                    </div>
+                    {dshStatusLoading ? (
+                      <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                        {t('settings.providers.custom.dsh.runtimeStatus.loading')}
+                      </span>
+                    ) : (
+                      <>
+                        <span className="text-12 leading-snug text-[var(--text-secondary)]">
+                          {dshConfigurationStatusText}
+                        </span>
+                        {dshRuntimeStatus && (
+                          <>
+                            <span className="text-12 leading-snug text-[var(--text-secondary)]">
+                              {t(
+                                `settings.providers.custom.dsh.runtimeStatus.registration.${dshRuntimeStatus.registration}`,
+                              )}
+                            </span>
+                            {dshRuntimeStatus.actions.mustCloseActiveTasksBeforeReplacement &&
+                              dshRuntimeStatus.activeTaskCount > 0 && (
+                                <span className="text-12 leading-snug text-[var(--error-fg)]">
+                                  {t('settings.providers.custom.dsh.runtimeStatus.closeTasks', {
+                                    count: dshRuntimeStatus.activeTaskCount,
+                                  })}
+                                </span>
+                              )}
+                            <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                              {t('settings.providers.custom.dsh.runtimeStatus.evidence')}
+                            </span>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Runtime 分段 Tab：每个 runtime 各自维护允许的端点与凭证。 */}
+              <div className="order-1 flex flex-col gap-2">
+                <FieldLabel>{t('settings.providers.custom.fields.protocols')}</FieldLabel>
+                <div
+                  className="flex h-9 items-center gap-0.5 rounded-full p-[3px]"
+                  style={{ backgroundColor: 'var(--surface-chip)' }}
+                  role="tablist"
+                >
+                  {RUNTIME_TABS.map((a) => {
+                    const meta = RUNTIME_TAB_META[a];
+                    const Mark = meta.Mark;
+                    const active = activeRuntimeTab === a;
+                    const configured =
+                      a === 'dsh' ? dsh.baseUrl.trim().length > 0 : rt[a].baseUrl.trim().length > 0;
+                    return (
+                      <button
+                        key={a}
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        onClick={() => {
+                          setChildLayer(null);
+                          if (a === 'dsh') {
+                            setActiveRuntimeTab(a);
+                          } else {
+                            setActiveTab(a);
+                            setActiveRuntimeTab(a);
+                          }
+                        }}
+                        className={cn(
+                          'flex h-[26px] min-w-0 flex-1 items-center justify-center gap-1 rounded-full px-1.5 text-12 leading-none transition-colors',
+                          active ? 'font-medium' : 'font-normal',
+                        )}
+                        style={
+                          active
+                            ? {
+                                backgroundColor: 'var(--surface-elevated)',
+                                border: '1px solid var(--border-default)',
+                                color: 'var(--settings-section-title)',
+                              }
+                            : { color: 'var(--text-secondary)' }
+                        }
+                      >
+                        <Mark size={14} className="shrink-0" />
+                        <span className="min-w-0 truncate">{t(meta.labelKey)}</span>
+                        {configured && (
+                          <span
+                            className="h-1.5 w-1.5 shrink-0 rounded-full"
+                            style={{ backgroundColor: 'var(--remote-status-ready)' }}
+                          />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+                <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                  {activeRuntimeTab === 'dsh'
+                    ? t(RUNTIME_TAB_META.dsh.helpKey)
+                    : templateBound
+                      ? boundPreset
+                        ? presetDisplayName(boundPreset, i18n.language)
+                        : name
+                      : t(TAB_META[activeTab].helpKey)}
+                </span>
+              </div>
+
+              {/* 当前 Tab 的独立配置面板 */}
+              {activeRuntimeTab !== 'dsh' && (
+                <div
+                  className="order-3 flex flex-col gap-4 rounded-[12px] p-4"
+                  style={{
+                    backgroundColor: 'var(--surface)',
+                    border: '1px solid var(--settings-theme-card-border)',
+                  }}
+                >
+                  {!templateBound && (
+                    <div className="flex flex-col gap-[7px]">
+                      <FieldLabel>{t('settings.providers.custom.fields.wireProtocol')}</FieldLabel>
+                      <div className="flex flex-wrap gap-1.5">
+                        {CUSTOM_PROVIDER_CODEX_WIRE_PROTOCOLS.map((option) => (
+                          <button
+                            key={option.value}
+                            aria-pressed={f.wireProtocol === option.value}
+                            type="button"
+                            onClick={() => changeWireProtocol(activeTab, option.value)}
+                            className={cn(
+                              'rounded-full border px-3 py-1.5 text-12 font-medium transition-colors',
+                              f.wireProtocol === option.value
+                                ? 'border-[var(--settings-input-border-focus)] text-[var(--settings-section-title)]'
+                                : 'border-[var(--settings-input-border)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
+                            )}
+                            style={
+                              f.wireProtocol === option.value
+                                ? { backgroundColor: 'var(--surface-elevated)' }
+                                : undefined
+                            }
+                          >
+                            {t(
+                              activeTab !== 'codex' && option.value !== 'google-generative-ai'
+                                ? `settings.providers.custom.wireProtocol.pi${
+                                    option.value === 'anthropic-messages'
+                                      ? 'Anthropic'
+                                      : option.value === 'openai-responses'
+                                        ? 'Responses'
+                                        : 'Chat'
+                                  }`
+                                : option.labelKey,
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                      {activeTab !== 'claude-code' && (
+                        <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                          {t(
+                            activeTab === 'pi' && f.wireProtocol !== 'google-generative-ai'
+                              ? `settings.providers.custom.wireProtocol.pi${
+                                  f.wireProtocol === 'anthropic-messages'
+                                    ? 'AnthropicHelp'
+                                    : f.wireProtocol === 'openai-chat'
+                                      ? 'ChatHelp'
+                                      : 'ResponsesHelp'
+                                }`
+                              : customProviderCodexWireProtocolOption(f.wireProtocol).helpKey,
+                          )}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 基础 URL */}
+                  <div className="flex flex-col gap-[7px]">
+                    <FormField
+                      id={fieldId(`${activeTab}:baseUrl`)}
+                      label={t('settings.providers.custom.fields.baseUrl')}
+                      error={errorFor(`${activeTab}:baseUrl`)}
+                      labelAction={
+                        !templateBound && (
+                          <button
+                            ref={runtimeFillTriggerRef}
+                            type="button"
+                            onClick={openRuntimeFill}
+                            className="shrink-0 rounded-full px-1 py-0.5 text-11 font-medium text-[var(--text-tertiary)] transition-colors hover:text-[var(--settings-section-title)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                          >
+                            {t('settings.providers.custom.runtimeFill.action')}
+                          </button>
+                        )
+                      }
+                      reserveFeedback
+                    >
+                      {(control) => (
+                        <SettingsTextInput
+                          {...control}
+                          surface="ivory"
+                          value={displayedBaseUrl}
+                          readOnly={fixedTemplateEndpoint}
+                          onChange={(v) => {
+                            if (!fixedTemplateEndpoint)
+                              patch(activeTab, (x) => ({ ...x, baseUrl: v }));
+                          }}
+                          placeholder={t('settings.providers.custom.fields.baseUrlPlaceholder')}
                         />
                       )}
                     </FormField>
                   </div>
-                ))}
-              </>
-            )}
-            {authMode === 'none' && (
-              <span className="text-12 leading-snug text-[var(--text-tertiary)]">
-                {t('settings.providers.custom.authMode.noneHelp')}
-              </span>
-            )}
-          </div>
 
-          {/* Runtime 分段 Tab：Claude Code 与 Codex 各自维护端点、协议、模型与凭证。 */}
-          <div className="flex flex-col gap-2">
-            <FieldLabel>{t('settings.providers.custom.fields.protocols')}</FieldLabel>
-            <div
-              className="flex h-9 items-center gap-0.5 rounded-full p-[3px]"
-              style={{ backgroundColor: 'var(--surface-chip)' }}
-              role="tablist"
-            >
-              {VISIBLE_AGENTS.map((a) => {
-                const meta = TAB_META[a];
-                const Mark = meta.Mark;
-                const active = activeTab === a;
-                const configured = rt[a].baseUrl.trim().length > 0;
-                return (
-                  <button
-                    key={a}
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    onClick={() => {
-                      setChildLayer(null);
-                      setActiveTab(a);
-                    }}
-                    className={cn(
-                      'flex h-[26px] flex-1 items-center justify-center gap-1.5 rounded-full px-2 text-13 leading-none transition-colors',
-                      active ? 'font-medium' : 'font-normal',
+                  {/* 精确推理路径：给非标准兼容端点使用；留空仍按所选协议推导。 */}
+                  {!templateBound &&
+                    activeTab !== 'pi' &&
+                    f.wireProtocol !== 'google-generative-ai' && (
+                      <div className="flex flex-col gap-[7px]">
+                        <FormField
+                          id={fieldId(`${activeTab}:requestPath`)}
+                          label={t('settings.providers.custom.fields.requestPath')}
+                          error={errorFor(`${activeTab}:requestPath`)}
+                          hint={t('settings.providers.custom.fields.requestPathHelp')}
+                          reserveFeedback
+                        >
+                          {(control) => (
+                            <SettingsTextInput
+                              {...control}
+                              surface="ivory"
+                              value={f.requestPath}
+                              onChange={(v) => patch(activeTab, (x) => ({ ...x, requestPath: v }))}
+                              placeholder={
+                                f.wireProtocol === 'anthropic-messages'
+                                  ? '/v1/messages'
+                                  : customProviderCodexWireProtocolOption(f.wireProtocol)
+                                      .defaultRequestPath
+                              }
+                            />
+                          )}
+                        </FormField>
+                      </div>
                     )}
-                    style={
-                      active
-                        ? {
-                            backgroundColor: 'var(--surface-elevated)',
-                            border: '1px solid var(--border-default)',
-                            color: 'var(--settings-section-title)',
-                          }
-                        : { color: 'var(--text-secondary)' }
-                    }
-                  >
-                    <Mark size={14} className="shrink-0" />
-                    <span className="whitespace-nowrap">{t(meta.labelKey)}</span>
-                    {configured && (
-                      <span
-                        className="h-1.5 w-1.5 shrink-0 rounded-full"
-                        style={{ backgroundColor: 'var(--remote-status-ready)' }}
-                      />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-            <span className="text-12 leading-snug text-[var(--text-tertiary)]">
-              {templateBound ? (boundPreset ? presetDisplayName(boundPreset, i18n.language) : name) : t(TAB_META[activeTab].helpKey)}
-            </span>
-          </div>
 
-          {/* 当前 Tab 的独立配置面板 */}
-          <div
-            className="flex flex-col gap-4 rounded-[12px] p-4"
-            style={{
-              backgroundColor: 'var(--surface)',
-              border: '1px solid var(--settings-theme-card-border)',
-            }}
-          >
-            {!templateBound && (
-              <div className="flex flex-col gap-[7px]">
-                <FieldLabel>{t('settings.providers.custom.fields.wireProtocol')}</FieldLabel>
-                <div className="flex flex-wrap gap-1.5">
-                  {CUSTOM_PROVIDER_CODEX_WIRE_PROTOCOLS.map((option) => (
-                    <button
-                      key={option.value}
-                      aria-pressed={f.wireProtocol === option.value}
-                      type="button"
-                      onClick={() => changeWireProtocol(activeTab, option.value)}
-                      className={cn(
-                        'rounded-full border px-3 py-1.5 text-12 font-medium transition-colors',
-                        f.wireProtocol === option.value
-                          ? 'border-[var(--settings-input-border-focus)] text-[var(--settings-section-title)]'
-                          : 'border-[var(--settings-input-border)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
-                      )}
-                      style={
-                        f.wireProtocol === option.value
-                          ? { backgroundColor: 'var(--surface-elevated)' }
-                          : undefined
-                      }
-                    >
-                      {t(
-                        activeTab !== 'codex' && option.value !== 'google-generative-ai'
-                          ? `settings.providers.custom.wireProtocol.pi${
-                              option.value === 'anthropic-messages'
-                                ? 'Anthropic'
-                                : option.value === 'openai-responses'
-                                  ? 'Responses'
-                                  : 'Chat'
-                            }`
-                          : option.labelKey,
-                      )}
-                    </button>
-                  ))}
-                </div>
-                {activeTab !== 'claude-code' && (
-                <span className="text-12 leading-snug text-[var(--text-tertiary)]">
-                  {t(
-                    activeTab === 'pi' && f.wireProtocol !== 'google-generative-ai'
-                      ? `settings.providers.custom.wireProtocol.pi${
-                          f.wireProtocol === 'anthropic-messages'
-                            ? 'AnthropicHelp'
-                            : f.wireProtocol === 'openai-chat'
-                              ? 'ChatHelp'
-                              : 'ResponsesHelp'
-                        }`
-                      : customProviderCodexWireProtocolOption(f.wireProtocol).helpKey,
-                  )}
-                </span>
-                )}
-              </div>
-            )}
-
-            {/* 基础 URL */}
-            <div className="flex flex-col gap-[7px]">
-              <FormField
-                id={fieldId(`${activeTab}:baseUrl`)}
-                label={t('settings.providers.custom.fields.baseUrl')}
-                error={errorFor(`${activeTab}:baseUrl`)}
-                labelAction={!templateBound && (
-                  <button
-                    ref={runtimeFillTriggerRef}
-                    type="button"
-                    onClick={openRuntimeFill}
-                    className="shrink-0 rounded-full px-1 py-0.5 text-11 font-medium text-[var(--text-tertiary)] transition-colors hover:text-[var(--settings-section-title)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
-                  >
-                    {t('settings.providers.custom.runtimeFill.action')}
-                  </button>
-                )}
-                reserveFeedback
-              >
-                {(control) => (
-                  <SettingsTextInput
-                    {...control}
-                    surface="ivory"
-                    value={displayedBaseUrl}
-                    readOnly={fixedTemplateEndpoint}
-                    onChange={(v) => {
-                      if (!fixedTemplateEndpoint) patch(activeTab, (x) => ({ ...x, baseUrl: v }));
-                    }}
-                    placeholder={t('settings.providers.custom.fields.baseUrlPlaceholder')}
-                  />
-                )}
-              </FormField>
-            </div>
-
-            {/* 精确推理路径：给非标准兼容端点使用；留空仍按所选协议推导。 */}
-            {!templateBound && activeTab !== 'pi' && f.wireProtocol !== 'google-generative-ai' && (
-              <div className="flex flex-col gap-[7px]">
-                <FormField
-                  id={fieldId(`${activeTab}:requestPath`)}
-                  label={t('settings.providers.custom.fields.requestPath')}
-                  error={errorFor(`${activeTab}:requestPath`)}
-                  hint={t('settings.providers.custom.fields.requestPathHelp')}
-                  reserveFeedback
-                >
-                  {(control) => (
-                    <SettingsTextInput
-                      {...control}
-                      surface="ivory"
-                      value={f.requestPath}
-                      onChange={(v) => patch(activeTab, (x) => ({ ...x, requestPath: v }))}
-                      placeholder={
-                        f.wireProtocol === 'anthropic-messages'
-                          ? '/v1/messages'
-                          : customProviderCodexWireProtocolOption(f.wireProtocol).defaultRequestPath
-                      }
-                    />
-                  )}
-                </FormField>
-              </div>
-            )}
-
-            {/* API 密钥（OAuth 形态隐藏——鉴权走 Runner 的 Bearer，不收集 key） */}
-            {authMode === 'apiKey' && (
-              <div className="flex flex-col gap-[7px]">
-                <FormField
-                  id={fieldId(`${activeTab}:apiKey`)}
-                  label={t('settings.providers.custom.fields.apiKey')}
-                  error={errorFor(`${activeTab}:apiKey`)}
-                  hint={t('settings.providers.custom.fields.apiKeyHelp')}
-                  labelAction={
-                    activeKeyCanRemainSaved &&
-                    f.apiKey.trim() && (
-                      <span
-                        className="flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium"
-                        style={{
-                          backgroundColor: 'var(--settings-btn-secondary-bg)',
-                          color: 'var(--settings-section-desc)',
-                        }}
+                  {/* API 密钥（OAuth 形态隐藏——鉴权走 Runner 的 Bearer，不收集 key） */}
+                  {authMode === 'apiKey' && (
+                    <div className="flex flex-col gap-[7px]">
+                      <FormField
+                        id={fieldId(`${activeTab}:apiKey`)}
+                        label={t('settings.providers.custom.fields.apiKey')}
+                        error={errorFor(`${activeTab}:apiKey`)}
+                        hint={t('settings.providers.custom.fields.apiKeyHelp')}
+                        labelAction={
+                          activeKeyCanRemainSaved &&
+                          f.apiKey.trim() && (
+                            <span
+                              className="flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium"
+                              style={{
+                                backgroundColor: 'var(--settings-btn-secondary-bg)',
+                                color: 'var(--settings-section-desc)',
+                              }}
+                            >
+                              <Check size={11} strokeWidth={2.5} />
+                              {t('settings.providers.custom.fields.apiKeySaved')}
+                            </span>
+                          )
+                        }
                       >
-                        <Check size={11} strokeWidth={2.5} />
-                        {t('settings.providers.custom.fields.apiKeySaved')}
-                      </span>
-                    )
-                  }
-                >
-                  {(control) => (
-                    <SettingsTextInput
-                      {...control}
-                      key={activeTab}
-                      surface="ivory"
-                      value={f.apiKey}
-                      onChange={(v) => {
-                        keyEditRevisionRef.current[activeTab] += 1;
-                        patch(activeTab, (x) => ({ ...x, apiKey: v }));
-                      }}
-                      placeholder={keyPlaceholder}
-                      mono
-                      secret
-                      secretTipContentClassName="z-[10001]"
-                    />
+                        {(control) => (
+                          <SettingsTextInput
+                            {...control}
+                            key={activeTab}
+                            surface="ivory"
+                            value={f.apiKey}
+                            onChange={(v) => {
+                              keyEditRevisionRef.current[activeTab] += 1;
+                              patch(activeTab, (x) => ({ ...x, apiKey: v }));
+                            }}
+                            placeholder={keyPlaceholder}
+                            mono
+                            secret
+                            secretTipContentClassName="z-[10001]"
+                          />
+                        )}
+                      </FormField>
+                    </div>
                   )}
-                </FormField>
-              </div>
-            )}
 
-            {/* OAuth 形态:模型清单授权成功后自动发现（与内置订阅统一）,模型 / 请求头
+                  {/* OAuth 形态:模型清单授权成功后自动发现（与内置订阅统一）,模型 / 请求头
                 收进默认折叠的「高级配置」——普通用户不需要看到这些字段。 */}
-            {authMode === 'oauth' && (
-              <div className="flex flex-col gap-1.5">
-                <span className="text-12 leading-snug text-[var(--text-tertiary)]">
-                  {t('settings.providers.custom.authMode.modelsAutoNote')}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setShowAdvanced((v) => !v)}
-                  className="flex items-center gap-1 self-start py-0.5 text-13 font-medium text-[var(--settings-section-title)]"
-                >
-                  <ChevronDown
-                    size={14}
-                    className={cn('transition-transform', showAdvanced && 'rotate-180')}
-                  />
-                  {t('settings.providers.custom.advanced.label')}
-                </button>
-              </div>
-            )}
-
-            {(authMode !== 'oauth' || showAdvanced) && (
-              <>
-                <div className="flex flex-col gap-2 text-13 text-[var(--text-secondary)]">
-                  <span>{t('settings.providers.connection.modelCount', { count: f.models.filter((model) => model.id.trim()).length })}</span>
-                  <span className="text-12">{t('settings.providers.connection.modelsAutomatic')}</span>
-                  <FormField id={fieldId(`${activeTab}:manualModel`)} label={t('settings.providers.connection.manualModel')} error={errorFor(`${activeTab}:manualModel`)}>
-                    {(control) => <SettingsTextInput {...control} surface="ivory" value={manualModel}
-                      onChange={setManualModel} />}
-                  </FormField>
-                  <Button variant="secondary" disabled={!manualModel.trim()} onClick={() => {
-                    const ids = [...new Set(manualModel.split(/[,\n]/).map((id) => id.trim()).filter(Boolean))];
-                    patch(activeTab, (runtime) => ({ ...runtime, models: [
-                      ...runtime.models.filter((model) => model.id.trim()),
-                      ...ids.filter((id) => !runtime.models.some((model) => model.id === id)).map((id) => ({ id, name: id })),
-                    ] }));
-                    setManualModel('');
-                    setFieldError(null);
-                  }}>{t('settings.providers.custom.fields.addModel')}</Button>
-                </div>
-
-                {/* 请求头（可选） */}
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-2">
-                    <FieldLabel>{t('settings.providers.custom.fields.headers')}</FieldLabel>
-                    {/* 已存密文头时给明确徽标 —— 明文不回读进 renderer,无徽标会让人误以为没存上。 */}
-                    {activeHeadersCanRemainSaved && (
-                      <span
-                        className="flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium"
-                        style={{
-                          backgroundColor: 'var(--settings-btn-secondary-bg)',
-                          color: 'var(--settings-section-desc)',
-                        }}
-                      >
-                        <Check size={11} strokeWidth={2.5} />
-                        {t('settings.providers.custom.runtimeFill.values.configured')}
+                  {authMode === 'oauth' && (
+                    <div className="flex flex-col gap-1.5">
+                      <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                        {t('settings.providers.custom.authMode.modelsAutoNote')}
                       </span>
-                    )}
-                  </div>
-                  {f.headers.map((h, i) => (
-                    <div key={`${activeTab}:${rowId(h)}`} className="flex items-center gap-2">
-                      <div className="min-w-0 flex-1">
-                        <FormField
-                          id={fieldId(`${activeTab}:header:${rowId(h)}:name`)}
-                          label={`${t('settings.providers.custom.fields.headerNamePlaceholder')} ${i + 1}`}
-                          error={errorFor(`${activeTab}:header:${rowId(h)}:name`)}
-                          hideLabel
-                        >
-                          {(control) => (
-                            <SettingsTextInput
-                              {...control}
-                              surface="ivory"
-                              value={h.name}
-                              // nameExplicit 同上:与 main #4108 的显式命名语义合并保留。
-                              onChange={(v) =>
-                                patch(activeTab, (x) => ({
-                                  ...x,
-                                  headers: x.headers.map((y, j) =>
-                                    j === i ? { ...y, name: v, nameExplicit: true } : y,
-                                  ),
-                                }))
-                              }
-                              placeholder={t(
-                                'settings.providers.custom.fields.headerNamePlaceholder',
-                              )}
-                            />
-                          )}
-                        </FormField>
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <FormField
-                          id={fieldId(`${activeTab}:header:${rowId(h)}:value`)}
-                          label={`${t('settings.providers.custom.fields.headerValuePlaceholder')} ${i + 1}`}
-                          error={errorFor(`${activeTab}:header:${rowId(h)}:value`)}
-                          hideLabel
-                        >
-                          {(control) => (
-                            <SettingsTextInput
-                              {...control}
-                              surface="ivory"
-                              value={h.value}
-                              onChange={(v) =>
-                                patch(activeTab, (x) => ({
-                                  ...x,
-                                  headers: x.headers.map((y, j) =>
-                                    j === i ? { ...y, value: v } : y,
-                                  ),
-                                }))
-                              }
-                              placeholder={t(
-                                'settings.providers.custom.fields.headerValuePlaceholder',
-                              )}
-                            />
-                          )}
-                        </FormField>
-                      </div>
-                      <Tip
-                        text={t('settings.providers.custom.fields.removeRow')}
-                        contentClassName="z-[10001]"
+                      <button
+                        type="button"
+                        onClick={() => setShowAdvanced((v) => !v)}
+                        className="flex items-center gap-1 self-start py-0.5 text-13 font-medium text-[var(--settings-section-title)]"
                       >
+                        <ChevronDown
+                          size={14}
+                          className={cn('transition-transform', showAdvanced && 'rotate-180')}
+                        />
+                        {t('settings.providers.custom.advanced.label')}
+                      </button>
+                    </div>
+                  )}
+
+                  {(authMode !== 'oauth' || showAdvanced) && (
+                    <>
+                      <div className="flex flex-col gap-2 text-13 text-[var(--text-secondary)]">
+                        <span>
+                          {t('settings.providers.connection.modelCount', {
+                            count: f.models.filter((model) => model.id.trim()).length,
+                          })}
+                        </span>
+                        <span className="text-12">
+                          {t('settings.providers.connection.modelsAutomatic')}
+                        </span>
+                        <FormField
+                          id={fieldId(`${activeTab}:manualModel`)}
+                          label={t('settings.providers.connection.manualModel')}
+                          error={errorFor(`${activeTab}:manualModel`)}
+                        >
+                          {(control) => (
+                            <SettingsTextInput
+                              {...control}
+                              surface="ivory"
+                              value={manualModel}
+                              onChange={setManualModel}
+                            />
+                          )}
+                        </FormField>
                         <Button
                           variant="secondary"
-                          size="lg"
-                          type="button"
+                          disabled={!manualModel.trim()}
                           onClick={() => {
-                            const next = f.headers[i + 1] ?? f.headers[i - 1];
-                            const nextId = fieldId(
-                              next
-                                ? `${activeTab}:header:${rowId(next)}:name`
-                                : `${activeTab}:add-header`,
-                            );
-                            patch(activeTab, (x) => ({
-                              ...x,
-                              headers: x.headers.filter((_, j) => j !== i),
+                            const ids = [
+                              ...new Set(
+                                manualModel
+                                  .split(/[,\n]/)
+                                  .map((id) => id.trim())
+                                  .filter(Boolean),
+                              ),
+                            ];
+                            patch(activeTab, (runtime) => ({
+                              ...runtime,
+                              models: [
+                                ...runtime.models.filter((model) => model.id.trim()),
+                                ...ids
+                                  .filter((id) => !runtime.models.some((model) => model.id === id))
+                                  .map((id) => ({ id, name: id })),
+                              ],
                             }));
+                            setManualModel('');
+                            setFieldError(null);
+                          }}
+                        >
+                          {t('settings.providers.custom.fields.addModel')}
+                        </Button>
+                      </div>
+
+                      {/* 请求头（可选） */}
+                      <div className="flex flex-col gap-2">
+                        <div className="flex items-center gap-2">
+                          <FieldLabel>{t('settings.providers.custom.fields.headers')}</FieldLabel>
+                          {/* 已存密文头时给明确徽标 —— 明文不回读进 renderer,无徽标会让人误以为没存上。 */}
+                          {activeHeadersCanRemainSaved && (
+                            <span
+                              className="flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium"
+                              style={{
+                                backgroundColor: 'var(--settings-btn-secondary-bg)',
+                                color: 'var(--settings-section-desc)',
+                              }}
+                            >
+                              <Check size={11} strokeWidth={2.5} />
+                              {t('settings.providers.custom.runtimeFill.values.configured')}
+                            </span>
+                          )}
+                        </div>
+                        {f.headers.map((h, i) => (
+                          <div key={`${activeTab}:${rowId(h)}`} className="flex items-center gap-2">
+                            <div className="min-w-0 flex-1">
+                              <FormField
+                                id={fieldId(`${activeTab}:header:${rowId(h)}:name`)}
+                                label={`${t('settings.providers.custom.fields.headerNamePlaceholder')} ${i + 1}`}
+                                error={errorFor(`${activeTab}:header:${rowId(h)}:name`)}
+                                hideLabel
+                              >
+                                {(control) => (
+                                  <SettingsTextInput
+                                    {...control}
+                                    surface="ivory"
+                                    value={h.name}
+                                    // nameExplicit 同上:与 main #4108 的显式命名语义合并保留。
+                                    onChange={(v) =>
+                                      patch(activeTab, (x) => ({
+                                        ...x,
+                                        headers: x.headers.map((y, j) =>
+                                          j === i ? { ...y, name: v, nameExplicit: true } : y,
+                                        ),
+                                      }))
+                                    }
+                                    placeholder={t(
+                                      'settings.providers.custom.fields.headerNamePlaceholder',
+                                    )}
+                                  />
+                                )}
+                              </FormField>
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <FormField
+                                id={fieldId(`${activeTab}:header:${rowId(h)}:value`)}
+                                label={`${t('settings.providers.custom.fields.headerValuePlaceholder')} ${i + 1}`}
+                                error={errorFor(`${activeTab}:header:${rowId(h)}:value`)}
+                                hideLabel
+                              >
+                                {(control) => (
+                                  <SettingsTextInput
+                                    {...control}
+                                    surface="ivory"
+                                    value={h.value}
+                                    onChange={(v) =>
+                                      patch(activeTab, (x) => ({
+                                        ...x,
+                                        headers: x.headers.map((y, j) =>
+                                          j === i ? { ...y, value: v } : y,
+                                        ),
+                                      }))
+                                    }
+                                    placeholder={t(
+                                      'settings.providers.custom.fields.headerValuePlaceholder',
+                                    )}
+                                  />
+                                )}
+                              </FormField>
+                            </div>
+                            <Tip
+                              text={t('settings.providers.custom.fields.removeRow')}
+                              contentClassName="z-[10001]"
+                            >
+                              <Button
+                                variant="secondary"
+                                size="lg"
+                                type="button"
+                                onClick={() => {
+                                  const next = f.headers[i + 1] ?? f.headers[i - 1];
+                                  const nextId = fieldId(
+                                    next
+                                      ? `${activeTab}:header:${rowId(next)}:name`
+                                      : `${activeTab}:add-header`,
+                                  );
+                                  patch(activeTab, (x) => ({
+                                    ...x,
+                                    headers: x.headers.filter((_, j) => j !== i),
+                                  }));
+                                  requestAnimationFrame(() =>
+                                    document.getElementById(nextId)?.focus(),
+                                  );
+                                }}
+                                className="w-9 px-0"
+                                aria-label={t('settings.providers.custom.fields.removeRow')}
+                              >
+                                <Trash2 size={16} />
+                              </Button>
+                            </Tip>
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          id={fieldId(`${activeTab}:add-header`)}
+                          onClick={() => {
+                            const row = { name: '', value: '' };
+                            const nextId = fieldId(`${activeTab}:header:${rowId(row)}:name`);
+                            patch(activeTab, (x) => ({ ...x, headers: [...x.headers, row] }));
                             requestAnimationFrame(() => document.getElementById(nextId)?.focus());
                           }}
-                          className="w-9 px-0"
-                          aria-label={t('settings.providers.custom.fields.removeRow')}
+                          className="flex items-center gap-1.5 self-start py-0.5 text-13 font-medium text-[var(--settings-section-title)]"
                         >
-                          <Trash2 size={16} />
-                        </Button>
-                      </Tip>
-                    </div>
-                  ))}
-                  <button
-                    type="button"
-                    id={fieldId(`${activeTab}:add-header`)}
-                    onClick={() => {
-                      const row = { name: '', value: '' };
-                      const nextId = fieldId(`${activeTab}:header:${rowId(row)}:name`);
-                      patch(activeTab, (x) => ({ ...x, headers: [...x.headers, row] }));
-                      requestAnimationFrame(() => document.getElementById(nextId)?.focus());
-                    }}
-                    className="flex items-center gap-1.5 self-start py-0.5 text-13 font-medium text-[var(--settings-section-title)]"
-                  >
-                    <Plus size={14} className="text-[var(--settings-section-desc)]" />
-                    {t('settings.providers.custom.fields.addHeader')}
-                  </button>
-                </div>
-
-                {/* Codex Responses Provider 级能力。放在自定义请求头之后，默认收起；
-                    同一张说明卡片支持 hover/focus 临时预览和 click/tap 固定。 */}
-                {canShowImageGenerationAdvanced && (
-                  <div className="flex flex-col gap-2 border-t border-[var(--border-subtle)] pt-3">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (showImageGenerationAdvanced) resetImageGenerationHelp();
-                        setShowImageGenerationAdvanced((open) => !open);
-                      }}
-                      aria-expanded={showImageGenerationAdvanced}
-                      aria-controls="custom-provider-image-generation-advanced"
-                      className="group flex w-full items-center justify-between gap-3 text-left"
-                    >
-                      <span className="text-13 font-medium text-[var(--settings-section-title)]">
-                        {t('settings.providers.custom.fields.runtimeAdvanced')}
-                      </span>
-                      <ChevronDown
-                        size={14}
-                        aria-hidden
-                        className={cn(
-                          'shrink-0 text-[var(--text-tertiary)] transition-transform group-hover:text-[var(--text-primary)]',
-                          showImageGenerationAdvanced && 'rotate-180',
-                        )}
-                      />
-                    </button>
-                    {showImageGenerationAdvanced && (
-                      <div
-                        id="custom-provider-image-generation-advanced"
-                        className="flex min-h-11 items-center justify-between gap-3 rounded-lg bg-[var(--surface-elevated)] px-3 py-2.5"
-                      >
-                        <label className="flex min-w-0 cursor-pointer items-center gap-2 text-[var(--settings-section-desc)]">
-                          <input
-                            type="checkbox"
-                            checked={f.supportsImageGeneration}
-                            onChange={(event) => {
-                              const supportsImageGeneration = event.currentTarget.checked;
-                              patch('codex', (runtime) => ({
-                                ...runtime,
-                                supportsImageGeneration,
-                              }));
-                            }}
-                            className="h-4 w-4 shrink-0 cursor-pointer accent-[var(--settings-menu-text-selected)]"
-                          />
-                          <span className="text-12 font-medium leading-5 text-[var(--settings-section-sublabel)]">
-                            {t('settings.providers.custom.fields.runtimeSupportsImageGeneration')}
-                          </span>
-                        </label>
-                        <Popover
-                          open={showImageGenerationHelp}
-                          onOpenChange={(open) => {
-                            if (!open) closeImageGenerationHelp();
-                          }}
-                        >
-                          <PopoverAnchor asChild>
-                            <button
-                              ref={imageGenerationHelpTriggerRef}
-                              type="button"
-                              aria-label={t(
-                                'settings.providers.custom.fields.runtimeSupportsImageGenerationHelpLabel',
-                              )}
-                              aria-expanded={showImageGenerationHelp}
-                              aria-controls="custom-provider-image-generation-help-card"
-                              onPointerEnter={() => {
-                                imageGenerationHelpPointerInsideRef.current = true;
-                                if (imageGenerationHelpPointerPreviewSuppressedRef.current) return;
-                                previewImageGenerationHelp();
-                              }}
-                              onPointerLeave={() => {
-                                imageGenerationHelpPointerInsideRef.current = false;
-                                scheduleImageGenerationHelpPointerLeave();
-                              }}
-                              onFocus={() => {
-                                if (imageGenerationHelpFocusPreviewSuppressedRef.current) return;
-                                setImageGenerationHelpFocused(true);
-                              }}
-                              onBlur={() => {
-                                imageGenerationHelpFocusPreviewSuppressedRef.current = false;
-                                setImageGenerationHelpFocused(false);
-                              }}
-                              onClick={() => {
-                                if (imageGenerationHelpPinned) {
-                                  dismissImageGenerationHelp(false);
-                                  return;
-                                }
-                                cancelImageGenerationHelpPointerLeave();
-                                imageGenerationHelpFocusPreviewSuppressedRef.current = false;
-                                imageGenerationHelpPointerPreviewSuppressedRef.current = false;
-                                setImageGenerationHelpPinned(true);
-                              }}
-                              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
-                            >
-                              <CircleHelp size={15} aria-hidden />
-                            </button>
-                          </PopoverAnchor>
-                          <PopoverContent
-                            id="custom-provider-image-generation-help-card"
-                            side="top"
-                            align="end"
-                            sideOffset={8}
-                            collisionPadding={12}
-                            role={imageGenerationHelpPinned ? 'dialog' : 'tooltip'}
-                            aria-label={t(
-                              'settings.providers.custom.fields.runtimeSupportsImageGenerationHelpLabel',
-                            )}
-                            onOpenAutoFocus={(event) => event.preventDefault()}
-                            onCloseAutoFocus={(event) => event.preventDefault()}
-                            onPointerEnter={() => {
-                              imageGenerationHelpPointerInsideRef.current = true;
-                              if (imageGenerationHelpPointerPreviewSuppressedRef.current) return;
-                              previewImageGenerationHelp();
-                            }}
-                            onPointerLeave={() => {
-                              imageGenerationHelpPointerInsideRef.current = false;
-                              scheduleImageGenerationHelpPointerLeave();
-                            }}
-                            onPointerDownOutside={(event) => {
-                              if (
-                                imageGenerationHelpTriggerRef.current?.contains(
-                                  event.target as Node,
-                                )
-                              ) {
-                                event.preventDefault();
-                              }
-                            }}
-                            onFocusOutside={(event) => {
-                              if (imageGenerationHelpPinned) event.preventDefault();
-                            }}
-                            className="z-[10001] w-72 max-w-[calc(100vw-2rem)] rounded-xl border-[var(--border-default)] bg-[var(--surface-elevated)] p-3 text-12 text-[var(--text-secondary)]"
-                          >
-                            {renderImageGenerationHelpContent()}
-                          </PopoverContent>
-                        </Popover>
+                          <Plus size={14} className="text-[var(--settings-section-desc)]" />
+                          {t('settings.providers.custom.fields.addHeader')}
+                        </button>
                       </div>
-                    )}
-                  </div>
-                )}
-              </>
-            )}
 
-            {/* 测试连接：用当前 Tab 表单值发最小探测请求（与真实会话同路由口径，未保存也能测）。
+                      {/* Codex Responses Provider 级能力。放在自定义请求头之后，默认收起；
+                    同一张说明卡片支持 hover/focus 临时预览和 click/tap 固定。 */}
+                      {canShowImageGenerationAdvanced && (
+                        <div className="flex flex-col gap-2 border-t border-[var(--border-subtle)] pt-3">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (showImageGenerationAdvanced) resetImageGenerationHelp();
+                              setShowImageGenerationAdvanced((open) => !open);
+                            }}
+                            aria-expanded={showImageGenerationAdvanced}
+                            aria-controls="custom-provider-image-generation-advanced"
+                            className="group flex w-full items-center justify-between gap-3 text-left"
+                          >
+                            <span className="text-13 font-medium text-[var(--settings-section-title)]">
+                              {t('settings.providers.custom.fields.runtimeAdvanced')}
+                            </span>
+                            <ChevronDown
+                              size={14}
+                              aria-hidden
+                              className={cn(
+                                'shrink-0 text-[var(--text-tertiary)] transition-transform group-hover:text-[var(--text-primary)]',
+                                showImageGenerationAdvanced && 'rotate-180',
+                              )}
+                            />
+                          </button>
+                          {showImageGenerationAdvanced && (
+                            <div
+                              id="custom-provider-image-generation-advanced"
+                              className="flex min-h-11 items-center justify-between gap-3 rounded-lg bg-[var(--surface-elevated)] px-3 py-2.5"
+                            >
+                              <label className="flex min-w-0 cursor-pointer items-center gap-2 text-[var(--settings-section-desc)]">
+                                <input
+                                  type="checkbox"
+                                  checked={f.supportsImageGeneration}
+                                  onChange={(event) => {
+                                    const supportsImageGeneration = event.currentTarget.checked;
+                                    patch('codex', (runtime) => ({
+                                      ...runtime,
+                                      supportsImageGeneration,
+                                    }));
+                                  }}
+                                  className="h-4 w-4 shrink-0 cursor-pointer accent-[var(--settings-menu-text-selected)]"
+                                />
+                                <span className="text-12 font-medium leading-5 text-[var(--settings-section-sublabel)]">
+                                  {t(
+                                    'settings.providers.custom.fields.runtimeSupportsImageGeneration',
+                                  )}
+                                </span>
+                              </label>
+                              <Popover
+                                open={showImageGenerationHelp}
+                                onOpenChange={(open) => {
+                                  if (!open) closeImageGenerationHelp();
+                                }}
+                              >
+                                <PopoverAnchor asChild>
+                                  <button
+                                    ref={imageGenerationHelpTriggerRef}
+                                    type="button"
+                                    aria-label={t(
+                                      'settings.providers.custom.fields.runtimeSupportsImageGenerationHelpLabel',
+                                    )}
+                                    aria-expanded={showImageGenerationHelp}
+                                    aria-controls="custom-provider-image-generation-help-card"
+                                    onPointerEnter={() => {
+                                      imageGenerationHelpPointerInsideRef.current = true;
+                                      if (imageGenerationHelpPointerPreviewSuppressedRef.current)
+                                        return;
+                                      previewImageGenerationHelp();
+                                    }}
+                                    onPointerLeave={() => {
+                                      imageGenerationHelpPointerInsideRef.current = false;
+                                      scheduleImageGenerationHelpPointerLeave();
+                                    }}
+                                    onFocus={() => {
+                                      if (imageGenerationHelpFocusPreviewSuppressedRef.current)
+                                        return;
+                                      setImageGenerationHelpFocused(true);
+                                    }}
+                                    onBlur={() => {
+                                      imageGenerationHelpFocusPreviewSuppressedRef.current = false;
+                                      setImageGenerationHelpFocused(false);
+                                    }}
+                                    onClick={() => {
+                                      if (imageGenerationHelpPinned) {
+                                        dismissImageGenerationHelp(false);
+                                        return;
+                                      }
+                                      cancelImageGenerationHelpPointerLeave();
+                                      imageGenerationHelpFocusPreviewSuppressedRef.current = false;
+                                      imageGenerationHelpPointerPreviewSuppressedRef.current = false;
+                                      setImageGenerationHelpPinned(true);
+                                    }}
+                                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                                  >
+                                    <CircleHelp size={15} aria-hidden />
+                                  </button>
+                                </PopoverAnchor>
+                                <PopoverContent
+                                  id="custom-provider-image-generation-help-card"
+                                  side="top"
+                                  align="end"
+                                  sideOffset={8}
+                                  collisionPadding={12}
+                                  role={imageGenerationHelpPinned ? 'dialog' : 'tooltip'}
+                                  aria-label={t(
+                                    'settings.providers.custom.fields.runtimeSupportsImageGenerationHelpLabel',
+                                  )}
+                                  onOpenAutoFocus={(event) => event.preventDefault()}
+                                  onCloseAutoFocus={(event) => event.preventDefault()}
+                                  onPointerEnter={() => {
+                                    imageGenerationHelpPointerInsideRef.current = true;
+                                    if (imageGenerationHelpPointerPreviewSuppressedRef.current)
+                                      return;
+                                    previewImageGenerationHelp();
+                                  }}
+                                  onPointerLeave={() => {
+                                    imageGenerationHelpPointerInsideRef.current = false;
+                                    scheduleImageGenerationHelpPointerLeave();
+                                  }}
+                                  onPointerDownOutside={(event) => {
+                                    if (
+                                      imageGenerationHelpTriggerRef.current?.contains(
+                                        event.target as Node,
+                                      )
+                                    ) {
+                                      event.preventDefault();
+                                    }
+                                  }}
+                                  onFocusOutside={(event) => {
+                                    if (imageGenerationHelpPinned) event.preventDefault();
+                                  }}
+                                  className="z-[10001] w-72 max-w-[calc(100vw-2rem)] rounded-xl border-[var(--border-default)] bg-[var(--surface-elevated)] p-3 text-12 text-[var(--text-secondary)]"
+                                >
+                                  {renderImageGenerationHelpContent()}
+                                </PopoverContent>
+                              </Popover>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/* 测试连接：用当前 Tab 表单值发最小探测请求（与真实会话同路由口径，未保存也能测）。
                 OAuth 形态隐藏——登录前无凭证可测，保存并授权后可在供应商行验证。 */}
-            {authMode !== 'oauth' && (
-              <div className="flex min-h-[32px] flex-wrap items-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => void handleTest()}
-                  disabled={test[activeTab].status === 'testing'}
-                  className={cn(
-                    'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-12 font-medium transition-colors active:scale-[0.98]',
-                    'border-[var(--settings-input-border)] text-[var(--settings-section-title)] hover:bg-[var(--surface-hover)]',
-                    test[activeTab].status === 'testing' && 'cursor-not-allowed opacity-60',
-                  )}
-                >
-                  {test[activeTab].status === 'testing' ? (
-                    <Spinner size={13} />
-                  ) : (
-                    <Plug size={13} />
-                  )}
-                  {test[activeTab].status === 'testing'
-                    ? t('settings.providers.custom.test.testing')
-                    : t('settings.providers.custom.test.button')}
-                </button>
-                {/* 获取模型列表：GET 该供应商的列模型端点，成功后开勾选弹层填进上方模型行。
+                  {authMode !== 'oauth' && (
+                    <div className="flex min-h-[32px] flex-wrap items-center gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => void handleTest()}
+                        disabled={test[activeTab].status === 'testing'}
+                        className={cn(
+                          'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-12 font-medium transition-colors active:scale-[0.98]',
+                          'border-[var(--settings-input-border)] text-[var(--settings-section-title)] hover:bg-[var(--surface-hover)]',
+                          test[activeTab].status === 'testing' && 'cursor-not-allowed opacity-60',
+                        )}
+                      >
+                        {test[activeTab].status === 'testing' ? (
+                          <Spinner size={13} />
+                        ) : (
+                          <Plug size={13} />
+                        )}
+                        {test[activeTab].status === 'testing'
+                          ? t('settings.providers.custom.test.testing')
+                          : t('settings.providers.custom.test.button')}
+                      </button>
+                      {/* 获取模型列表：GET 该供应商的列模型端点，成功后开勾选弹层填进上方模型行。
                   disabled 用 anyFetching（单飞）：另一 Tab 在途时本 Tab 也不许发起。 */}
-                <button
-                  ref={modelPickerTriggerRef}
-                  type="button"
-                  onClick={() => void handleFetchModels()}
-                  disabled={anyFetching}
-                  className={cn(
-                    'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-12 font-medium transition-colors active:scale-[0.98]',
-                    'border-[var(--settings-input-border)] text-[var(--settings-section-title)] hover:bg-[var(--surface-hover)]',
-                    anyFetching && 'cursor-not-allowed opacity-60',
+                      <button
+                        ref={modelPickerTriggerRef}
+                        type="button"
+                        onClick={() => void handleFetchModels()}
+                        disabled={anyFetching}
+                        className={cn(
+                          'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-12 font-medium transition-colors active:scale-[0.98]',
+                          'border-[var(--settings-input-border)] text-[var(--settings-section-title)] hover:bg-[var(--surface-hover)]',
+                          anyFetching && 'cursor-not-allowed opacity-60',
+                        )}
+                      >
+                        {fetchingModels[activeTab] ? (
+                          <Spinner size={13} />
+                        ) : (
+                          <RefreshCw size={13} />
+                        )}
+                        {fetchingModels[activeTab]
+                          ? t('settings.providers.custom.fetch.fetching')
+                          : t('settings.providers.custom.fetch.button')}
+                      </button>
+                      {test[activeTab].status === 'ok' && (
+                        <span
+                          className="flex items-center gap-1 text-12"
+                          style={{ color: 'var(--remote-status-ready)' }}
+                        >
+                          <Check size={13} strokeWidth={2.5} />
+                          {t('settings.providers.custom.test.ok', {
+                            ms: test[activeTab].latencyMs ?? 0,
+                          })}
+                        </span>
+                      )}
+                      {test[activeTab].status === 'fail' && (
+                        <span className="text-12 text-[var(--error-fg)]">
+                          {t(`providerError.${test[activeTab].code ?? 'UNKNOWN'}`)}
+                        </span>
+                      )}
+                    </div>
                   )}
-                >
-                  {fetchingModels[activeTab] ? <Spinner size={13} /> : <RefreshCw size={13} />}
-                  {fetchingModels[activeTab]
-                    ? t('settings.providers.custom.fetch.fetching')
-                    : t('settings.providers.custom.fetch.button')}
-                </button>
-                {test[activeTab].status === 'ok' && (
-                  <span
-                    className="flex items-center gap-1 text-12"
-                    style={{ color: 'var(--remote-status-ready)' }}
-                  >
-                    <Check size={13} strokeWidth={2.5} />
-                    {t('settings.providers.custom.test.ok', { ms: test[activeTab].latencyMs ?? 0 })}
-                  </span>
-                )}
-                {test[activeTab].status === 'fail' && (
-                  <span className="text-12 text-[var(--error-fg)]">
-                    {t(`providerError.${test[activeTab].code ?? 'UNKNOWN'}`)}
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-          </>}
+                </div>
+              )}
+            </>
+          )}
         </div>
 
         {/* Footer: only the save request owns this busy state. */}

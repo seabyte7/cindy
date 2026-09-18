@@ -62,7 +62,7 @@ import { shortSessionId } from '@/lib/sessionId';
 import { ChatInput } from '@/components/new-chat/ChatInput';
 import { GoalIndicator } from '@/components/new-chat/GoalIndicator';
 import { PinnedPlanPanel } from '@/components/new-chat/PinnedPlanPanel';
-import { DshActivityPanel } from './DshActivityPanel';
+import { DshTaskControlsPopover } from './DshTaskControlsPopover';
 import { DshRuntimeConfigurationPanel } from './DshRuntimeConfigurationPanel';
 import { sessionsStore } from '@/lib/sessionsStore';
 import { useStopOrcaCollab } from './hooks/useStopOrcaCollab';
@@ -4988,12 +4988,18 @@ export function CCAgentSessionView({
               data-chat-composer-stack
             >
               {isDshSession && !remoteDeviceId && (
-                <DshRuntimeConfigurationPanel
-                  sessionId={sessionId ?? null}
-                  disabled={isStreaming || agentStatus.isRunning}
-                />
+                <>
+                  <DshRuntimeConfigurationPanel
+                    sessionId={sessionId ?? null}
+                    disabled={isStreaming || agentStatus.isRunning}
+                  />
+                  <DshTaskControlsPopover
+                    sessionId={sessionId ?? null}
+                    runtimeConfigurationDisabled={isStreaming || agentStatus.isRunning}
+                    showRuntimeConfiguration={false}
+                  />
+                </>
               )}
-              {isDshSession && <DshActivityPanel sessionId={sessionId ?? null} />}
               {/* FP-7 / F-PERM-2 / F7.4: mutually exclusive prompts.
                  Plan review takes precedence — the SDK won't interleave it with
                  other tool calls, but explicit priority guards against layout

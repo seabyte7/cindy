@@ -89,10 +89,10 @@ function canonicalExternalOrigin(value: string): string {
 }
 
 /**
- * The selected DeepSeek adapter appends its fixed operation path with a
- * leading slash. Preserve an approved path prefix, but strip a terminal slash
- * so `URL#toString()` cannot turn an origin-only Main route into a different
- * `//chat/completions` input than the source-runtime control path.
+ * The selected DeepSeek adapter appends its fixed operation path. Preserve an
+ * approved path prefix, but strip a terminal slash so its Messages root cannot
+ * turn an origin-only Main route into a different `//v1/messages` input than
+ * the source-runtime control path.
  */
 function canonicalAdapterBaseUrl(parsed: URL): string {
   return parsed.toString().replace(/\/+$/, '');
@@ -192,6 +192,7 @@ const PROFILE_PATCH = [
   '- id: llm-deepseek',
   "  name: '@deepseek-ai/dsh-llm-deepseek'",
   '  config:',
+  '    protocol: messages',
   `    apiKeyEnv: ${DSH_PROVIDER_API_KEY_ENV}`,
   `    baseURL: !!js process.env.${DSH_PROVIDER_BASE_URL_ENV}`,
   '    thinking: disabled',

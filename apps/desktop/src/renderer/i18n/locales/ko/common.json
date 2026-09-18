@@ -1682,7 +1682,8 @@
         "dialog": {
           "createTitle": "사용자 지정 제공자 추가",
           "editTitle": "연결 설정 편집",
-          "desc": "OpenAI / Anthropic 호환 제공자를 구성합니다."
+          "desc": "OpenAI / Anthropic 호환 제공자를 구성합니다.",
+          "dshDesc": "독립적인 DeepSeek Harness 연결을 구성합니다."
         },
         "imageGenerationReload": {
           "title": "Codex 다시 로드",
@@ -1906,12 +1907,18 @@
         "dsh": {
           "label": "DeepSeek Harness",
           "description": "선택 사항입니다. DeepSeek Harness 전용 HTTPS 엔드포인트와 API 키를 설정합니다. 다른 런타임의 자격 증명은 재사용하지 않습니다.",
+          "protocol": "업스트림 프로토콜",
+          "protocolValue": "DeepSeek Messages(DSH 네이티브)",
+          "protocolHelp": "현재 DSH 버전은 Messages 프로토콜을 사용합니다. Codex 프로토콜, 요청 경로 및 헤더 필드는 필요하지 않습니다.",
           "endpoint": "DSH 엔드포인트",
-          "endpointPlaceholder": "https://api.deepseek.com",
+          "endpointPlaceholder": "https://api.deepseek.com/anthropic",
+          "endpointHelp": "DeepSeek 공식 서비스는 https://api.deepseek.com/anthropic 을 사용하세요. DSH가 /v1/messages를 추가합니다.",
           "apiKey": "DSH API 키",
           "apiKeyPlaceholder": "DSH API 키",
           "apiKeyHelp": "엔드포인트가 바뀌지 않았다면 비워 두어 로컬에 저장된 키를 유지할 수 있습니다. 엔드포인트를 변경하면 새 키가 필요합니다.",
           "authRequired": "DeepSeek Harness에는 API 키 인증이 필요합니다.",
+          "runtimeChoices": "모델 및 추론 강도",
+          "runtimeChoicesHelp": "여기에서 모델을 수동으로 관리하지 않습니다. DSH 작업이 시작되면 Cindy가 해당 작업의 런타임이 제공하는 모델과 추론 강도 옵션을 읽습니다.",
           "runtimeStatus": {
             "title": "런타임 상태",
             "retry": "재시도",
@@ -10191,6 +10198,10 @@
         "model": "모델",
         "reasoning_effort": "추론 강도"
       }
+    },
+    "dshTaskControls": {
+      "ariaLabel": "DSH 작업 제어",
+      "trigger": "DSH 제어"
     }
   },
   "effortLevels": {

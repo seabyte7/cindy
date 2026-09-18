@@ -38,6 +38,22 @@ describe('resolveDshProviderConfiguration', () => {
     expect(readKey).toHaveBeenLastCalledWith('dsh-adapter', 'dsh');
   });
 
+  it('upgrades only the legacy official DeepSeek root to the alpha.2 Messages endpoint', () => {
+    const result = resolveDshProviderConfiguration(
+      [
+        {
+          ...configuredDshProvider,
+          runtimes: { dsh: { baseUrl: 'https://api.deepseek.com', models: [] } },
+        },
+      ],
+      () => 'dsh-test-key-not-a-secret',
+    );
+
+    expect(result.status).toBe('ready');
+    if (result.status !== 'ready') throw new Error('expected ready DSH configuration');
+    expect(result.route.baseUrl).toBe('https://api.deepseek.com/anthropic');
+  });
+
   const unavailableCases: Array<[string, CustomProviderConfig[], string]> = [
     ['not-configured', [], 'not-configured'],
     [

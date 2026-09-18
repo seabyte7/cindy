@@ -10,6 +10,7 @@
 
 import type { CustomProviderConfig } from '@cindy/model-providers';
 
+import { normalizeDshMessagesBaseUrl } from '../../shared/dshProviderEndpoint.js';
 import type { DshChildSecret } from './scope.js';
 import { createApprovedExternalDshProviderRoute, type DshProviderRoute } from './provider-route.js';
 
@@ -85,9 +86,10 @@ export function resolveDshProviderConfiguration(
     // The persisted runtime is Main-owned configuration. The only admitted
     // destination is its exact HTTPS origin; a Renderer never supplies this
     // allowlist or a route object.
-    const origin = new URL(runtime.baseUrl).origin;
+    const baseUrl = normalizeDshMessagesBaseUrl(runtime.baseUrl);
+    const origin = new URL(baseUrl).origin;
     route = createApprovedExternalDshProviderRoute({
-      baseUrl: runtime.baseUrl,
+      baseUrl,
       approvedOrigins: [origin],
     });
   } catch {

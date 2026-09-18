@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CustomProviderConfig } from '@cindy/model-providers';
+import type { DshRuntimeStatus } from '@/../shared/dshRuntimeStatus';
 
 import { ProviderConnectionDialog } from '../ProviderConnectionDialog';
 
@@ -12,6 +13,12 @@ const customProviderMocks = vi.hoisted(() => ({
   createCustomProvider: vi.fn(),
   updateCustomProvider: vi.fn(),
 }));
+const toastMocks = vi.hoisted(() => ({
+  error: vi.fn(),
+  info: vi.fn(),
+  success: vi.fn(),
+  warning: vi.fn(),
+}));
 
 vi.mock('@/lib/customProviders', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/customProviders')>()),
@@ -19,6 +26,8 @@ vi.mock('@/lib/customProviders', async (importOriginal) => ({
   createCustomProvider: customProviderMocks.createCustomProvider,
   updateCustomProvider: customProviderMocks.updateCustomProvider,
 }));
+
+vi.mock('@/lib/toast', () => ({ toast: toastMocks }));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -37,6 +46,7 @@ beforeEach(() => {
   customProviderMocks.readCustomProviderKey.mockReset();
   customProviderMocks.createCustomProvider.mockReset().mockResolvedValue({ ok: true });
   customProviderMocks.updateCustomProvider.mockReset().mockResolvedValue(undefined);
+  Object.values(toastMocks).forEach((mock) => mock.mockReset());
   Object.defineProperty(window, 'electronAPI', {
     configurable: true,
     value: {
@@ -190,8 +200,13 @@ async function renderNewImageGenerationReloadConfirmation(onSaved = vi.fn(), onC
     screen.getByPlaceholderText('settings.providers.custom.fields.baseUrlPlaceholder'),
     'https://images.example.test/v1',
   );
-  await user.type(screen.getByLabelText('settings.providers.connection.manualModel'), 'responses-model');
-  await user.click(screen.getByRole('button', { name: 'settings.providers.custom.fields.addModel' }));
+  await user.type(
+    screen.getByLabelText('settings.providers.connection.manualModel'),
+    'responses-model',
+  );
+  await user.click(
+    screen.getByRole('button', { name: 'settings.providers.custom.fields.addModel' }),
+  );
   await user.click(
     screen.getByRole('button', { name: 'settings.providers.custom.fields.runtimeAdvanced' }),
   );
@@ -208,42 +223,49 @@ async function renderNewImageGenerationReloadConfirmation(onSaved = vi.fn(), onC
 }
 
 describe('ProviderConnectionDialog accessibility', () => {
-  it.each(['target-model', 'flux-image-x'])('keeps %s in standard model settings instead of a second editor', async (modelId) => {
-    const initial: CustomProviderConfig = {
-      id: 'deep-link-provider',
-      name: 'Deep Link Provider',
-      auth: { method: 'apiKey' },
-      runtimes: {
-        'claude-code': {
-          baseUrl: 'https://claude.example.test',
-          models: [{ id: 'claude-model', name: 'Claude Model' }],
+  it.each(['target-model', 'flux-image-x'])(
+    'keeps %s in standard model settings instead of a second editor',
+    async (modelId) => {
+      const initial: CustomProviderConfig = {
+        id: 'deep-link-provider',
+        name: 'Deep Link Provider',
+        auth: { method: 'apiKey' },
+        runtimes: {
+          'claude-code': {
+            baseUrl: 'https://claude.example.test',
+            models: [{ id: 'claude-model', name: 'Claude Model' }],
+          },
+          codex: {
+            baseUrl: 'https://codex.example.test',
+            models: [{ id: modelId, name: 'Target Model' }],
+          },
         },
-        codex: {
-          baseUrl: 'https://codex.example.test',
-          models: [{ id: modelId, name: 'Target Model' }],
-        },
-      },
-    };
-    customProviderMocks.readCustomProviderKey.mockResolvedValue(null);
+      };
+      customProviderMocks.readCustomProviderKey.mockResolvedValue(null);
 
-    render(
-      <ProviderConnectionDialog
-        initial={initial}
-        focusAgent="codex"
-        onSaved={vi.fn()}
-        onClose={vi.fn()}
-      />,
-    );
+      render(
+        <ProviderConnectionDialog
+          initial={initial}
+          focusAgent="codex"
+          onSaved={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
 
-    await waitFor(() => expect(customProviderMocks.readCustomProviderKey).toHaveBeenCalled());
-    expect(
-      screen
-        .getByRole('tab', { name: 'settings.providers.custom.protocol.codex' })
-        .getAttribute('aria-selected'),
-    ).toBe('true');
-    expect(screen.queryByRole('textbox', { name: 'settings.providers.custom.fields.modelContextWindowTitle' })).toBeNull();
-    expect(screen.getByText('settings.providers.connection.modelsAutomatic')).not.toBeNull();
-  });
+      await waitFor(() => expect(customProviderMocks.readCustomProviderKey).toHaveBeenCalled());
+      expect(
+        screen
+          .getByRole('tab', { name: 'settings.providers.custom.protocol.codex' })
+          .getAttribute('aria-selected'),
+      ).toBe('true');
+      expect(
+        screen.queryByRole('textbox', {
+          name: 'settings.providers.custom.fields.modelContextWindowTitle',
+        }),
+      ).toBeNull();
+      expect(screen.getByText('settings.providers.connection.modelsAutomatic')).not.toBeNull();
+    },
+  );
 
   it('cancels a pending manual create without discarding the Provider draft', async () => {
     const { confirmation, onClose, onSaved, user } =
@@ -487,7 +509,10 @@ describe('ProviderConnectionDialog accessibility', () => {
             Add provider
           </button>
           {open && (
-            <ProviderConnectionDialog onSaved={() => setOpen(false)} onClose={() => setOpen(false)} />
+            <ProviderConnectionDialog
+              onSaved={() => setOpen(false)}
+              onClose={() => setOpen(false)}
+            />
           )}
         </>
       );
@@ -1323,8 +1348,6 @@ describe('ProviderConnectionDialog accessibility', () => {
     await user.click(capability);
     expect(capability.checked).toBe(true);
   });
-
-
 });
 
 describe('DS-6 field errors and save ownership', () => {
@@ -1392,7 +1415,10 @@ describe('DS-6 field errors and save ownership', () => {
     // 弹窗内必须把提示抬到 z-[10001](review P2)。Radix Tooltip 1.2 的
     // role="tooltip" 挂在 Content 内的 sr-only 副本上,带 z class 的可见层
     // 是它的父节点(Popper.Content)。
-    const eye = screen.getByRole('button', { name: 'settings.apiKey.showKey' });
+    const genericKeyInput = screen.getByLabelText('settings.providers.custom.fields.apiKey');
+    const eye = within(genericKeyInput.parentElement!).getByRole('button', {
+      name: 'settings.apiKey.showKey',
+    });
     await user.hover(eye);
     const eyeTip = await screen.findByRole('tooltip');
     expect(eyeTip.textContent).toBe('settings.apiKey.showKey');
@@ -1401,8 +1427,6 @@ describe('DS-6 field errors and save ownership', () => {
     // 交互前检查会拒绝;直接派发 pointerleave 关闭提示(Radix 监听 pointer 事件)。
     fireEvent.pointerLeave(eye);
     await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull());
-
-
   });
 
   it('keeps the field error while other fields change and clears it when the errored field is edited', async () => {
@@ -1417,17 +1441,17 @@ describe('DS-6 field errors and save ownership', () => {
     // 非法 URL 报错落在 baseUrl,首错聚焦并带 aria-invalid。
     expect(document.activeElement).toBe(baseUrl);
     expect(baseUrl.getAttribute('aria-invalid')).toBe('true');
-    expect(
-      document.getElementById(baseUrl.getAttribute('aria-describedby')!)?.textContent,
-    ).toBe('settings.providers.custom.errors.baseUrlInvalid');
+    expect(document.getElementById(baseUrl.getAttribute('aria-describedby')!)?.textContent).toBe(
+      'settings.providers.custom.errors.baseUrlInvalid',
+    );
 
     // 编辑其它字段(name)不得清掉 baseUrl 的错误——面板级 onChangeCapture 只在
     // 报错字段自身被编辑时清除(review P2)。
     fireEvent.change(name, { target: { value: 'XY' } });
     expect(baseUrl.getAttribute('aria-invalid')).toBe('true');
-    expect(
-      document.getElementById(baseUrl.getAttribute('aria-describedby')!)?.textContent,
-    ).toBe('settings.providers.custom.errors.baseUrlInvalid');
+    expect(document.getElementById(baseUrl.getAttribute('aria-describedby')!)?.textContent).toBe(
+      'settings.providers.custom.errors.baseUrlInvalid',
+    );
 
     // 编辑报错字段本身:错误清除,等下次保存重新校验。
     fireEvent.change(baseUrl, { target: { value: 'https://example.test/v1' } });
@@ -1449,8 +1473,12 @@ describe('DS-6 field errors and save ownership', () => {
     fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
     expect(screen.getByText('settings.providers.custom.errors.modelRequired')).toBeTruthy();
 
-    fireEvent.change(screen.getByLabelText('settings.providers.connection.manualModel'), { target: { value: 'm1' } });
-    fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.fields.addModel' }));
+    fireEvent.change(screen.getByLabelText('settings.providers.connection.manualModel'), {
+      target: { value: 'm1' },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'settings.providers.custom.fields.addModel' }),
+    );
     expect(screen.queryByText('settings.providers.custom.errors.modelRequired')).toBeNull();
     expect(customProviderMocks.createCustomProvider).not.toHaveBeenCalled();
   });
@@ -1486,67 +1514,130 @@ describe('DS-6 field errors and save ownership', () => {
       expect(screen.queryByText('settings.providers.custom.errors.nameRequired')).toBeNull(),
     );
     expect(
-      (screen.getByLabelText('settings.providers.custom.fields.name') as HTMLInputElement)
-        .value,
+      (screen.getByLabelText('settings.providers.custom.fields.name') as HTMLInputElement).value,
     ).toBe('Preset A');
     expect(customProviderMocks.createCustomProvider).not.toHaveBeenCalled();
   });
 });
 
-
 it('preserves preset media metadata through probing and saving', async () => {
-  const media = { id: 'media-first', name: 'Media', mode: 'image_generation' as const,
-    modalities: { input: ['text'], output: ['image'] }, officialDocs: 'https://example.test/docs' };
-  window.electronAPI.maker.listProviderPresets = vi.fn(async () => ({ presets: [{
-    id: 'media-preset', name: 'Media Preset', runtimes: { codex: {
-      baseUrl: 'https://example.test/v1', wireProtocol: 'openai-chat' as const,
-      models: [media, { id: 'chat-second', name: 'Chat', mode: 'chat' as const }],
-    } },
-  }] }));
+  const media = {
+    id: 'media-first',
+    name: 'Media',
+    mode: 'image_generation' as const,
+    modalities: { input: ['text'], output: ['image'] },
+    officialDocs: 'https://example.test/docs',
+  };
+  window.electronAPI.maker.listProviderPresets = vi.fn(async () => ({
+    presets: [
+      {
+        id: 'media-preset',
+        name: 'Media Preset',
+        runtimes: {
+          codex: {
+            baseUrl: 'https://example.test/v1',
+            wireProtocol: 'openai-chat' as const,
+            models: [media, { id: 'chat-second', name: 'Chat', mode: 'chat' as const }],
+          },
+        },
+      },
+    ],
+  }));
   render(<ProviderConnectionDialog focusAgent="codex" onSaved={vi.fn()} onClose={vi.fn()} />);
   await waitForInitialDialogFocus();
   fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.presets.label' }));
   fireEvent.click(await screen.findByRole('option', { name: 'Media Preset' }));
   fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.test.button' }));
-  await waitFor(() => expect(window.electronAPI.maker.testProviderConnection).toHaveBeenCalledWith(
-    expect.objectContaining({ kind: 'adhoc', spec: expect.objectContaining({ modelId: 'chat-second' }) }),
-  ));
+  await waitFor(() =>
+    expect(window.electronAPI.maker.testProviderConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'adhoc',
+        spec: expect.objectContaining({ modelId: 'chat-second' }),
+      }),
+    ),
+  );
   fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
   await waitFor(() => expect(customProviderMocks.createCustomProvider).toHaveBeenCalledOnce());
-  expect(customProviderMocks.createCustomProvider.mock.calls[0][0].runtimes.codex.models[0]).toMatchObject(media);
+  expect(
+    customProviderMocks.createCustomProvider.mock.calls[0][0].runtimes.codex.models[0],
+  ).toMatchObject(media);
 });
 
 it('keeps a template connection editable without offering protocol or path switches', async () => {
   const { BUNDLED_CATALOG } = await import('@cindy/model-providers');
-  const preset = (BUNDLED_CATALOG.presets ?? []).find(p => p.id === 'google-gemini-api')!;
+  const preset = (BUNDLED_CATALOG.presets ?? []).find((p) => p.id === 'google-gemini-api')!;
   vi.mocked(window.electronAPI.maker.listProviderPresets).mockResolvedValue({ presets: [preset] });
   customProviderMocks.readCustomProviderKey.mockResolvedValue(null);
-  render(<ProviderConnectionDialog initial={{ id: 'google-test', name: 'Google', runtimes: {
-    codex: { ...preset.runtimes.codex!, catalogPresetId: preset.id,
-      models: [{ id: preset.runtimes.codex!.models[0].id, name: 'Gemini' }] },
-  } }} onSaved={vi.fn()} onClose={vi.fn()} />);
+  render(
+    <ProviderConnectionDialog
+      initial={{
+        id: 'google-test',
+        name: 'Google',
+        runtimes: {
+          codex: {
+            ...preset.runtimes.codex!,
+            catalogPresetId: preset.id,
+            models: [{ id: preset.runtimes.codex!.models[0].id, name: 'Gemini' }],
+          },
+        },
+      }}
+      onSaved={vi.fn()}
+      onClose={vi.fn()}
+    />,
+  );
   await waitFor(() => expect(window.electronAPI.maker.listProviderPresets).toHaveBeenCalled());
   expect(screen.queryByText('settings.providers.custom.fields.wireProtocol')).toBeNull();
-  expect(screen.queryByRole('button', { name: 'settings.providers.custom.runtimeFill.action' })).toBeNull();
-  const endpoint = screen.getByDisplayValue('https://generativelanguage.googleapis.com/v1beta') as HTMLInputElement;
+  expect(
+    screen.queryByRole('button', { name: 'settings.providers.custom.runtimeFill.action' }),
+  ).toBeNull();
+  const endpoint = screen.getByDisplayValue(
+    'https://generativelanguage.googleapis.com/v1beta',
+  ) as HTMLInputElement;
   expect(endpoint.readOnly).toBe(true);
   fireEvent.change(endpoint, { target: { value: 'https://other.example/v1' } });
   expect(endpoint.value).toBe('https://generativelanguage.googleapis.com/v1beta');
   fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
   await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
-  expect(JSON.stringify(customProviderMocks.updateCustomProvider.mock.calls[0])).toContain(preset.runtimes.codex!.baseUrl);
-  expect(JSON.stringify(customProviderMocks.updateCustomProvider.mock.calls[0])).not.toContain('other.example');
+  expect(JSON.stringify(customProviderMocks.updateCustomProvider.mock.calls[0])).toContain(
+    preset.runtimes.codex!.baseUrl,
+  );
+  expect(JSON.stringify(customProviderMocks.updateCustomProvider.mock.calls[0])).not.toContain(
+    'other.example',
+  );
 });
 
- it('allows a cloud account endpoint but rejects changing its fixed host pattern', async () => {
-  const preset = { id: 'cloud-account', name: 'Cloud account', authMethod: 'apiKey' as const,
-    runtimes: { codex: { baseUrl: 'https://{account}.example.test/v1', wireProtocol: 'openai-responses' as const,
-      models: [{ id: 'deployment', name: 'Deployment' }] } } };
+it('allows a cloud account endpoint but rejects changing its fixed host pattern', async () => {
+  const preset = {
+    id: 'cloud-account',
+    name: 'Cloud account',
+    authMethod: 'apiKey' as const,
+    runtimes: {
+      codex: {
+        baseUrl: 'https://{account}.example.test/v1',
+        wireProtocol: 'openai-responses' as const,
+        models: [{ id: 'deployment', name: 'Deployment' }],
+      },
+    },
+  };
   vi.mocked(window.electronAPI.maker.listProviderPresets).mockResolvedValue({ presets: [preset] });
   customProviderMocks.readCustomProviderKey.mockResolvedValue(null);
-  render(<ProviderConnectionDialog initial={{ id: 'account', name: 'Account', runtimes: {
-    codex: { ...preset.runtimes.codex, catalogPresetId: preset.id, baseUrl: 'https://first.example.test/v1' },
-  } }} onSaved={vi.fn()} onClose={vi.fn()} />);
+  render(
+    <ProviderConnectionDialog
+      initial={{
+        id: 'account',
+        name: 'Account',
+        runtimes: {
+          codex: {
+            ...preset.runtimes.codex,
+            catalogPresetId: preset.id,
+            baseUrl: 'https://first.example.test/v1',
+          },
+        },
+      }}
+      onSaved={vi.fn()}
+      onClose={vi.fn()}
+    />,
+  );
   const endpoint = screen.getByDisplayValue('https://first.example.test/v1') as HTMLInputElement;
   await waitFor(() => expect(endpoint.readOnly).toBe(false));
   fireEvent.change(endpoint, { target: { value: 'https://wrong.test/v1' } });
@@ -1562,7 +1653,9 @@ it('keeps a template connection editable without offering protocol or path switc
   fireEvent.change(endpoint, { target: { value: 'https://second.example.test/v1' } });
   fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
   await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
-  expect(JSON.stringify(customProviderMocks.updateCustomProvider.mock.calls[0])).toContain('https://second.example.test/v1');
+  expect(JSON.stringify(customProviderMocks.updateCustomProvider.mock.calls[0])).toContain(
+    'https://second.example.test/v1',
+  );
 });
 
 it('saves OpenRouter OAuth connections that leave scopes empty for provider defaults', async () => {
@@ -1570,15 +1663,367 @@ it('saves OpenRouter OAuth connections that leave scopes empty for provider defa
   const oauth = providerPresetOAuth('openrouter')!;
   expect(oauth.scopes).toBe('');
   customProviderMocks.readCustomProviderKey.mockResolvedValue(null);
-  render(<ProviderConnectionDialog initial={{
-    id: 'openrouter-account', name: 'OpenRouter',
-    auth: { method: 'oauth', oauth },
-    runtimes: { pi: { baseUrl: 'https://openrouter.ai/api/v1', wireProtocol: 'openai-chat',
-      models: [{ id: 'vendor/model', name: 'Model' }] } },
-  }} onSaved={vi.fn()} onClose={vi.fn()} />);
+  render(
+    <ProviderConnectionDialog
+      initial={{
+        id: 'openrouter-account',
+        name: 'OpenRouter',
+        auth: { method: 'oauth', oauth },
+        runtimes: {
+          pi: {
+            baseUrl: 'https://openrouter.ai/api/v1',
+            wireProtocol: 'openai-chat',
+            models: [{ id: 'vendor/model', name: 'Model' }],
+          },
+        },
+      }}
+      onSaved={vi.fn()}
+      onClose={vi.fn()}
+    />,
+  );
   fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
   await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
   expect(customProviderMocks.updateCustomProvider.mock.calls[0][0].auth).toMatchObject({
-    method: 'oauth', oauth: { scopes: '' },
+    method: 'oauth',
+    oauth: { scopes: '' },
+  });
+});
+
+describe('DeepSeek Harness provider profile', () => {
+  const dshInitial: CustomProviderConfig = {
+    id: 'dsh-provider',
+    name: 'DSH Provider',
+    auth: { method: 'apiKey' },
+    runtimes: {
+      dsh: { baseUrl: 'https://api.deepseek.example', models: [] },
+    },
+  };
+
+  it('shows DSH as a runtime tab and preserves its stored key without hydrating it', async () => {
+    const user = userEvent.setup();
+    render(<ProviderConnectionDialog initial={dshInitial} onSaved={vi.fn()} onClose={vi.fn()} />);
+
+    expect(screen.getAllByRole('tab')).toHaveLength(4);
+    const dshTab = screen.getByRole('tab', { name: 'settings.providers.custom.dsh.label' });
+    expect(dshTab.getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByText('settings.providers.custom.dialog.dshDesc')).toBeTruthy();
+    expect(
+      (
+        screen.getByPlaceholderText(
+          'settings.providers.custom.dsh.endpointPlaceholder',
+        ) as HTMLInputElement
+      ).value,
+    ).toBe('https://api.deepseek.example');
+    expect(screen.getByText('settings.providers.custom.dsh.protocolValue')).toBeTruthy();
+    expect(screen.getByText('settings.providers.custom.dsh.runtimeChoicesHelp')).toBeTruthy();
+    expect(screen.queryByText('settings.providers.custom.fields.wireProtocol')).toBeNull();
+    expect(customProviderMocks.readCustomProviderKey).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole('tab', { name: 'settings.providers.custom.protocol.claude' }),
+    );
+    expect(screen.getByText('settings.providers.custom.dialog.desc')).toBeTruthy();
+    expect(screen.getByText('settings.providers.custom.fields.wireProtocol')).toBeTruthy();
+    await user.click(dshTab);
+    expect(screen.getByText('settings.providers.custom.dialog.dshDesc')).toBeTruthy();
+    expect(screen.queryByText('settings.providers.custom.fields.wireProtocol')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
+    await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
+
+    const [config, keys] = customProviderMocks.updateCustomProvider.mock.calls[0];
+    expect(config.runtimes).toEqual({
+      dsh: { baseUrl: 'https://api.deepseek.example', models: [] },
+    });
+    expect(keys).toEqual({});
+  });
+
+  it('defaults a mixed legacy DSH profile to DSH and removes retired runtimes on save', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    render(
+      <ProviderConnectionDialog
+        initial={{
+          ...dshInitial,
+          runtimes: {
+            'claude-code': {
+              baseUrl: 'https://legacy-claude.example',
+              models: [{ id: 'legacy-claude', name: 'Legacy Claude' }],
+            },
+            dsh: dshInitial.runtimes.dsh!,
+          },
+        }}
+        onSaved={onSaved}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen
+        .getByRole('tab', { name: 'settings.providers.custom.dsh.label' })
+        .getAttribute('aria-selected'),
+    ).toBe('true');
+    await user.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
+
+    await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
+    expect(customProviderMocks.updateCustomProvider.mock.calls[0][0].runtimes).toEqual({
+      dsh: { baseUrl: 'https://api.deepseek.example', models: [] },
+    });
+    expect(onSaved).toHaveBeenCalledOnce();
+  });
+
+  it('honors an explicit generic runtime focus for a mixed legacy DSH profile', async () => {
+    render(
+      <ProviderConnectionDialog
+        initial={{
+          ...dshInitial,
+          runtimes: {
+            codex: {
+              baseUrl: 'https://legacy-codex.example',
+              models: [{ id: 'legacy-codex', name: 'Legacy Codex' }],
+            },
+            dsh: dshInitial.runtimes.dsh!,
+          },
+        }}
+        focusAgent="codex"
+        onSaved={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(customProviderMocks.readCustomProviderKey).toHaveBeenCalled());
+    expect(
+      screen
+        .getByRole('tab', { name: 'settings.providers.custom.protocol.codex' })
+        .getAttribute('aria-selected'),
+    ).toBe('true');
+  });
+
+  it('requires a newly entered DSH key when the endpoint changes', async () => {
+    const user = userEvent.setup();
+    render(<ProviderConnectionDialog initial={dshInitial} onSaved={vi.fn()} onClose={vi.fn()} />);
+
+    const endpoint = screen.getByPlaceholderText(
+      'settings.providers.custom.dsh.endpointPlaceholder',
+    );
+    fireEvent.change(endpoint, { target: { value: 'https://replacement.deepseek.example' } });
+    await user.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
+
+    expect(
+      await screen.findByText('settings.providers.custom.errors.dshApiKeyRequired'),
+    ).toBeTruthy();
+    expect(customProviderMocks.updateCustomProvider).not.toHaveBeenCalled();
+  });
+
+  it('shows and saves the effective Messages endpoint for a legacy official root without requiring a new key', async () => {
+    const user = userEvent.setup();
+    render(
+      <ProviderConnectionDialog
+        initial={{
+          ...dshInitial,
+          runtimes: { dsh: { baseUrl: 'https://api.deepseek.com', models: [] } },
+        }}
+        onSaved={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(
+      (
+        screen.getByPlaceholderText(
+          'settings.providers.custom.dsh.endpointPlaceholder',
+        ) as HTMLInputElement
+      ).value,
+    ).toBe('https://api.deepseek.com/anthropic');
+    await user.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
+    await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
+    expect(customProviderMocks.updateCustomProvider.mock.calls[0][0].runtimes).toEqual({
+      dsh: { baseUrl: 'https://api.deepseek.com/anthropic', models: [] },
+    });
+    expect(customProviderMocks.updateCustomProvider.mock.calls[0][1]).toEqual({});
+  });
+
+  it('keeps a legacy generic provider named Dsh separate from the DSH runtime', async () => {
+    const user = userEvent.setup();
+    render(
+      <ProviderConnectionDialog
+        initial={{
+          id: 'legacy-dsh-name',
+          name: 'Dsh',
+          auth: { method: 'apiKey' },
+          runtimes: {
+            'claude-code': {
+              baseUrl: 'https://api.deepseek.example',
+              models: [],
+            },
+          },
+        }}
+        onSaved={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const genericTab = screen.getByRole('tab', {
+      name: 'settings.providers.custom.protocol.claude',
+    });
+    const dshTab = screen.getByRole('tab', { name: 'settings.providers.custom.dsh.label' });
+    expect(genericTab.getAttribute('aria-selected')).toBe('true');
+    expect(dshTab.getAttribute('aria-selected')).toBe('false');
+
+    await user.click(dshTab);
+    expect(
+      (
+        screen.getByPlaceholderText(
+          'settings.providers.custom.dsh.endpointPlaceholder',
+        ) as HTMLInputElement
+      ).value,
+    ).toBe('');
+    expect(screen.queryByText('settings.providers.custom.fields.wireProtocol')).toBeNull();
+  });
+
+  it('replaces legacy generic runtimes when an explicit DSH profile is saved', async () => {
+    const user = userEvent.setup();
+    render(
+      <ProviderConnectionDialog
+        initial={{
+          id: 'legacy-dsh-name',
+          name: 'Dsh',
+          auth: { method: 'apiKey' },
+          runtimes: {
+            'claude-code': {
+              baseUrl: 'https://legacy-claude.example',
+              models: [{ id: 'legacy-claude', name: 'Legacy Claude' }],
+            },
+            codex: {
+              baseUrl: 'https://legacy-codex.example',
+              models: [{ id: 'legacy-codex', name: 'Legacy Codex' }],
+            },
+            pi: {
+              baseUrl: 'https://legacy-pi.example',
+              models: [{ id: 'legacy-pi', name: 'Legacy Pi' }],
+            },
+          },
+        }}
+        onSaved={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(customProviderMocks.readCustomProviderKey).toHaveBeenCalled());
+    const dshTab = screen.getByRole('tab', { name: 'settings.providers.custom.dsh.label' });
+    await user.click(dshTab);
+    await waitFor(() => expect(dshTab.getAttribute('aria-selected')).toBe('true'));
+    fireEvent.change(
+      screen.getByPlaceholderText('settings.providers.custom.dsh.endpointPlaceholder'),
+      { target: { value: 'https://api.deepseek.example' } },
+    );
+    fireEvent.change(
+      screen.getByPlaceholderText('settings.providers.custom.dsh.apiKeyPlaceholder'),
+      { target: { value: 'dsh-replacement-key' } },
+    );
+    await user.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
+
+    await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
+    const [config, keys] = customProviderMocks.updateCustomProvider.mock.calls[0];
+    expect(config.runtimes).toEqual({
+      dsh: { baseUrl: 'https://api.deepseek.example', models: [] },
+    });
+    expect(keys).toEqual({ dsh: 'dsh-replacement-key' });
+  });
+
+  it('shows only the display-safe Main runtime status and retries through Main', async () => {
+    const status: DshRuntimeStatus = {
+      revision: 7,
+      configuration: { status: 'unavailable', reason: 'not-configured' },
+      registration: 'not-registered',
+      activeTaskCount: 0,
+      evidence: {
+        modelConnection: 'not-verified-in-this-app',
+        commands: 'not-verified-in-this-app',
+        fileTools: 'not-verified-in-this-app',
+        attachments: 'not-verified-in-this-app',
+        permissions: 'not-verified-in-this-app',
+      },
+      actions: {
+        canRetryRegistration: true,
+        mustCloseActiveTasksBeforeReplacement: false,
+      },
+    };
+    const retry = vi.fn(async () => status);
+    window.electronAPI.maker.getDshRuntimeStatus = vi.fn(async () => status);
+    window.electronAPI.maker.retryDshRuntimeRegistration = retry;
+    const user = userEvent.setup();
+    render(<ProviderConnectionDialog initial={dshInitial} onSaved={vi.fn()} onClose={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(window.electronAPI.maker.getDshRuntimeStatus).toHaveBeenCalledOnce(),
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'settings.providers.custom.dsh.runtimeStatus.retry' }),
+    );
+
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it('reports a persisted DSH configuration whose Main admission is not ready', async () => {
+    const status: DshRuntimeStatus = {
+      revision: 8,
+      configuration: { status: 'ready', providerName: 'DSH Provider' },
+      registration: 'not-registered',
+      activeTaskCount: 0,
+      evidence: {
+        modelConnection: 'not-verified-in-this-app',
+        commands: 'not-verified-in-this-app',
+        fileTools: 'not-verified-in-this-app',
+        attachments: 'not-verified-in-this-app',
+        permissions: 'not-verified-in-this-app',
+      },
+      actions: {
+        canRetryRegistration: true,
+        mustCloseActiveTasksBeforeReplacement: false,
+      },
+    };
+    const onSaved = vi.fn();
+    window.electronAPI.maker.getDshRuntimeStatus = vi.fn(async () => status);
+    render(<ProviderConnectionDialog initial={dshInitial} onSaved={onSaved} onClose={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(window.electronAPI.maker.getDshRuntimeStatus).toHaveBeenCalledOnce(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
+
+    await waitFor(() => expect(customProviderMocks.updateCustomProvider).toHaveBeenCalledOnce());
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(window.electronAPI.maker.getDshRuntimeStatus).toHaveBeenCalledTimes(2);
+    expect(toastMocks.warning).toHaveBeenCalledWith(
+      'settings.providers.custom.dsh.runtimeStatus.registration.not-registered',
+    );
+  });
+
+  it('creates a DSH-only provider with its own credential', async () => {
+    const user = userEvent.setup();
+    render(<ProviderConnectionDialog onSaved={vi.fn()} onClose={vi.fn()} />);
+
+    await user.type(
+      screen.getByPlaceholderText('settings.providers.custom.fields.namePlaceholder'),
+      'Dedicated DSH',
+    );
+    await user.click(screen.getByRole('tab', { name: 'settings.providers.custom.dsh.label' }));
+    await user.type(
+      screen.getByPlaceholderText('settings.providers.custom.dsh.endpointPlaceholder'),
+      'https://api.deepseek.example',
+    );
+    await user.type(
+      screen.getByPlaceholderText('settings.providers.custom.dsh.apiKeyPlaceholder'),
+      'dsh-test-key',
+    );
+    await user.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
+    await waitFor(() => expect(customProviderMocks.createCustomProvider).toHaveBeenCalledOnce());
+
+    const [config, keys] = customProviderMocks.createCustomProvider.mock.calls[0];
+    expect(config.runtimes).toEqual({
+      dsh: { baseUrl: 'https://api.deepseek.example', models: [] },
+    });
+    expect(keys).toEqual({ dsh: 'dsh-test-key' });
   });
 });

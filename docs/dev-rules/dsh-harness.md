@@ -62,6 +62,23 @@
 > 已成功执行且 packaged App 通过已列的 E2E，**不**解除 capability floor，也不是 installer、发布、跨平台或生产 endpoint
 > 结论。
 
+> **当前 source release / Settings 刷新（2026-09-18）**：当前 Cindy 本机 pin 已更新为上游 tag
+> `dsh-v0.1.6-alpha.2`、commit `ddefc45fbc7f8e46dd73185e68295696d1297887`、tree
+> `5aca5ee6f8dfd110dc3ae199fbddf8a0f606625f`。`darwin-arm64` 受控 archive SHA-256 为
+> `326631758bfc967fc90dd1e0304ba513505d96608517787b4ffdc496556172a9`，tree manifest SHA-256 为
+> `97205313999712b87f90d2e768c51ed0f401d66965a5624be74f922d122905e9`。由该 archive 重打的本地签名
+> Cindy.app 已通过 9/9 fixed-Helper loopback E2E，覆盖 bookmark、ACP lifecycle、durable binding、internal
+> MCP、Cindy-owned plan/todo、一次性工具审批、fresh-bridge resume、Maker prompt/cancel/close 与 provider
+> projection。此版本的 DeepSeek provider 使用 **Anthropic Messages** 路径；Main 管理的 profile 必须显式写入
+> `protocol: messages`，官方 base URL 为 `https://api.deepseek.com/anthropic`，由 DSH 追加
+> `/v1/messages`。历史配置中精确的官方根地址 `https://api.deepseek.com[/]` 只在 Main/Renderer 的 DSH
+> 边界兼容升级到该 base URL，custom gateway 不改写，且该等价迁移不得要求用户重输已存 key。Settings 不提供
+> Codex 的协议、精确路径、请求头或静态模型表；新建任务后只显示当前 DSH session 经 ACP 实际 advertise 的
+> `model` / `reasoning_effort` 选项。Office sidecar 不在 Cindy 当前 release schema 与受控 archive 中，不能宣称
+> 已支持。下文关于 alpha.3、build.11 与 `/chat/completions` 的段落仅保留为历史证据；凡与本段冲突，以当前
+> alpha.2 release descriptor、源码与测试为准。本机 loopback 和临时签名证据仍不等同于 notarized installer、
+> 真实付费 DeepSeek 请求、Windows/Linux、remote/mobile 或 Office 产品验收。
+
 > **build.11 工具 profile / 签名审计（2026-09-11）**：固定 tag
 > `dsh-v0.1.2-alpha.3` commit `dd6322d604e00eec1ba5e0c8541159906a21094a` 的本机 source build
 > 使用 Node `v24.20.0` / pnpm `11.7.0`，archive SHA-256 为

@@ -5593,7 +5593,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // only event that may ask its Main-owned admission gate to try the
       // packaged local runtime; the gate itself keeps a changed live snapshot
       // fail-closed and contains all startup errors.
-      void registerDshAgentIfAvailable();
+      return registerDshAgentIfAvailable();
     },
     beginRouteMutation: (providerId) => beginProviderRouteMutation(providerId),
     broadcastChanged: () => broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {}),

@@ -39,6 +39,7 @@ import { isModelEnabled, useModelVisibilityVersion } from '@/state/modelVisibili
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { NEW_MAKER_DRAFT_KEY } from './newMakerDraftKeys';
+import { shouldShowNewMakerAgentSelect } from './newMakerAgentSelectVisibility';
 import { CreateWorkerPopover, type CreateWorkerForm } from './CreateWorkerPopover';
 import { createWorkerLabel } from './workerLabel';
 import { useLocation, useNavigate, useOutletContext } from 'react-router-dom';
@@ -1348,6 +1349,11 @@ export function NewMakerDraftRoute() {
   const unifiedModelPanelEnabled =
     !isDshDraft && (!effectiveDeviceLinkDeviceId || !deviceProvidersUnsupported);
   const unifiedModelPanelActive = unifiedModelPanelEnabled;
+  const showNewMakerAgentSelect = shouldShowNewMakerAgentSelect({
+    unifiedModelPanelActive,
+    isDshDraft,
+    dshAvailableForDraft,
+  });
   const remoteModelListStatus = !isDeviceLinkDraft
     ? 'idle'
     : capabilitiesError || (deviceProvidersError && !deviceProvidersUnsupported)
@@ -5586,9 +5592,10 @@ export function NewMakerDraftRoute() {
                     // 统一模型选择器(model-selector-unified §1.1):引擎不再是工具条上的
                     // 独立控件 —— 它跟着模型走(推荐映射自动配好,并在模型 pill 与每一行
                     // 右侧常驻显示),高级调整收进行配置浮层。仅在老被控端
-                    // capabilities-only 降级时恢复独立引擎下拉。
+                    // capabilities-only 降级，或本机已注册 DSH（它不进入模型目录）时
+                    // 恢复独立引擎下拉；已选 DSH 即使随后失效也保留切出入口。
                     middleToolbarSlot={
-                      unifiedModelPanelActive && !isDshDraft ? undefined : (
+                      showNewMakerAgentSelect ? (
                         <AgentSelect
                           value={draft.vendor}
                           onChange={handleVendorChange}
@@ -5598,7 +5605,7 @@ export function NewMakerDraftRoute() {
                           disabled={wtCreating}
                           hiddenVendors={hiddenSwitcherVendors}
                         />
-                      )
+                      ) : undefined
                     }
                     onUnifiedDraftSelect={handleUnifiedDraftSelect}
                     selectedFavoriteUid={selectedFavoriteUid}
@@ -5645,7 +5652,7 @@ export function NewMakerDraftRoute() {
                         : undefined
                     }
                     compactMiddleToolbarSlot={
-                      unifiedModelPanelActive && !isDshDraft ? undefined : (
+                      showNewMakerAgentSelect ? (
                         <AgentSelect
                           value={draft.vendor}
                           onChange={handleVendorChange}
@@ -5656,7 +5663,7 @@ export function NewMakerDraftRoute() {
                           disabled={wtCreating}
                           hiddenVendors={hiddenSwitcherVendors}
                         />
-                      )
+                      ) : undefined
                     }
                     narrowToolbar={isDraftToolbarNarrow}
                     paletteMaxHeight={240}

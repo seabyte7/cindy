@@ -52,16 +52,16 @@ test('macOS supervised source build accepts only explicit local paths once each'
 
 test('macOS supervised source build rejects any host other than the release-pinned local darwin-arm64 Node', () => {
   assert.equal(
-    assertMacosSourceBuildHost(release, { platform: 'darwin', arch: 'arm64', versions: { node: '24.15.0' } }).buildTarget,
+    assertMacosSourceBuildHost(release, { platform: 'darwin', arch: 'arm64', versions: { node: '24.20.0' } }).buildTarget,
     'node24.20.0-macos-arm64',
   );
   assert.throws(
-    () => assertMacosSourceBuildHost(release, { platform: 'linux', arch: 'arm64', versions: { node: '24.15.0' } }),
+    () => assertMacosSourceBuildHost(release, { platform: 'linux', arch: 'arm64', versions: { node: '24.20.0' } }),
     /limited to local darwin-arm64/,
   );
   assert.throws(
-    () => assertMacosSourceBuildHost(release, { platform: 'darwin', arch: 'arm64', versions: { node: '24.20.0' } }),
-    /requires Node 24.15.0/,
+    () => assertMacosSourceBuildHost(release, { platform: 'darwin', arch: 'arm64', versions: { node: '24.21.0' } }),
+    /requires Node 24.20.0/,
   );
 });
 
@@ -154,6 +154,7 @@ test('bad pinned input fails before the source checkout can be adapted or an out
       nodeArchive,
       pnpmTarball,
       outputDir,
+      host: { platform: 'darwin', arch: 'arm64', versions: { node: '24.20.0' } },
     }), /pnpm tarball integrity/);
     assert.equal(fs.readFileSync(marker, 'utf8'), 'original checkout state');
     assert.equal(fs.existsSync(outputDir), false);

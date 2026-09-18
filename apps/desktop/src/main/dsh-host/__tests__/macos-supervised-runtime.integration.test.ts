@@ -108,6 +108,33 @@ interface LoopbackProviderOptions {
   }>;
 }
 
+function messagesSse(events: readonly Record<string, unknown>[]): string {
+  return events
+    .map((event) => `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join('');
+}
+
+function messagesTextResponse(text: string): string {
+  return messagesSse([
+    {
+      type: 'message_start',
+      message: {
+        id: 'cindy-dsh-supervised-e2e-message',
+        model: 'cindy-dsh-managed',
+        usage: { input_tokens: 3, output_tokens: 0 },
+      },
+    },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text } },
+    { type: 'content_block_stop', index: 0 },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn' },
+      usage: { output_tokens: 2 },
+    },
+    { type: 'message_stop' },
+  ]);
+}
+
 async function createLoopbackProvider(
   options: LoopbackProviderOptions = {},
 ): Promise<LoopbackProvider> {
@@ -132,12 +159,12 @@ async function createLoopbackProvider(
         response.writeHead(400).end();
         return;
       }
-      // DSH's sealed alpha3 DeepSeek adapter treats `baseURL` as the API
-      // origin and appends its fixed `/chat/completions` operation. Keep this
-      // exact path in the fixture: accepting arbitrary suffixes would turn an
+      // DSH alpha.2 defaults the official adapter to Anthropic Messages. Its
+      // baseURL is the API root and it appends `/v1/messages`. Keep this exact
+      // path in the fixture: accepting arbitrary suffixes would turn an
       // endpoint-contract regression into a false positive.
       const pathname = new URL(request.url ?? '/', 'http://loopback.invalid').pathname;
-      if (request.method !== 'POST' || pathname !== '/chat/completions') {
+      if (request.method !== 'POST' || pathname !== '/v1/messages') {
         unexpectedRequests += 1;
         // This has no host, query, header, or body value. It exists only to
         // diagnose the fixed local fixture's protocol surface.
@@ -149,7 +176,7 @@ async function createLoopbackProvider(
         response.writeHead(404).end();
         return;
       }
-      if (request.headers.authorization !== `Bearer ${LOOPBACK_PROVIDER_API_KEY}`) {
+      if (request.headers['x-api-key'] !== LOOPBACK_PROVIDER_API_KEY) {
         unauthorizedRequests += 1;
         response.writeHead(401).end();
         return;
@@ -162,66 +189,59 @@ async function createLoopbackProvider(
       });
       if (options.toolCall) {
         if (acceptedRequests === 1) {
-          const argumentsText = JSON.stringify(options.toolCall.arguments);
-          const midpoint = Math.max(1, Math.floor(argumentsText.length / 2));
-          response.end(
-            [
-              `data: ${JSON.stringify({ choices: [{
-                delta: {
-                  tool_calls: [{
-                    index: 0,
-                    id: 'cindy-dsh-supervised-e2e-tool-call',
-                    type: 'function',
-                    function: { name: 'bash', arguments: argumentsText.slice(0, midpoint) },
-                  }],
-                },
-                index: 0,
-                finish_reason: null,
-              }] })}`,
-              `data: ${JSON.stringify({ choices: [{
-                delta: {
-                  tool_calls: [{ index: 0, function: { arguments: argumentsText.slice(midpoint) } }],
-                },
-                index: 0,
-                finish_reason: null,
-              }] })}`,
-              `data: ${JSON.stringify({ choices: [{ delta: {}, index: 0, finish_reason: 'tool_calls' }] })}`,
-              'data: [DONE]',
-              '',
-            ].join('\n\n'),
-          );
+          response.end(messagesSse([
+            {
+              type: 'message_start',
+              message: {
+                id: 'cindy-dsh-supervised-e2e-tool-message',
+                model: 'cindy-dsh-managed',
+                usage: { input_tokens: 3, output_tokens: 0 },
+              },
+            },
+            {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'cindy-dsh-supervised-e2e-tool-call',
+                name: 'bash',
+                input: options.toolCall.arguments,
+              },
+            },
+            { type: 'content_block_stop', index: 0 },
+            {
+              type: 'message_delta',
+              delta: { stop_reason: 'tool_use' },
+              usage: { output_tokens: 1 },
+            },
+            { type: 'message_stop' },
+          ]));
           return;
         }
-        response.end(
-          [
-            `data: ${JSON.stringify({ choices: [{
-              delta: { role: 'assistant', content: options.toolCall.finalText },
-              index: 0,
-              finish_reason: null,
-            }] })}`,
-            `data: ${JSON.stringify({ choices: [{ delta: {}, index: 0, finish_reason: 'stop' }] })}`,
-            'data: [DONE]',
-            '',
-          ].join('\n\n'),
-        );
+        response.end(messagesTextResponse(options.toolCall.finalText));
         return;
       }
       if (options.keepSecondResponseOpen && acceptedRequests === 2) {
         // This exact response is completed only by the runtime's public
         // session/cancel path (or the fixture teardown), never by a timeout.
-        response.write(
-          'data: {"choices":[{"delta":{"role":"assistant","content":"CINDY_DSH_SUPERVISED_E2E_CANCEL_WAIT"},"index":0,"finish_reason":null}]}\n\n',
-        );
+        response.write(messagesSse([
+          {
+            type: 'message_start',
+            message: {
+              id: 'cindy-dsh-supervised-e2e-cancel-message',
+              model: 'cindy-dsh-managed',
+              usage: { input_tokens: 3, output_tokens: 0 },
+            },
+          },
+          {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'text', text: 'CINDY_DSH_SUPERVISED_E2E_CANCEL_WAIT' },
+          },
+        ]));
         return;
       }
-      response.end(
-        [
-          'data: {"choices":[{"delta":{"role":"assistant","content":"CINDY_DSH_SUPERVISED_E2E_FOLLOW"},"index":0,"finish_reason":null}]}',
-          'data: {"choices":[{"delta":{},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}',
-          'data: [DONE]',
-          '',
-        ].join('\n\n'),
-      );
+      response.end(messagesTextResponse('CINDY_DSH_SUPERVISED_E2E_FOLLOW'));
     });
   });
   await new Promise<void>((resolve, reject) => {
@@ -1326,11 +1346,56 @@ describePromptRuntime('packaged macOS supervised DSH prompt integration', () => 
         throw new Error('signed DSH runtime did not advertise a model configuration control');
       }
       expect(modelControl.allowedValues).toContain(modelControl.currentValue);
-      const acknowledgedControls = await bridgeHost.bridge.setConfigurationOptionForMain({
-        ...binding,
-        configId: 'model',
-        value: modelControl.currentValue,
-      });
+      const productConfiguration = bridgeHost.bridge.getRuntimeConfigurationForProduct(
+        cindySessionId,
+      );
+      expect(productConfiguration.controls.map((control) => control.id)).toEqual(
+        expect.arrayContaining(['model', 'reasoning_effort']),
+      );
+      const productModelControl = productConfiguration.controls.find(
+        (control) => control.id === 'model',
+      );
+      if (!productModelControl) {
+        throw new Error('signed DSH runtime model control was not projected to the product');
+      }
+      expect(productModelControl.choices).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: productModelControl.currentChoiceId }),
+        ]),
+      );
+      const selectedModelLabel = productModelControl.choices.find(
+        (choice) => choice.id === productModelControl.currentChoiceId,
+      )?.label;
+      if (!selectedModelLabel) {
+        throw new Error('signed DSH runtime model selection has no product label');
+      }
+      const acknowledgedProductConfiguration =
+        await bridgeHost.bridge.setRuntimeConfigurationForProduct({
+          cindySessionId,
+          configId: 'model',
+          choiceId: productModelControl.currentChoiceId,
+        });
+      const acknowledgedProductModel = acknowledgedProductConfiguration.controls.find(
+        (control) => control.id === 'model',
+      );
+      if (!acknowledgedProductModel) {
+        throw new Error('acknowledged DSH runtime omitted the product model control');
+      }
+      expect(
+        acknowledgedProductModel.choices.find(
+          (choice) => choice.id === acknowledgedProductModel.currentChoiceId,
+        )?.label,
+      ).toBe(selectedModelLabel);
+      expect(acknowledgedProductModel.currentChoiceId).not.toBe(
+        productModelControl.currentChoiceId,
+      );
+      expect(productModelControl.choices.map((choice) => choice.id)).not.toContain(
+        modelControl.currentValue,
+      );
+      expect(JSON.stringify(acknowledgedProductConfiguration)).not.toContain(
+        LOOPBACK_PROVIDER_API_KEY,
+      );
+      const acknowledgedControls = bridgeHost.bridge.getConfigurationOptionsForMain(binding);
       expect(acknowledgedControls).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -1340,6 +1405,9 @@ describePromptRuntime('packaged macOS supervised DSH prompt integration', () => 
         ]),
       );
       expect(JSON.stringify(acknowledgedControls)).not.toContain(LOOPBACK_PROVIDER_API_KEY);
+      /* The Renderer only receives opaque choice ids above. Main may still
+       * inspect the raw runtime value for its own allowlist enforcement. */
+      expect(modelControl.allowedValues).toContain(modelControl.currentValue);
       const events: unknown[] = [];
       session.onEvent((event) => events.push(event));
 

@@ -93,6 +93,7 @@ describe('Main-owned DSH provider route', () => {
     materializeDshManagedAcpProviderPatch({ dshHome, homeMode: 'cindy-managed' }, route);
 
     const patch = readFileSync(join(dshHome, 'cordis.patch.yml'), 'utf8');
+    expect(patch).toContain('protocol: messages');
     expect(patch).toContain('CINDY_DSH_PROVIDER_API_KEY');
     expect(patch).toContain('CINDY_DSH_PROVIDER_BASE_URL');
     expect(patch).not.toContain(route.baseUrl);

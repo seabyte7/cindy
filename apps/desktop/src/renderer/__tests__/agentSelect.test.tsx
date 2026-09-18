@@ -126,12 +126,12 @@ describe('AgentSelect', () => {
 
   it('仅 includeDsh 的 New Maker 入口显示 DSH，普通模型选择域仍不显示', () => {
     const onChange = vi.fn<(next: 'cc' | 'codex' | 'pi' | 'dsh') => void>();
-    render(<AgentSelect value="dsh" onChange={onChange} includeDsh />);
+    render(<AgentSelect value="codex" onChange={onChange} includeDsh />);
 
-    fireEvent.click(screen.getByRole('button', { name: '选择引擎：DSH' }));
+    fireEvent.click(screen.getByRole('button', { name: '选择引擎：Codex' }));
     expect(screen.getByTestId('agent-select-option-dsh')).toBeTruthy();
-    fireEvent.click(screen.getByTestId('agent-select-option-codex'));
-    expect(onChange).toHaveBeenCalledWith('codex');
+    fireEvent.click(screen.getByTestId('agent-select-option-dsh'));
+    expect(onChange).toHaveBeenCalledWith('dsh');
   });
 
   // 以下三条对应设置页 / 工作目录偏好行的复用需求(#1490)。默认行为不许变:
