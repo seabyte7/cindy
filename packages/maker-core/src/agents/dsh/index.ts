@@ -26,9 +26,11 @@ import type {
   DshBridgeCommittedFollowEvent,
   DshBridgePermissionRequest,
   DshBridgePort,
+  DshBridgePromptFailureCode,
   DshBridgePromptContent,
   DshBridgePromptStopReason,
 } from './bridge-port.js';
+import { DshBridgePromptFailure } from './bridge-port.js';
 import { createAsyncQueue, type AsyncQueue } from '../shared/async-queue.js';
 
 const CAPABILITIES: Capabilities = {
@@ -170,6 +172,22 @@ function assertPromptReceipt(value: unknown): DshBridgePromptStopReason {
     throw new Error('DSH bridge returned an unknown prompt stop reason');
   }
   return stopReason;
+}
+
+function promptFailureCode(error: unknown): DshBridgePromptFailureCode {
+  return error instanceof DshBridgePromptFailure ? error.code : 'prompt-failed';
+}
+
+function promptFailureErrorName(error: unknown): string {
+  if (error instanceof DshBridgePromptFailure) return 'DshBridgePromptFailure';
+  return error instanceof Error ? 'Error' : typeof error;
+}
+
+function promptFailureMessage(code: DshBridgePromptFailureCode): string {
+  if (code === 'image-input-unavailable') {
+    return 'DSH image input is unavailable in the active runtime; update and restart DSH.';
+  }
+  return 'DSH prompt did not complete; reconcile the session before retrying.';
 }
 
 function isOwnedCommittedFollowEvent(value: unknown, reference: DshBridgeAgentSessionRef): boolean {
@@ -566,18 +584,23 @@ export class DshAgent extends BaseAgent {
             });
           })
           .catch((error: unknown) => {
-            void error;
+            const failureCode = promptFailureCode(error);
             promptTerminalReceived = true;
             logger.warn('DSH prompt did not reach a terminal receipt', {
               cindySessionId: reference.cindySessionId,
               reason: 'terminal-receipt-unavailable',
+              failureCode,
+              errorName: promptFailureErrorName(error),
             });
             queue.push({
               type: 'error',
               data: {
-                message: 'DSH prompt did not complete; reconcile the session before retrying.',
+                message: promptFailureMessage(failureCode),
                 isTerminal: true,
-                reason: 'dsh-prompt-unconfirmed',
+                reason: failureCode === 'image-input-unavailable'
+                  ? 'dsh-prompt-rejected'
+                  : 'dsh-prompt-unconfirmed',
+                code: failureCode,
               },
               source: 'dsh',
             });

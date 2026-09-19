@@ -47,6 +47,27 @@ export type DshBridgeAgentResumeReceipt = DshBridgeAgentReceipt<'resume'>;
 export type DshBridgePromptStopReason = 'end_turn' | 'cancelled';
 
 /**
+ * Safe, product-owned failure categories for a prompt turn.  The underlying
+ * ACP/provider error must stay inside Main because it may contain endpoint,
+ * credential, or user-input text.
+ */
+export type DshBridgePromptFailureCode =
+  | 'image-input-unavailable'
+  | 'prompt-outcome-uncertain'
+  | 'prompt-failed';
+
+export class DshBridgePromptFailure extends Error {
+  readonly name = 'DshBridgePromptFailure';
+
+  constructor(
+    readonly code: DshBridgePromptFailureCode,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
  * A Renderer-originated content reference after generic Maker has validated
  * only its shape. Desktop Main remains solely responsible for authorizing,
  * staging and serializing local bytes into ACP prompt blocks.

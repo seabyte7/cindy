@@ -11,6 +11,7 @@ import { isAbsolute } from 'node:path';
 
 import {
   DSH_BRIDGE_CONTRACT_VERSION,
+  DshBridgePromptFailure,
   translateDshFollowEvent,
   type DshAcpSessionClient,
   type DshBridgeAgentReceipt,
@@ -27,6 +28,7 @@ import {
   type DshBridgePromptReceipt,
   type DshBridgePromptStopReason,
   type DshBridgeReceiptId,
+  type Logger,
 } from '@cindy/maker-core';
 
 import type {
@@ -148,6 +150,8 @@ export interface DshPromptContentAdmission {
 export interface DshControlPlaneOptions {
   scopeId: string;
   client: DshAcpSessionClient;
+  /** Main logger for non-secret runtime diagnostics. */
+  logger?: Logger;
   /**
    * Main-owned workdir authorization. An absolute path alone is not a grant
    * to execute DSH there; the production bridge must inject the same policy
@@ -359,6 +363,36 @@ function parseDshMainConfigurationOptions(value: unknown): ParsedDshMainConfigur
   return { options: parsed, labels };
 }
 
+function safeModelConfigurationValue(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    const candidates = Array.isArray(parsed) ? parsed : [parsed];
+    const model = [...candidates].reverse().find(
+      (candidate): candidate is string =>
+        typeof candidate === 'string' &&
+        /^[A-Za-z0-9._:@/-]{1,128}$/.test(candidate) &&
+        !candidate.includes('://'),
+    );
+    return model ?? '<opaque>';
+  } catch {
+    return '<opaque>';
+  }
+}
+
+function safeErrorDiagnostics(error: unknown): { errorName: string; errorCode: number | null } {
+  if (!error || typeof error !== 'object') return { errorName: typeof error, errorCode: null };
+  const value = error as { code?: unknown };
+  return {
+    errorName: error instanceof DshBridgePromptFailure
+      ? 'DshBridgePromptFailure'
+      : error instanceof Error
+        ? 'Error'
+        : 'object',
+    errorCode: Number.isSafeInteger(value.code) ? value.code as number : null,
+  };
+}
+
 const DEFAULT_OPERATION_TIMEOUT_MS = 30_000;
 const DEFAULT_PERMISSION_TIMEOUT_MS = 60_000;
 const MAX_PENDING_PERMISSION_TOOLS = 256;
@@ -443,6 +477,7 @@ function parseNativePermissionRequest(value: unknown): NativePermissionRequest |
 export class DshControlPlane implements DshBridgePort {
   private readonly scopeId: string;
   private readonly client: DshAcpSessionClient;
+  private readonly logger: Logger | undefined;
   private readonly assertAuthorizedCwd: (cwd: string, cindySessionId: string) => void;
   private readonly now: () => Date;
   private readonly newReceiptId: () => string;
@@ -473,6 +508,7 @@ export class DshControlPlane implements DshBridgePort {
     }
     this.scopeId = options.scopeId;
     this.client = options.client;
+    this.logger = options.logger;
     this.assertAuthorizedCwd = options.assertAuthorizedCwd;
     this.now = options.now ?? (() => new Date());
     this.newReceiptId = options.receiptId ?? randomUUID;
@@ -547,6 +583,12 @@ export class DshControlPlane implements DshBridgePort {
         sessionCapabilities: Object.freeze({ close: true, list: true, resume: true }),
         inlineImagePromptSupported: initialized.agentCapabilities.promptCapabilities?.image === true,
       });
+      this.logger?.info('DSH ACP capability snapshot admitted', {
+        protocolVersion: this.capabilitySnapshot.protocolVersion,
+        agentName: this.capabilitySnapshot.agentName,
+        agentVersion: this.capabilitySnapshot.agentVersion,
+        inlineImagePromptSupported: this.capabilitySnapshot.inlineImagePromptSupported,
+      });
       this.initialized = true;
     } catch (error) {
       // No request has a usable receipt until initialization succeeds. The
@@ -615,6 +657,7 @@ export class DshControlPlane implements DshBridgePort {
         );
         this.assertReady();
         const configuration = parseDshMainConfigurationOptions(created.configOptions);
+        this.logSessionRuntimeState(input.cindySessionId, 'session/new', configuration.options);
         const state: LiveBindingState = {
           binding: {
             cindySessionId: input.cindySessionId,
@@ -694,6 +737,7 @@ export class DshControlPlane implements DshBridgePort {
         );
         this.assertReady();
         const configuration = parseDshMainConfigurationOptions(resumed.configOptions);
+        this.logSessionRuntimeState(input.cindySessionId, 'session/resume', configuration.options);
         state.configuration = configuration.options;
         state.configurationLabels = configuration.labels;
         state.configurationTokens.clear();
@@ -970,7 +1014,13 @@ export class DshControlPlane implements DshBridgePort {
     // its user-approved content and the ensuing ACP prompt.
     state.promptInFlight = true;
     try {
-      const prompt = await this.admitPromptContent(input.cindySessionId, content);
+      let prompt: readonly unknown[];
+      try {
+        prompt = await this.admitPromptContent(input.cindySessionId, content);
+      } catch (error) {
+        this.logPromptFailure(state, error, 'prompt-admission-rejected');
+        throw error;
+      }
       const receiptId = this.newReceiptId();
       assertNonEmpty(receiptId, 'prompt receiptId');
       const acceptedAt = this.now().toISOString();
@@ -984,7 +1034,8 @@ export class DshControlPlane implements DshBridgePort {
             prompt,
           }),
         );
-      } catch {
+      } catch (error) {
+        this.logPromptFailure(state, error);
         await this.markPromptReceiptUncertain(state, receiptId);
         return await this.blockAfterPromptReceiptUncertain();
       }
@@ -1031,6 +1082,45 @@ export class DshControlPlane implements DshBridgePort {
       cindySessionId,
       content,
       inlineImagePromptSupported: this.capabilitySnapshot?.inlineImagePromptSupported === true,
+    });
+  }
+
+  private logSessionRuntimeState(
+    cindySessionId: string,
+    operation: 'session/new' | 'session/resume',
+    configuration: ReadonlyMap<DshMainConfigurationId, DshMainConfigurationOption>,
+  ): void {
+    const model = configuration.get('model');
+    this.logger?.info('DSH runtime session admitted', {
+      cindySessionId,
+      operation,
+      runtimeReleaseId: this.durableBinding?.runtimeIdentity.runtimeReleaseId ?? null,
+      runtimeVersion: this.durableBinding?.runtimeIdentity.runtimeVersion ?? null,
+      agentName: this.capabilitySnapshot?.agentName ?? null,
+      agentVersion: this.capabilitySnapshot?.agentVersion ?? null,
+      inlineImagePromptSupported: this.capabilitySnapshot?.inlineImagePromptSupported === true,
+      model: safeModelConfigurationValue(model?.currentValue),
+      modelOptionCount: model?.allowedValues.length ?? 0,
+    });
+  }
+
+  private logPromptFailure(
+    state: LiveBindingState,
+    error: unknown,
+    reason: 'prompt-admission-rejected' | 'terminal-receipt-unavailable' = 'terminal-receipt-unavailable',
+  ): void {
+    const diagnostics = safeErrorDiagnostics(error);
+    const model = state.configuration.get('model');
+    this.logger?.error('DSH prompt terminal receipt unavailable', {
+      cindySessionId: state.binding.cindySessionId,
+      reason,
+      ...diagnostics,
+      runtimeReleaseId: this.durableBinding?.runtimeIdentity.runtimeReleaseId ?? null,
+      runtimeVersion: this.durableBinding?.runtimeIdentity.runtimeVersion ?? null,
+      agentName: this.capabilitySnapshot?.agentName ?? null,
+      agentVersion: this.capabilitySnapshot?.agentVersion ?? null,
+      inlineImagePromptSupported: this.capabilitySnapshot?.inlineImagePromptSupported === true,
+      model: safeModelConfigurationValue(model?.currentValue),
     });
   }
 
@@ -1465,7 +1555,10 @@ export class DshControlPlane implements DshBridgePort {
     this.needsReconcileReason ??= 'DSH prompt outcome is uncertain';
     await this.persistAllBindingsNeedReconcile().catch(() => undefined);
     await this.client.close('DSH prompt outcome is uncertain').catch(() => undefined);
-    throw new Error('DSH bridge requires reconciliation because prompt outcome is uncertain');
+    throw new DshBridgePromptFailure(
+      'prompt-outcome-uncertain',
+      'DSH bridge requires reconciliation because prompt outcome is uncertain',
+    );
   }
 
   /**

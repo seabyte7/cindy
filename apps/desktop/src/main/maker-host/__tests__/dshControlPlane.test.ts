@@ -7,6 +7,7 @@ import type {
   DshAcpServerRequestHandler,
   DshAcpSessionClient,
   DshAcpTransportCloseHandler,
+  Logger,
 } from '@cindy/maker-core';
 
 import { DshControlPlane } from '../dsh-control-plane.js';
@@ -1268,12 +1269,25 @@ describe('DshControlPlane', () => {
     const client = new FakeDshAcpClient();
     const store = new MemoryDshBindingStore();
     const promptReceipts = fakePromptReceiptStore();
+    const errorLog = vi.fn();
+    const logger = {
+      trace: vi.fn(),
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: errorLog,
+      fatal: vi.fn(),
+      child: vi.fn(),
+    } as unknown as Logger;
     client.prompt = vi.fn(async () => {
-      throw new Error('fixture-native-prompt-error contains dsh-test-token');
+      const error = new Error('fixture-native-prompt-error contains dsh-test-token');
+      error.name = 'dsh-test-token';
+      throw error;
     });
     const bridge = new DshControlPlane({
       scopeId: 'scope-a',
       client,
+      logger,
       assertAuthorizedCwd: assertProjectCwd,
       receiptId: () => 'receipt-1',
     });
@@ -1292,6 +1306,15 @@ describe('DshControlPlane', () => {
       cindySessionId: 'cindy-1',
       receiptIds: ['receipt-1'],
     });
+    expect(errorLog).toHaveBeenCalledWith(
+      'DSH prompt terminal receipt unavailable',
+      expect.objectContaining({
+        cindySessionId: 'cindy-1',
+        reason: 'terminal-receipt-unavailable',
+        errorName: 'Error',
+      }),
+    );
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('dsh-test-token');
     await expect(bridge.prompt({ ...binding, text: 'must not retry' })).rejects.toThrow(
       'needs reconciliation',
     );

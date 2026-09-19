@@ -74,12 +74,14 @@ describe('DSH prompt content admission', () => {
       { type: 'image', data: image.toString('base64'), mimeType: 'image/png' },
     ]);
 
-    const resource = await admission.prepare({
+    await expect(admission.prepare({
       cindySessionId: 'task-file-image',
       inlineImagePromptSupported: false,
       content: [{ type: 'image', path: source, mimeType: 'image/png' }],
+    })).rejects.toMatchObject({
+      name: 'DshBridgePromptFailure',
+      code: 'image-input-unavailable',
     });
-    expect(resource[0]).toMatchObject({ type: 'resource_link', name: 'pixel.png' });
   });
 
   it('rejects symlink sources and extra directory mentions rather than widening task authority', async () => {

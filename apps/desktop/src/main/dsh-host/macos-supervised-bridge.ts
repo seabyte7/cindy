@@ -175,6 +175,7 @@ export async function startMacosSupervisedDshBridge(
     const bridge = new DshControlPlane({
       scopeId: paths.scopeId,
       client,
+      logger: options.logger,
       assertAuthorizedCwd: options.assertAuthorizedCwd,
       promptContentAdmission: createDshPromptContentAdmission({ stagingRoot: paths.processHome }),
       internalMcpLeaseFactory: options.internalMcpLeaseFactory,
@@ -188,6 +189,13 @@ export async function startMacosSupervisedDshBridge(
     await bridge.initialize();
     const snapshot = bridge.getCapabilitySnapshot();
     if (!snapshot) throw new Error('DSH bridge did not retain its ACP capability snapshot');
+    options.logger.info('DSH supervised runtime admitted', {
+      runtimeReleaseId: layout.runtime.releaseId,
+      runtimeVersion: layout.runtime.expectedVersion,
+      agentName: snapshot.agentName,
+      agentVersion: snapshot.agentVersion,
+      inlineImagePromptSupported: snapshot.inlineImagePromptSupported,
+    });
     const runtimeIdentity: DshDurableRuntimeIdentity = Object.freeze({
       runtimeReleaseId: layout.runtime.releaseId,
       runtimeVersion: layout.runtime.expectedVersion,

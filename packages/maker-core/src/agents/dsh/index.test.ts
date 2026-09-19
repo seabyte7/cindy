@@ -13,6 +13,7 @@ import type {
   DshBridgePromptContent,
   DshBridgePromptReceipt,
 } from './bridge-port.js';
+import { DshBridgePromptFailure } from './bridge-port.js';
 import { DshAgent } from './index.js';
 import { translateDshFollowEvent } from './translator.js';
 
@@ -410,12 +411,16 @@ describe('DshAgent', () => {
     });
     await handle.send({ type: 'user', content: 'fail safely' });
     expect((await nextEvent(handle)).type).toBe('status');
-    bridge.promptDeferred.reject(new Error('native endpoint/token leaked here'));
+    bridge.promptDeferred.reject(new DshBridgePromptFailure(
+      'prompt-outcome-uncertain',
+      'native endpoint/token leaked here',
+    ));
     const error = await nextEvent(handle);
     expect(error).toMatchObject({
       type: 'error',
       data: { message: 'DSH prompt did not complete; reconcile the session before retrying.', isTerminal: true },
     });
+    expect(error).toMatchObject({ data: { code: 'prompt-outcome-uncertain' } });
     expect(JSON.stringify(error)).not.toContain('endpoint');
     expect(JSON.stringify(error)).not.toContain('token');
     await handle.close();

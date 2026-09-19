@@ -14,7 +14,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import type { DshBridgePromptContent } from '@cindy/maker-core';
+import { DshBridgePromptFailure, type DshBridgePromptContent } from '@cindy/maker-core';
 
 export type DshAcpPromptContent =
   | { readonly type: 'text'; readonly text: string }
@@ -142,6 +142,13 @@ export function createDshPromptContentAdmission(input: {
         if (item.type === 'mention' && item.kind === 'dir') {
           throw new Error(
             'DSH accepts only the task working directory; extra directory mentions are unavailable',
+          );
+        }
+
+        if (item.type === 'image' && !inlineImagePromptSupported) {
+          throw new DshBridgePromptFailure(
+            'image-input-unavailable',
+            'DSH active ACP runtime does not advertise image input',
           );
         }
 
