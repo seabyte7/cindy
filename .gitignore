@@ -1,5 +1,6 @@
 # ── 构建 / 依赖 / 缓存 ──────────────────────────────────────
 node_modules/
+.pnpm-store/
 dist/
 # Android/Gradle modules generate local intermediates and compiled artifacts.
 **/android/build/

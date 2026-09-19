@@ -1,10 +1,28 @@
 # Cindy 客户端架构说明
 
+> 阅读顺序：[接入原理](multi-agent-harness-principles.md) → **本篇：架构全貌** → [技术方案与接入指南](multi-agent-harness-integration.md)。
+> 核对日期：2026-09-16；源码基线：`773672742c48f8195c21acba16efb8ae52879c49`，分支 `codex/dsh-runtime-main-20260915`，包含当时未提交的 DSH provider、注册和任务控件改动。
 > 本文是对当前 Cindy 客户端仓库的架构导览，重点说明各层的职责、运行位置、数据归属与相互调用方式。
 > 内容依据当前源码、workspace `package.json`、本地协议 package 及开发规则静态核对得出。
 >
 > **核对边界**：本文描述的是客户端仓库现状，不包含独立服务端的内部实现；本次未启动 Desktop、Mobile
 > 或真实远程设备，因此运行期、人机验收和跨端线上兼容仍需另行验证。
+
+## 目录与术语
+
+- [1. 系统定位](#1-先给结论cindy-是什么架构) · [2. 仓库与依赖](#2-仓库与依赖方向)
+- [3. Desktop 分层](#3-desktop执行宿主的完整分层) · [4. 数据与持久化](#4-desktop-本地数据与持久化)
+- [5. Maker 与四种 harness](#5-makeragent-编排核心) · [6. 工具与扩展](#6-工具mcpskill-与插件)
+- [7. Orca](#7-orca多-agent-协同) · [8. 三种远程拓扑](#8-远程能力sshdesktop-to-desktop-与-mobile)
+- [9. Device-link](#9-device-link-协议与状态流) · [10. 横向能力](#10-schedulerimvoicegit-与其它横向能力)
+- [11. 跨端协议](#11-跨端协议本地实现与兼容契约) · [12. 信任边界](#12-安全边界与信任模型)
+- [13. 构建与验证](#13-启动构建发布和验证链路) · [14. 典型调用链](#14-典型调用链)
+- [15. 风险与边界](#15-架构优点风险与当前边界) · [16. 源码导航](#16-代码导航表)
+- [17. 架构主线](#17-结语) · [18. 覆盖映射与事实状态](#architecture-coverage)
+
+本文中“任务”指 Cindy 业务 `Session`，“原生 session/thread”指 harness 的执行身份；“对话”指任务内交流和内容。
+Host 指持有平台资源并装配依赖的一层，adapter 指协议适配器；harness 指 Agent 执行框架，provider 指模型连接来源。
+Orca Worker、原生子 Agent 和 Bot 身份是不同对象。
 
 ## 1. 先给结论：Cindy 是什么架构
 
@@ -26,7 +44,7 @@ Cindy 不是把某一种模型重新实现一遍的聊天页面，而是一个�
   │       ├─ Scheduler / IM / Voice      自动派活、消息入口、语音输入
   │       └─ Device Link / SSH           连接其它设备与远程工作区
   │
-  ├─ Claude Code / Codex / Pi            外部或随包 Agent Harness
+  ├─ Claude Code / Codex / Pi / DSH      原生 Agent Harness（各自准入与生命周期）
   ├─ Models / Gateways / OAuth            模型与授权来源
   └─ Remote services                     独立服务端，不在本仓库内
 ```
@@ -59,7 +77,7 @@ Cindy 不是把某一种模型重新实现一遍的聊天页面，而是一个�
 | `packages/*-protocol` | 客户端本地维护的 wire protocol package；服务端在其独立仓中维护兼容实现。当前包含 device-link、插件与 Slack hook 等契约。 |
 | `config/` | 区域和环境相关的端点清单，启动早期解析，供鉴权、模型访问、device-link、更新等链路使用。 |
 | `scripts/` | 依赖、开发启动、Agent binary、端点、文档、测试和 worktree 工具。 |
-| `tools/` | Claude、Codex、ripgrep、Pi 等 Desktop runtime 的版本 pin 与更新脚本。 |
+| `tools/` | Claude、Codex 目录包、ripgrep、Pi 的版本 pin 与更新脚本；DSH 另有 source release 与受监督 macOS 构建清单。 |
 | `docs/` | 工程、产品、设计、协议、安全和架构规则；本文位于 `docs/architecture.md`。 |
 
 ### 2.2 依赖方向
@@ -208,8 +226,8 @@ Renderer 入口是 [`apps/desktop/src/renderer/index.tsx`](../apps/desktop/src/r
 - `issues` 与 `maker-experimental`：问题入口和运行链路诊断。
 - `sidebar-window`、`ghost-panel-window`：从主窗口拆出的辅助窗口。
 
-这里的“任务”是产品层可独立打开、删除、重命名的 session；“对话”用于任务内的交流过程或没有项目归属的
-workspace 分类；单条往来称为“消息”。代码中仍大量使用 `session`、`chat`、`message` 等内部术语，不能把
+这里的“任务”是产品层可独立打开、删除、重命名的 session；“对话”用于任务内的交流过程与内容；
+内部 `workspaceKind='dialogue'` 仍可使用应用管理的工作目录，不等于原生 runtime 没有 cwd。单条往来称为“消息”。代码中仍大量使用 `session`、`chat`、`message` 等内部术语，不能把
 这些内部名词机械替换成一个中文词。
 
 ### 3.4 主界面布局树
@@ -250,6 +268,11 @@ makerChatStore（按 sessionId 分片）
 
 它用 module-level `Map<sessionId, ...>` 保存每个任务的 UI 投影，并只安装一组全局 IPC listener，再把事件按
 任务 ID 路由到对应分片。这样组件卸载、路由切换或任务暂时不可见时，不会错误地清理仍在运行的 Agent。
+
+Main 事件处理已拆为 [`sessionEventPipeline.ts`](../apps/desktop/src/main/maker-ipc/sessionEventPipeline.ts)：
+`prepareSessionEvent → persistSessionStreamEvent → deliverSessionEvent → finishSessionTerminalEvent`，
+再记录快照和各引擎 usage。异步持久化保留原始轮次归属；不是每个原生包都直接写一条消息。
+DSH 的 raw ACP 先在 Main 控制面完成校验和 journal 提交，再经 `DshAgent` 进入这条公共链路。
 
 Renderer 侧的 [`sessionService.ts`](../apps/desktop/src/renderer/lib/sessionService.ts) 和
 [`makerTransport.ts`](../apps/desktop/src/renderer/lib/makerTransport.ts) 进一步把“任务数据来自本机还是远程设备”
@@ -298,6 +321,26 @@ DB 负责恢复所需的产品记录和历史。两者通过 host 的生命周�
   `process.cwd()` 或仓库根作为持久数据、凭证或临时文件回退路径。
 - 插件只能通过 Host 授权的 grant/deposit/ledger 交换附件、目录和媒体，不能拿到不必要的宿主绝对路径。
 
+### 4.3 任务、原生历史与运行状态的归属
+
+| 对象 | 真相源 | 其它层如何使用 |
+|---|---|---|
+| 任务身份、归档、消息 | Main DB 的 sessions/messages 等表 | Renderer/Mobile 按来源读取投影；归档不等于原生进程退出 |
+| 当前执行与交互等待 | Maker activeSessions、Session、实际 handle/transport | UI 快照只供呈现；不能从 DB 的产品 status 推断正在生成 |
+| Claude 原生历史 | SDK/CLI session 与消息 UUID/checkpoint | Cindy 保存关联，resume/fork 仍需原生数据 |
+| Codex 原生历史 | thread、rollout 历史根与 sqlite_home | 本轮认证来源与历史归属分别处理；产品消息不等于原生历史 |
+| Pi 原生历史 | 原生 session JSONL 与 entry tree | Host 提供 agent home，RPC 负责 load/fork/navigate |
+| DSH native identity | Main-owned durable binding | Maker 获得不透明引用，不直接拿 native session ID |
+| DSH 输入与投影 | prompt receipt ledger、projection journal、activity snapshots | 先确认持久化与归属再投影，不凭断线猜测是否可以重发 |
+| 用户布局／偏好 | 对应用户级 store 与 override | 不与单个任务或模型上下文混用 |
+
+身份映射集中在 [`agentKindConversion.ts`](../apps/desktop/src/shared/agentKindConversion.ts)：DB/UI 的 `cc`
+对应核心的 `claude-code`，其余为 `codex`、`pi`、`dsh`。显式未知值必须拒绝；仅历史缺省值保留 `cc` 兼容。
+`SessionStorage` 管任务元数据，消息持久化由 Main 事件链承接，不能将二者误认为同一接口。
+DSH 存储入口见 [`dshSessionBindings.ts`](../apps/desktop/src/main/localDb/dshSessionBindings.ts) 和
+[`dshPromptReceipts.ts`](../apps/desktop/src/main/localDb/dshPromptReceipts.ts)；DB 历史迁移须遵守
+[数据库规则](dev-rules/database-and-migrations.md)，不能为新增引擎重写历史 migration。
+
 ## 5. Maker：Agent 编排核心
 
 ### 5.1 Maker Host 与 Maker Core 的关系
@@ -311,6 +354,7 @@ Electron Main
       ├─ MCP provider factory
       ├─ SSH / remote-file / cc-manager adapter
       ├─ Claude / Codex / Pi runtime config
+      ├─ DSH registrar / task bridge / owner-scoped storage
       └─ lifecycle hooks / logger / usage / memory
               ↓ 注入依赖
         @cindy/maker-core
@@ -325,15 +369,16 @@ Electron Main
 
 | 组件 | 功能与用途 |
 |---|---|
-| `Maker` | 注册不同 `AgentKind` 的 BaseAgent；以 `(agentKind, workDir)` 等上下文创建和复用 session；维护 active session、Codex thread claim、singleflight 与生命周期钩子。 |
+| `Maker` | 注册不同 `AgentKind` 的 BaseAgent；按业务 session ID 复用 live session、对并发创建 singleflight；维护原生身份 claim、生命周期钩子与退出清理。相同 workDir 不意味着同一个任务。 |
 | `Session` | 一个 Agent session 的运行包装器；负责发送输入、订阅事件、交互决策、权限/能力切换、状态和 stall watchdog。 |
 | `agents/base-agent.ts` | Agent vendor 适配器的公共基类和生命周期接口。 |
 | `agents/claude-code` | Claude Code SDK/CLI 的连接与事件翻译。 |
 | `agents/codex` | Codex app-server、thread、MCP context 和 Responses 路由。 |
-| `agents/pi` | Pi harness 的可选接入，拥有独立环境和 MCP 适配。 |
+| `agents/pi` | Pi RPC、原生 session tree、扩展和 MCP 网关；本地或 SSH transport。 |
+| `agents/dsh` | 通过 Main 注入的 `DshBridgePort` 访问受控任务，只消费安全 receipt 和已提交事件；不自行启动 runtime。 |
 | `agents/shared` | AsyncQueue、usage 计量、自动 compact/review、网络错误、图片大小等共用原语。 |
 | `interfaces/*` | `SessionStorage`、`Logger`、`AuthAdapter`、`McpProvider`、运行时配置等宿主注入接口。 |
-| translators | 把 Claude/Codex/Pi 的 vendor event 转成统一 `AgentEvent`，供 Maker IPC 和 UI 消费。 |
+| translators | 把已支持的原生事件转成 `AgentEvent`；DSH 原始协议翻译与 durable projection 由 Main 控制面承接。 |
 
 Maker Core 不负责：UI、Electron、产品账号流程、具体 DB 查询、插件界面、服务端请求策略或凭证文件位置。这些都
 由 Host 或上层负责。
@@ -342,10 +387,17 @@ Maker Core 不负责：UI、Electron、产品账号流程、具体 DB 查询、�
 
 Desktop 随包使用或按需准备 Claude Code、Codex、Pi、ripgrep 等 runtime：
 
-- `apps/claude-code-bin`、`apps/codex-bin`、`apps/ripgrep-bin` 保存平台分发入口，不把实际二进制直接当源码维护。
+- 当前生产 Codex 走 `apps/codex-package-bin` 完整目录包，包含 code-mode host、rg 和 resources；`apps/codex-bin` 为旧单二进制布局。Claude、Pi 和 ripgrep 同样有各自受管资产入口。
 - `tools/*/latest.json` 保存版本 pin。
 - `scripts/ensure-agent-binaries.mjs` 负责安装、校验和准备。
 - 远程 SSH 场景会把所需 runtime/bundle 和 daemon 安装到远端，并通过 remote-forward 或 NDJSON RPC 连接。
+- DSH 另走 source build 与 macOS signed Helper 组装，不从普通 binary 配置表推断其已安装或跨平台可用。
+
+源码 pin 与实际运行版本需分开：当前 Claude pin `2.1.259`、SDK `0.2.112`，Codex 目录包 pin `0.153.4`、
+Pi pin `0.85.1`；旧 Codex pin `0.145.0` 不是当前目录包版本。DSH 当前受监督清单为
+`cindy-dsh-0.1.2-alpha.3-build.11-macos-supervised`。依据见
+[运行时装配](../apps/desktop/src/main/agent-binaries/index.ts)、[准备脚本](../scripts/ensure-agent-binaries.mjs)、
+[DSH source release](../tools/dsh/macos-supervised-source-release.json)；这些值不证明用户安装包正在运行同版本。
 
 不同 Agent 的执行方式不同，但上层目标一致：把 vendor-specific 的输入、事件、交互和 usage 映射到统一的
 Maker/Session 契约中。
@@ -357,7 +409,6 @@ Maker/Session 契约中。
 | 模块 | 功能 |
 |---|---|
 | `@cindy/model-providers` | provider catalog、模型可见性、路由选择、OAuth/API key/source、effort/fast mode 等纯逻辑。 |
-| `@cindy/model-providers` | 客户端侧模型 catalog/registry 的 wire types、严格解析与路由逻辑。 |
 | `@cindy/anthropic-compat-proxy` | 本地 loopback HTTP proxy，剥离非 Anthropic 后端无法理解的 Anthropic 专属字段，让 Claude SDK 通过网关访问其它模型。 |
 | `@cindy/anthropic-responses-bridge` | Anthropic Messages 与 OpenAI Responses 的 loopback 转换，供 Claude SDK 使用 ChatGPT subscription/xAI 等 native route。 |
 | `@cindy/responses-anthropic-bridge` | 进程内 OpenAI Responses ↔ Anthropic Messages 转换。 |
@@ -366,6 +417,85 @@ Maker/Session 契约中。
 
 这组桥的价值是让上层 Agent 会话保持统一，而把 provider 和 wire format 的差异收敛在连接层；它们不应偷偷改变
 Agent 事件顺序、工具能力或 system prompt 语义。
+
+DSH 复用 custom-provider 的保存与 safeStorage，但采用独立 `runtimes.dsh = { baseUrl, models: [] }`，
+要求 Main 解析唯一有效连接，不参与通用模型列表、价格或三引擎选模；`cindy-dsh-managed` 是 runtime 路由标识。
+详细资料优先级与执行端目录边界见[模型配置入口](dev-rules/model-catalog-maintenance.md)。
+
+### 5.4 四种 harness 的进程与协议
+
+```mermaid
+flowchart LR
+  UI[Renderer] --> PRE[固定 preload API]
+  PRE --> IPC[Main maker-ipc]
+  IPC --> MS[Maker / Session]
+  MS --> CC[Claude adapter / SDK Query]
+  CC --> CLI[Claude CLI]
+  MS --> CX[Codex adapter / AppServerHost]
+  CX --> AS[共享或隔离 app-server / threads]
+  MS --> PI[Pi adapter / RPC client]
+  PI --> RP[Pi runtime / Cindy extension]
+  MS --> DA[DshAgent]
+  DA --> DP[Main-owned DshControlPlane]
+  DP --> SUP[macOS Supervisor / Helper]
+  SUP --> DS[DSH runtime / ACP]
+```
+
+| Harness | 原生控制通道 | 生命周期特点 | 核心入口 |
+|---|---|---|---|
+| Claude Code | SDK query 与异步消息流 | Query 持有执行上下文；resume、fork、权限与 checkpoint 走 SDK | [adapter](../packages/maker-core/src/agents/claude-code/index.ts) |
+| Codex | app-server JSON-RPC request/notification | host 内多 thread 分流，存在按认证/路由隔离的 host；关闭单 thread 不等于 shutdown 全部 host | [adapter](../packages/maker-core/src/agents/codex/index.ts)、[host](../packages/maker-core/src/agents/codex/app-server/host.ts) |
+| Pi | JSONL RPC，命令响应与事件同流 | 本地进程或远端 daemon；Cindy 扩展承接 MCP/权限，原生持有 session tree | [adapter](../packages/maker-core/src/agents/pi/index.ts)、[RPC client](../packages/maker-core/src/agents/pi/rpc-client.ts) |
+| DSH | Main bridge 内部经 ACP/stdio | 当前本机 darwin-arm64 受监督路径；任务工厂就绪后按任务启动 bridge | [adapter](../packages/maker-core/src/agents/dsh/index.ts)、[task router](../apps/desktop/src/main/dsh-host/task-bridge-router.ts) |
+
+Maker Core 零 Electron 依赖不意味着 adapter 不使用 Node；文件、子进程和 transport 按现有注入边界工作。
+图中 DSH 的 Main 实现通过接口注入，不构成 package 对 Main 的反向 import。
+
+### 5.5 DSH 独立控制面
+
+当前架构是 **Cindy 自己实现控制面，经 ACP 控制受管 runtime**，并非等待上游提供 Native Host API。
+[DSH 专题](dev-rules/dsh-harness.md) 开头的裁决覆盖后文残留的旧 Native Host Gate 表述。
+
+```text
+provider 保存 / owner 就绪 / 显式重试
+  → registerDshAgentIfAvailable：串行对账配置与现有注册
+  → 唯一 HTTPS 配置 + 独立 key + 当前 owner + 固定 Helper 准入
+  → 注册 DshAgent 与任务工厂（不等于真实模型已连通）
+  → 创建任务时授权 cwd / Home bookmark，启动该任务的受监督 bridge
+  → DshControlPlane：binding + prompt receipt + projection journal
+  → ACP runtime 执行
+  → 已提交的安全事件 → DshAgent → Session → 通用 UI
+```
+
+Main 隐藏 native session ID、原始 ACP 和 key；`DshBridgePort` 只跨入 Maker 安全引用、操作回执和已提交事件。
+provider 变化后拒绝使用旧快照启动/发送，活动任务与旧 bridge 的关闭、替换需有序对账。
+当前工作树的 provider CRUD 等待 Main reconciliation；保存成功但注册失败会分别报告，不伪装成保存回滚。
+
+DSH activity 是 `cindy-dsh` provenance 的产品投影，不冒充原生 UI 对象或 Orca Worker。
+状态接口将模型、命令、文件工具、附件和权限运行证据标为 `not-verified-in-this-app`，见
+[`runtime-status.ts`](../apps/desktop/src/main/dsh-host/runtime-status.ts)。已有 fixture 证据不能替代真实 provider、用户目录和跨端验收。
+
+### 5.6 发送、选择、压缩与恢复的协调
+
+输入经 [`sessionSendHandler`](../apps/desktop/src/main/maker-ipc/sessionSendHandler.ts)、
+[`makerSendTransaction`](../apps/desktop/src/main/maker-ipc/makerSendTransaction.ts) 和 `register.ts` 的
+`sendToSessionInternal` 汇入共同发送事务；锁、输入代次、准备、provider accepted 边界与完成事件分开处理。
+Main 在发送时应用普通任务最终的模型/harness 选择，不在用户反复点选择器或 turn 结束时擅自重建。
+
+跨引擎切换限于当前支持的 Claude Code／Codex／Pi 普通本地任务：离场记录原生停泊身份；切回可恢复时注入增量交接，
+无可用停泊身份时构建完整的有界交接。业务任务保持，原生身份可变。SSH、Orca 和 DSH 不应被推断支持同一路径。
+
+日常压缩保持 harness 原生所有权，Host 按明确失败分类和窗口评估触发既有恢复。图片体积、token 超限、
+普通超时、密文压缩错误与网络断线是不同分类。已有工具副作用不得盲目重放原请求；晚到事件保留原始代次归属。
+依据：[切换 handler](../apps/desktop/src/main/maker-ipc/sessionAgentSwitchHandler.ts)、
+[handoff](../apps/desktop/src/main/maker-ipc/agentHandoff.ts)、[上下文规则](dev-rules/maker-core-and-agent-behavior.md)。
+
+### 5.7 关闭与应用退出
+
+`Maker.createSession` 对同业务 ID 去重；失败 handle 清理未确认成功时保留占位，不能先创建第二个原生执行器。
+`Session` 的 abort 是轮次操作，close 是句柄生命周期，detach 在支持的远端路径上保留原生执行。
+账号切换与 app quit 使用不同于普通导航的 teardown 原因，并等待创建与清理收敛。
+Codex 共享 host 在上层 dispose/shutdown 时回收；Pi/Claude 本地进程、远端 daemon 与 DSH Supervisor 各走自己的清理合同。
 
 ## 6. 工具、MCP、Skill 与插件
 
@@ -395,6 +525,11 @@ Skill 是描述“工作如何完成”的可复用方法，通常由 markdown/f
 5. 将被允许的 Skill 交给 Agent 工作流；不把 Skill 本身变成任意主机权限。
 
 Skill 的协议和分发契约由 SkillHub 与相应服务端实现共同维护。
+
+各 harness 原生发现不同：Claude 扫描 commands/skills/agents，Codex 使用 app-server 技能接口，
+Pi 保留原生 package/extension/Skill 发现。管理页扫描和活动任务的启动快照不同，不能在任务中途随意重排工具/指令。
+Pi MCP 当前通过两个稳定网关工具渐进发现完整 schema，Claude/Codex 仍使用各自直接 MCP 注册；详见
+[Pi 规则](dev-rules/pi-harness.md)。DSH 内部 MCP lease 有独立本机实现与测试，不能据此声称通用 MCP 设置已开放。
 
 ### 6.3 插件：沙箱化的富交互能力
 
@@ -463,6 +598,10 @@ Orca 的主要实现入口：
 
 详细状态契约以 [`orca-team-architecture.md`](dev-rules/orca-team-architecture.md) 和当前源码为准。
 
+当前 Worker 类型明确排除 DSH；Claude Code、Codex、Pi 可进入协作链，SSH 还需远端 runtime 与 MCP bridge 就绪。
+原生子 Agent 的 `agent_task_update`、Orca Worker Session 与 DSH activity 使用不同的身份和控制路径；多 harness 注册
+本身不会自动产生协作。未来执行单元／side activity 规划仍须与已交付路径分开阅读。
+
 ## 8. 远程能力：SSH、Desktop-to-Desktop 与 Mobile
 
 远程场景不是把本地 API 的 URL 换一下，而是三种不同的拓扑。
@@ -473,7 +612,9 @@ Orca 的主要实现入口：
 本地 Desktop Main
   ├─ maker-remote-ssh：连接池、认证、远程 host
   ├─ remote-file-service：远程目录扫描、搜索、预览
-  └─ maker-cc-manager：远端 Claude SDK 多 session daemon
+  ├─ maker-cc-manager：远端 Claude SDK 多 session daemon
+  ├─ maker-pi-manager：远端 Pi daemon / attach / detach
+  └─ Codex app-server SSH transport：远端 thread 控制
           │ SSH exec / stdio / remote-forward
 远程主机
   ├─ 工作目录
@@ -483,6 +624,9 @@ Orca 的主要实现入口：
 
 路径和进程真正位于远端时，本地 Main 不能直接用本机 `fs` 访问；必须经 remote-file-service、cc-manager、SSH exec
 或已有的远程通道。远程 Codex/Claude 的 MCP bridge 也需要按 host 建立 remote-forward 和身份上下文。
+
+Pi 使用独立远端 daemon 与 MCP forward，不能复用 Codex 的 per-host 转发槽位。三种远端恢复、账号支持和模型地址
+可达性并非完全一致；本机 loopback provider 不能直接作为远端 endpoint。DSH 当前无等价 SSH 产品链路。
 
 ### 8.2 Desktop-to-Desktop device-link
 
@@ -618,6 +762,37 @@ provider、持久化和 overlay，Mobile 负责原生录音/音频和远程 voic
 - Desktop `main/git-*`、`main/worktree` 负责 snapshot、context、review、branch/worktree 等真实项目操作。
 - Renderer 只消费文件树、diff 和状态，不直接读工作目录。
 
+### 10.5 Bot、记忆与长期任务
+
+Bot Profile 持有稳定身份、目录、Skill、记忆和模型候选链；canonical Session 保留用户主时间线；harness
+工作上下文可以压缩或重建。这三层不能随空闲或打开次数一起更换。Bot 私聊、委派、后台回传和定时入口需解析同一
+canonical link，并沿用任务发送事务；owner/Profile 版本、fallback 与授权边界见
+[伙伴运行时](product-rules/cindy-bots-runtime.md)和 [`botProfileRuntime.ts`](../apps/desktop/src/main/maker-ipc/botProfileRuntime.ts)。
+
+普通 Bot 模型链和 Scheduler 模型执行以三引擎为边界；DSH 不因进入 `AgentKind` 就自动加入。
+记忆还包含 Maker 记忆、项目上下文与原生 auto-memory，使用不同 scope、开关及启动快照；它们不等同于完整消息历史。
+
+### 10.6 媒体与附件
+
+Cindy 管理副本的图片、视频、音频、3D 媒体统一经 `cindy-media`：核验字节 → SHA-256 blob 原子落盘 → ledger
+记账 → 业务引用。持久地址为 `cindy-media://blobs/...`，业务删除移除自己的引用，物理回收由 recycler 决定。
+用户就地读取的文件与 PDF/docx 等非媒体走受控文件通道；旧 `xdt-image` 等协议保留读取兼容，不再作为新增媒体写入口。
+
+附件从 UI 引用进入 [`normalizeAttachments.ts`](../apps/desktop/src/main/maker-ipc/normalizeAttachments.ts) 与各 runtime
+输入适配；图像能力声明不等于当前模型有视觉能力。DSH 再由 Main 授权、staging 并按握手能力决定是否内联图像。
+远端附件保留来源机器，不能把远端路径当本机路径。事实源见[媒体规则](dev-rules/media-storage-and-protocols.md)和
+[`cindy-media`](../apps/desktop/src/main/cindy-media/)。
+
+### 10.7 日志、成本与 Review
+
+Main logger、per-session 日志和原生 stderr 用于诊断；日志上传另经来源白名单、脱敏和崩溃标记代次控制。
+stderr 文案不能替代结构化终态作为恢复控制协议。usage 来自各 harness 的事件与快照，再结合对应连接/模型资料
+计算或展示；DSH 不进入通用三引擎价格路径，未知费用不能写成零。
+
+Review 是带专门目的与权限约束的任务及成果快照/Findings 流程，不是新增 harness；adapter 能生成文字不代表
+已经通过 Review 只读工具与快照合同。入口见[Review 产品方向](product-rules/review-product-direction.md)、
+[日志采集规则](dev-rules/log-upload-and-redaction.md)和[工程约定](dev-rules/engineering-conventions.md)。
+
 ## 11. 跨端协议：本地实现与兼容契约
 
 协议 package 是客户端内的本地实现；服务端在独立仓维护兼容实现。客户端不再依赖协议
@@ -661,6 +836,8 @@ submodule：两端以稳定 wire 语义、fixture 和发布协调来维持兼容
   重新校验，不能只相信 UI 传来的字段。
 - WebView、外部 URL 和插件面板使用隔离 session、导航规则、CSP 和外部浏览器打开策略。
 - Agent prompt 不是权限边界；插件 prompt、UI 确认文案和“工具可见”也不是权限边界。
+- Claude SDK callback、Codex 原生 approvals/权限配置、Pi 扩展拦截与 DSH ACP 一次性权限分别落地。
+  Pi Full Access 不提供 OS 沙箱保证；DSH Helper 的网络 entitlement 也不是精确目的地址防火墙。
 - 远程调用必须同时满足 protocol、allowlist、设备状态、session 来源和被控端 handler 校验。
 - 日志和崩溃上报只能使用 deny-by-default 的来源白名单；不能为了调试把用户消息和凭证混入日志。
 
@@ -715,6 +892,10 @@ Mobile 使用 Expo / React Native / Expo Router：
 静态检查通过不代表真实 device-link、SSH、Agent binary、模型 provider 或插件运行时已经验收；这些属于不同的
 证据层级。
 
+文档检查只校验其已有规则覆盖面，三篇新增交叉链接另行核验。runtime 交付还需检查目录包完整性、
+sidecar、签名、平台布局、版本握手、旧数据恢复和退出残留；DSH 当前开发/证据范围为本机 macOS ARM64。
+本文不把配置 pin、历史测试记录或打包成功当作已安装 App 的当前状态。
+
 ## 14. 典型调用链
 
 ### 14.1 本地 Desktop 创建并运行任务
@@ -722,17 +903,19 @@ Mobile 使用 Expo / React Native / Expo Router：
 ```text
 Renderer 新建任务
   → preload electronAPI.maker / session API
-  → Main maker-ipc
-  → Local DB 创建 session 元数据
-  → maker-host getMaker()
-  → Maker 创建/恢复 Session
-  → Claude/Codex/Pi adapter 启动 vendor runtime
-  → MCP/model/credential adapter
+  → Main maker-ipc 校验、任务锁与 bootstrapSession
+  → maker-host getMaker() / Maker.createSession
+  → Host 准备 MCP/model/credential 与目录准入
+  → Claude/Codex/Pi adapter 或已准入的 DshAgent 创建原生 handle
+  → Maker 校验身份、创建或复用 storage 元数据、包装 Session
   → AgentEvent
   → maker:event
   → makerChatStore
   → 消息、工具调用、状态、交互和 usage UI
 ```
+
+不同入口可能已有任务草稿或 DB 元数据；不能把所有创建都理解为先写完整运行态再启动。
+Maker 的新建路径在原生 handle 就绪后创建/复用 storage 元数据，失败路径负责清理和补偿；首次发送也可 lazy-create。
 
 ### 14.2 Mobile 控制一个 Desktop 任务
 
@@ -770,12 +953,62 @@ DB schedule
   → DB run record + notification
 ```
 
+### 14.5 冷恢复与跨引擎交接
+
+```text
+继续已有任务 → Main 读取任务来源、引擎、原生恢复引用
+  → 同业务 ID 的 create singleflight / 旧 handle 清理
+  → 同引擎：对应原生 resume；DSH 另验 binding / receipt / Home
+  → 已登记跨引擎意图：发送时关闭旧 handle、提交选择、记录 handoff
+  → 目标停泊身份 resume + 增量交接，或新原生上下文 + 全量有界交接
+  → accepted 边界消费交接 → 事件仍归原 Cindy 任务
+```
+
+这不迁移原生私有工具状态；已有副作用的输入不能盲目重放，失败/未知需按对应恢复合同处理。
+
+### 14.6 Orca 派活与回传
+
+```text
+Lead 工具 / UI → Main Orca service → 校验 Lead、team、协作开关和 Worker 偏好
+  → 创建完整 Worker Session → 写协作归属 → 持久队列 / inter-agent dispatch
+  → Worker harness 执行 → terminal observer / 手动 send_to_lead
+  → auto-bridge 或消息回传 → Lead 的既有输入协调器
+```
+
+调用者身份来自宿主上下文，不从工具参数自报；结果归属具体 Worker、任务及派发记录。SSH Worker 继承远端执行位置，
+device-link 控制端只接收投影。DSH activity 不走这条 Worker 创建链。
+
+### 14.7 DSH 创建、权限和投影
+
+```mermaid
+sequenceDiagram
+  participant S as Maker / DshAgent
+  participant B as Main task bridge / control plane
+  participant DB as Binding / Receipt / Journal
+  participant R as 受监督 DSH runtime
+  S->>B: create / resume（Cindy ID 和 scope）
+  B->>DB: 检查 owner、binding 和恢复前提
+  B->>R: ACP session/new / session/resume
+  B-->>S: 安全回执与不透明 handle
+  S->>B: prompt
+  B->>DB: 关联输入 receipt
+  B->>R: ACP prompt
+  R-->>B: permission request（适用时）
+  B->>S: 经安全投影的 permission
+  S-->>B: 通过统一 resolver 获得一次性决定
+  B->>R: allow-once / reject-once
+  R-->>B: updates / prompt terminal
+  B->>DB: 提交 journal 与 receipt 状态
+  B-->>S: committed AgentEvent / 终态
+```
+
 ## 15. 架构优点、风险与当前边界
 
 ### 15.1 优点
 
 - **执行与控制分离**：Desktop 能做重执行，Mobile 能做轻控制；同一任务可以跨设备继续。
-- **Agent 可替换**：Claude Code、Codex、Pi 通过 Maker Core 共享 Session、事件和 UI 契约。
+- **多 harness 接入**：Claude Code、Codex、Pi、DSH 共享任务与事件契约，同时保留独立生命周期和准入。
+  普通任务的运行时切换当前是三引擎能力，不含 DSH。
 - **协议与平台解耦**：wire contract 放在本地 protocol package 和兼容实现中，平台实现放在 host，减少跨端复制。
 - **能力可复用**：文件、SSH、scheduler、MCP、voice、model bridge 等 package 可被不同宿主组合。
 - **安全边界清晰**：Renderer、preload、Main、插件沙箱、远程设备各自有权限边界。
@@ -815,6 +1048,8 @@ DB schedule
 | IPC 表面 | [`preload.ts`](../apps/desktop/src/preload/preload.ts)、`main/*ipc*`、`shared/*ipc*` |
 | 本地数据 | [`localDb/index.ts`](../apps/desktop/src/main/localDb/index.ts)、[`localDb/schema.ts`](../apps/desktop/src/main/localDb/schema.ts)、[`drizzle/`](../apps/desktop/drizzle/) |
 | Agent 编排 | [`packages/maker-core`](../packages/maker-core/)、[`main/maker-host`](../apps/desktop/src/main/maker-host/)、[`main/maker-ipc`](../apps/desktop/src/main/maker-ipc/) |
+| Harness 接入机制与实施步骤 | [接入原理](multi-agent-harness-principles.md)、[技术方案](multi-agent-harness-integration.md) |
+| DSH 控制面与当前准入 | [DSH 规则](dev-rules/dsh-harness.md)、[`dsh-host`](../apps/desktop/src/main/dsh-host/)、[`DshControlPlane`](../apps/desktop/src/main/maker-host/dsh-control-plane.ts) |
 | 远程与 Mobile | [`packages/device-link`](../packages/device-link/)、[`mobile DeviceLinkContext`](../apps/mobile/src/device-link/DeviceLinkContext.tsx)、[`mobileMakerTransport`](../apps/mobile/src/device-link/mobileMakerTransport.ts) |
 | Orca | [`orca-team-architecture.md`](dev-rules/orca-team-architecture.md)、`main/maker-ipc/orca*`、`packages/orca-workflow` |
 | 插件 | [`plugin-security-and-authoring.md`](dev-rules/plugin-security-and-authoring.md)、`main/cindy-brain`、`main/plugin-market`、`shared/ghost.ts` |
@@ -831,3 +1066,40 @@ Cindy 的架构主线可以压缩成一句话：
 
 理解这条主线后，新增功能首先要回答三个问题：它的真实执行者是谁、数据真相在哪一端、它是否需要经过协议或
 device-link 扩展；然后再决定代码应放在 App、Main host、共享 package、protocol 还是插件/Skill 中。
+
+<a id="architecture-coverage"></a>
+## 18. 覆盖映射与事实状态
+
+### 18.1 原架构主题覆盖
+
+本次保留原文 §1–17 的主题和导航，围绕多 harness 补充实现；以下清单用于后续更新时逐项防漏。
+“技术”指 [技术方案](multi-agent-harness-integration.md)，“原理”指 [原理文档](multi-agent-harness-principles.md)。
+
+| 原主题 | 当前架构落点 | 多 harness 深入说明 |
+|---|---|---|
+| 系统定位与分层 | §1 | 原理 §1–3：模型、harness 与产品宿主 |
+| 仓库、依赖和工程版本 | §2、§5.2 | 技术 §1：runtime/SDK pin 与真实运行版本 |
+| Main、preload、Renderer、布局和 UI 状态 | §3 | 技术 §2：接口、事件持久化和投影 |
+| DB、凭证和文件位置 | §4，新增真相源表 | 原理 §7；技术 §6：DSH binding/receipt/journal |
+| Maker、Session、运行时、模型协议桥 | §5，补齐四引擎和生命周期 | 技术 §2–6：逐引擎实现；§8：选择与交接 |
+| MCP、SkillHub、插件 | §6 | 原理 §5；技术 §3–6：各家工具、权限和资源装配 |
+| Orca 多 Agent 协同 | §7、§14.6 | 原理 §8；技术 §8.2：与原生子 Agent、DSH activity 区别 |
+| SSH、Desktop-to-Desktop、Mobile | §8，补齐 Pi daemon 与 DSH 限制 | 技术 §7.3、§8.3：拓扑和入口覆盖 |
+| Device-link 协议、状态、重连、allowlist | §9 | 原理 §9；技术 §8.3、§11：故障范围与多 peer |
+| Scheduler、IM、Voice、Git 和横向能力 | §10，新增 Bot、记忆、媒体、日志、Review | 技术 §7.3、§8.4：入口和三引擎边界 |
+| 跨端协议兼容 | §11 | 技术 §9.2、§11：契约扩展与旧端 |
+| 安全与信任模型 | §12，补充不同权限机制 | 原理 §9；技术 §2.4、§5.3、§6：真实执行约束 |
+| 开发启动、构建、更新、验证 | §13 | 技术 §1、§11：版本和分层证据 |
+| 典型调用链 | §14，新增恢复、Orca 和 DSH | 原理 §4；技术 §2、§8：端到端往返 |
+| 优点、风险和范围边界 | §15 | 原理 §10；技术 §12：未验证层与排查 |
+| 代码导航 | §16 | 三篇均有源码链接，技术 §12.2 汇总 |
+| 架构主线 | §17 | 原理篇解释选择，技术篇说明实际做法 |
+
+### 18.2 当前已知差异与证据限制
+
+- DSH 已有 `AgentKind`、adapter、Main 控制面、持久化和本机准入；不能继续按“尚无任何实现”描述，也不能称全部能力已交付。
+- 本工作树 provider 保存后对账、注册 wiring 和按需任务控件尚有未提交修改。本文记录的是这份工作树，不等于远程分支或已发布 App。
+- 旧注释或历史方案中“三引擎”“SSH 仅 Codex”“等待 DSH Native Host”的描述需按当前源码和有效裁决辨别；三引擎模型/自动化集合则有些仍是刻意边界，不应全部扩为四种。
+- `AgentEvent.data` 的运行期解析、原生未知事件的处理和 Codex 选择订阅，说明事件面是明确维护的投影，不是原始协议的无限透传。
+- 整体覆盖以客户端模块、harness 接入维度和调用链为界；独立服务端内部、厂商所有原生 API 与每个 UI 组件细节不在本篇可证实范围。
+- 本次只进行源码与文档检查，未启动 Desktop/Mobile、替换安装包、连接真实 provider 或验证远端设备。历史测试记录保留原来的版本/fixture 条件，不写成本次通过。
