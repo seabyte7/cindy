@@ -399,6 +399,9 @@ static bool build_child_environment(const char *native_addon_cache,
   if ((implicit_dsh_home != NULL &&
        !append_supervisor_environment(&saved, &saved_count, &saved_capacity,
                                       "DSH_HOME", implicit_dsh_home)) ||
+      (implicit_dsh_home == NULL &&
+       !append_supervisor_environment(&saved, &saved_count, &saved_capacity,
+                                      "CINDY_DSH_MANAGED_HOME_DURABLE", "1")) ||
       !append_supervisor_environment(&saved, &saved_count, &saved_capacity,
                                      "NARB_NATIVE_CACHE_DIR",
                                      native_addon_cache) ||

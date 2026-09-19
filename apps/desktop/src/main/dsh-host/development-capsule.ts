@@ -21,7 +21,7 @@ const DSH_DEVELOPMENT_CAPSULE_RELATIVE_PATH = Object.freeze([
 
 /** Keep this in lockstep with tools/dsh/macos-supervised-source-release.json. */
 export const DSH_DEVELOPMENT_CAPSULE_PIN = Object.freeze({
-  releaseId: 'cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised',
+  releaseId: 'cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised',
   expectedVersion: '0.1.6-alpha.2',
 });
 

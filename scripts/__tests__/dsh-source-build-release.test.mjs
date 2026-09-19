@@ -74,13 +74,13 @@ test('checked-in source release schema is valid and declares the user-approved i
 test('macOS supervised source release seals bootstrap and pkg native-cache inputs', () => {
   const release = readSourceRelease(supervisedReleasePath);
   const adaptationPatch = fs.readFileSync(
-    path.join(repoRoot, release.source.adaptations[0].patch.path),
+    path.join(repoRoot, release.source.adaptations[1].patch.path),
     'utf8',
   );
-  assert.equal(release.releaseId, 'cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised');
-  assert.equal(release.source.adaptations.length, 1);
+  assert.equal(release.releaseId, 'cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised');
+  assert.equal(release.source.adaptations.length, 2);
   assert.deepEqual(
-    release.source.adaptations[0].files.map((file) => [file.path, file.afterSha256]),
+    release.source.adaptations[1].files.map((file) => [file.path, file.afterSha256]),
     [
       ['scripts/build-exe-for-python-sdk.ts', 'd720fc949c98621dcac2cbcd37f62f1aa5e1614c7a752967b1ae6d3529e3c9e5'],
       ['packages/subprocess/subprocess/src/index.ts', '441c14ca9a3c6462bf36385b49162d16d1623ad580397339be93348bd7ec195f'],

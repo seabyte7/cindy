@@ -189,6 +189,12 @@ function writeAtomicManagedFile(directory: string, name: string, contents: strin
 }
 
 const PROFILE_PATCH = [
+  // The bundled ACP profile still selects the retired text-only alias.
+  // Override only Cindy's managed default; resumed tasks retain native choices.
+  '- id: acp',
+  '  config:',
+  '    provider: deepseek-official',
+  '    model: deepseek-flash',
   '- id: llm-deepseek',
   "  name: '@deepseek-ai/dsh-llm-deepseek'",
   '  config:',

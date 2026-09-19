@@ -373,7 +373,7 @@ export const dshPromptReceipts = sqliteTable(
     cindySessionId: text('cindy_session_id')
       .notNull()
       .references(() => dshSessionBindings.cindySessionId, { onDelete: 'restrict' }),
-    state: text('state', { enum: ['pending', 'acknowledged', 'uncertain'] })
+    state: text('state', { enum: ['pending', 'acknowledged', 'rejected', 'uncertain'] })
       .notNull()
       .default('pending'),
     stopReason: text('stop_reason', { enum: ['end_turn', 'cancelled'] }),

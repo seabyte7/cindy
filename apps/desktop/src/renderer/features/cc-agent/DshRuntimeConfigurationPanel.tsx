@@ -77,8 +77,9 @@ export function DshRuntimeConfigurationPanel({
   }, [sessionId]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    // Re-read after a turn settles so the last native image refusal is visible.
+    if (!disabled) void refresh();
+  }, [disabled, refresh]);
 
   const choose = useCallback(
     async (controlId: DshRuntimeConfigurationId, choiceId: string): Promise<void> => {
@@ -114,6 +115,7 @@ export function DshRuntimeConfigurationPanel({
   const loading = loadingSessionId === sessionId;
   const unavailable = unavailableSessionId === sessionId;
   const controls = snapshotSessionId === sessionId ? (snapshot?.controls ?? []) : [];
+  const imageInput = snapshotSessionId === sessionId ? snapshot?.imageInput : undefined;
   const busyControlId = busy?.sessionId === sessionId ? busy.controlId : null;
   if (!sessionId || (loading && controls.length === 0 && !unavailable)) return null;
   if (!unavailable && controls.length === 0) return null;
@@ -144,6 +146,15 @@ export function DshRuntimeConfigurationPanel({
           <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} aria-hidden="true" />
         </button>
       </div>
+
+      {!unavailable && imageInput && (
+        <p role="status" className="mt-2 text-12 text-[var(--text-secondary)]">
+          {t(`ccAgent.dshRuntimeConfiguration.${
+            imageInput.lastRejection === 'image-model-unsupported' ? 'imageModelRejected' :
+            imageInput.connectionSupported ? 'imageConnectionReady' : 'imageConnectionUnavailable'
+          }`)}
+        </p>
+      )}
 
       {unavailable ? (
         <p role="status" className="mt-2 text-12 text-[var(--error-fg-strong)]">

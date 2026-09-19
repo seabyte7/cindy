@@ -69,6 +69,7 @@ import { parseToolLoopErrorDetails } from '@cindy/maker-shared/tool-loop-error';
 import type { ToolLoopErrorDetails } from '@cindy/maker-core';
 import type { AgentMeta, MessageRole, Message, MessageAutomationOrigin } from '@/lib/ccAgent.types';
 import type { AttachedFile, MentionedResource, SerializedAttachedFile } from '@/lib/fileTypes';
+import { restoreDshRejectedDraft } from './dshRejectedDraft';
 import type {
   AgentInputCreateOpts,
   AgentInputProjection,
@@ -4568,6 +4569,7 @@ function applyInputProjection(
       ...(authRetryProjectionError ? { _authRetryPersistOnProjectionError: undefined } : {}),
     };
   });
+  restoreDshRejectedDraft(projection);
   if (deferredPersistFromProjection.payload) {
     persistTurnErrorDeferredTracked(
       projection.sessionId,

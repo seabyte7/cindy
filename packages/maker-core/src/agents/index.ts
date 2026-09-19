@@ -70,6 +70,8 @@ export {
 export {
   DshAcpClient,
   DshAcpRequestError,
+  DshAcpFrameTooLargeError,
+  DSH_ACP_MAX_FRAME_BYTES,
   DshAcpRequestTimeoutError,
   type DshAcpClientOptions,
   type DshAcpInitializeResult,

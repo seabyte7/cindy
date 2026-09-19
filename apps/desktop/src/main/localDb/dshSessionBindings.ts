@@ -78,6 +78,8 @@ export interface DshSessionBindingStore {
   markActiveAfterVerifiedRuntimeState(input: {
     cindySessionId: string;
     expectedRevision: number;
+    capabilityUpgrade?: { previous: string; next: string };
+    releaseUpgrade?: { previous: string; next: string };
   }): Promise<DshSessionBinding | null>;
   markNeedsReconcile(input: {
     cindySessionId: string;
@@ -208,20 +210,34 @@ export function createDshSessionBindingStore(
     expectedRevision: number,
     expectedStates: readonly DshBindingLifecycleState[],
     lifecycleState: DshBindingLifecycleState,
+    capabilityUpgrade?: { previous: string; next: string },
+    releaseUpgrade?: { previous: string; next: string },
   ): Promise<DshSessionBinding | null> {
     assertSafeText(cindySessionId, 'cindySessionId');
     assertRevision(expectedRevision);
+    if (capabilityUpgrade) {
+      assertSafeText(capabilityUpgrade.previous, 'previous capability fingerprint');
+      assertSafeText(capabilityUpgrade.next, 'next capability fingerprint');
+    }
+    if (releaseUpgrade && (releaseUpgrade.previous !== 'cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised' ||
+        releaseUpgrade.next !== 'cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised')) {
+      throw new Error('DSH release compatibility upgrade is unsupported');
+    }
     const [updated] = await db
       .update(dshSessionBindings)
       .set({
         lifecycleState,
         revision: expectedRevision + 1,
         updatedAt: now(),
+        ...(capabilityUpgrade ? { capabilityFingerprint: capabilityUpgrade.next } : {}),
+        ...(releaseUpgrade ? { runtimeReleaseId: releaseUpgrade.next } : {}),
       })
       .where(
         and(
           eq(dshSessionBindings.cindySessionId, cindySessionId),
           eq(dshSessionBindings.revision, expectedRevision),
+          ...(capabilityUpgrade ? [eq(dshSessionBindings.capabilityFingerprint, capabilityUpgrade.previous)] : []),
+          ...(releaseUpgrade ? [eq(dshSessionBindings.runtimeReleaseId, releaseUpgrade.previous), eq(dshSessionBindings.runtimeVersion, '0.1.6-alpha.2'), eq(dshSessionBindings.homeMode, 'cindy-managed')] : []),
           or(...expectedStates.map((state) => eq(dshSessionBindings.lifecycleState, state))),
         ),
       )
@@ -267,8 +283,8 @@ export function createDshSessionBindingStore(
     markClosedAfterVerifiedRuntimeHistory: ({ cindySessionId, expectedRevision }) =>
       transition(cindySessionId, expectedRevision, ['active'], 'closed'),
 
-    markActiveAfterVerifiedRuntimeState: ({ cindySessionId, expectedRevision }) =>
-      transition(cindySessionId, expectedRevision, ['closed', 'needs_reconcile'], 'active'),
+    markActiveAfterVerifiedRuntimeState: ({ cindySessionId, expectedRevision, capabilityUpgrade, releaseUpgrade }) =>
+      transition(cindySessionId, expectedRevision, capabilityUpgrade || releaseUpgrade ? ['closed'] : ['closed', 'needs_reconcile'], 'active', capabilityUpgrade, releaseUpgrade),
 
     markNeedsReconcile: ({ cindySessionId, expectedRevision }) =>
       transition(

@@ -1560,7 +1560,7 @@ describe('Maker start-option lifecycle hooks', () => {
 
   it('rolls back a DSH parent reservation when native startup fails', async () => {
     const rows = new Map<string, SessionMeta>();
-    const rollback = vi.fn(async () => rows.delete('dsh-fails'));
+    const rollback = vi.fn(async () => { rows.delete('dsh-fails'); });
     const maker = new Maker({
       agents: { dsh: createAgent(vi.fn().mockRejectedValue(new Error('native create failed')), 'dsh') },
       storage: createStorage(),

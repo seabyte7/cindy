@@ -47,6 +47,24 @@ const mocks = vi.hoisted(() => {
 });
 
 describe('AgentInputCoordinator Orca priority queue transactions', () => {
+  it('retains uncertain DSH input and attachments without allowing explicit replay', async () => {
+    const h = createHarness();
+    const sid = 'dsh-uncertain';
+    h.isResumableTurnErrorCandidate.mockReturnValue(true);
+    await h.coordinator.ensureQueueRestored(sid);
+    const files = [{ id: 'image', name: 'pixel.png', path: '/fixture.png', ext: '.png', size: 4, category: 'image' as const, mimeType: 'image/png' }];
+    h.coordinator.enqueue(sid, makeItem('original', 'read image', { files }));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'error', 'DSH result uncertain', { reason: 'dsh-prompt-unconfirmed' });
+    expect(h.coordinator.isAutoResumeDeferred(sid)).toBe(false);
+    expect(h.isResumableTurnErrorCandidate).not.toHaveBeenCalled();
+    const count = h.sendToAgent.mock.calls.length;
+    await h.coordinator.retryLastError(sid);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(count);
+    expect(h.coordinator.getProjection(sid).recovery).toMatchObject({ kind: 'active-turn', item: { files, text: 'read image' } });
+  });
+
   const orcaItem = (clientId: string, text: string) =>
     makeItem(clientId, text, {
       origin: { kind: 'orca', senderLabel: 'Lead', displayText: text },

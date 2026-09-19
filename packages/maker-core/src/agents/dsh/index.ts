@@ -185,8 +185,12 @@ function promptFailureErrorName(error: unknown): string {
 
 function promptFailureMessage(code: DshBridgePromptFailureCode): string {
   if (code === 'image-input-unavailable') {
-    return 'DSH image input is unavailable in the active runtime; update and restart DSH.';
+    return 'DSH image input is unavailable on this connection. Restart the DSH runtime after checking its configuration.';
   }
+  if (code === 'image-model-unsupported') return 'The selected DSH model does not accept images. Select an image-capable model and retry.';
+  if (code === 'image-invalid') return 'DSH rejected the image format or image limits. Check the attachments and retry.';
+  if (code === 'attachment-invalid') return 'DSH could not read the selected attachments. Select the files again and retry.';
+  if (code === 'prompt-too-large') return 'This message exceeds the DSH input limit. Use fewer or smaller images and retry.';
   return 'DSH prompt did not complete; reconcile the session before retrying.';
 }
 
@@ -597,8 +601,8 @@ export class DshAgent extends BaseAgent {
               data: {
                 message: promptFailureMessage(failureCode),
                 isTerminal: true,
-                reason: failureCode === 'image-input-unavailable'
-                  ? 'dsh-prompt-rejected'
+                reason: failureCode !== 'prompt-outcome-uncertain' && failureCode !== 'prompt-failed'
+                  ? `dsh-${failureCode}`
                   : 'dsh-prompt-unconfirmed',
                 code: failureCode,
               },

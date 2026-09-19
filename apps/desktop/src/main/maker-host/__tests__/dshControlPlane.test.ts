@@ -24,6 +24,7 @@ import type {
   DshSessionBindingStore,
 } from '../../localDb/dshSessionBindings.js';
 import type { DshPromptReceiptStore } from '../../localDb/dshPromptReceipts.js';
+import { DshAcpRequestError, DshAcpFrameTooLargeError } from '@cindy/maker-core';
 
 function deferred<Value>(): { promise: Promise<Value>; resolve: (value: Value) => void } {
   let resolve!: (value: Value) => void;
@@ -51,6 +52,7 @@ class FakeDshAcpClient implements DshAcpSessionClient {
   protocolVersion = 1;
   agentName = 'deepseek-harness-acp';
   agentVersion = '0.0.1';
+  imageSupported = false;
   listNeverSettles = false;
   initializeFailure: Error | undefined;
   createConfigOptions: unknown = undefined;
@@ -67,7 +69,7 @@ class FakeDshAcpClient implements DshAcpSessionClient {
     return {
       protocolVersion: this.protocolVersion,
       agentInfo: { name: this.agentName, version: this.agentVersion },
-      agentCapabilities: { sessionCapabilities: this.capabilities },
+      agentCapabilities: { sessionCapabilities: this.capabilities, promptCapabilities: { image: this.imageSupported } },
     };
   }
   async createSession(input: {
@@ -194,8 +196,16 @@ class MemoryDshBindingStore implements DshSessionBindingStore {
   async markActiveAfterVerifiedRuntimeState(input: {
     cindySessionId: string;
     expectedRevision: number;
+    capabilityUpgrade?: { previous: string; next: string };
+    releaseUpgrade?: { previous: string; next: string };
   }): Promise<DshSessionBinding | null> {
-    return this.transition(input, ['closed', 'needs_reconcile'], 'active');
+    const row = this.rows.get(input.cindySessionId);
+    if (input.capabilityUpgrade && row?.capabilityFingerprint !== input.capabilityUpgrade.previous) return null;
+    if (input.releaseUpgrade && row?.runtimeReleaseId !== input.releaseUpgrade.previous) return null;
+    const updated = this.transition(input, ['closed', 'needs_reconcile'], 'active');
+    if (updated && input.capabilityUpgrade) updated.capabilityFingerprint = input.capabilityUpgrade.next;
+    if (updated && input.releaseUpgrade) updated.runtimeReleaseId = input.releaseUpgrade.next;
+    return updated;
   }
 
   async markNeedsReconcile(input: {
@@ -300,6 +310,9 @@ function fakePromptReceiptStore(unresolved = false): DshPromptReceiptStore & {
       resolvedAt: 2,
     })),
     markUncertain: vi.fn().mockResolvedValue(undefined),
+    reject: vi.fn().mockImplementation(async ({ receiptId, cindySessionId }) => ({
+      receiptId, cindySessionId, state: 'rejected', stopReason: null, createdAt: 1, resolvedAt: 2,
+    })),
     hasUnresolved: vi.fn().mockResolvedValue(unresolved),
   } as DshPromptReceiptStore & {
     recordPending: ReturnType<typeof vi.fn>;
@@ -1146,6 +1159,62 @@ describe('DshControlPlane', () => {
       stopReason: 'end_turn',
     });
     expect(promptReceipts.markUncertain).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [new DshAcpRequestError('session/prompt', -32602, 'Invalid params: model "deepseek-v4-pro" does not declare image input', undefined), 'image-model-unsupported', false],
+    [new DshAcpRequestError('session/prompt', -32602, 'Invalid params: Unsupported or malformed image data.', undefined), 'image-invalid', false],
+    [new DshAcpFrameTooLargeError('too large'), 'prompt-too-large', false],
+    [new DshAcpRequestError('session/prompt', -32602, 'unknown failure', undefined), 'prompt-outcome-uncertain', true],
+    [new DshAcpRequestError('session/prompt', -32603, 'Internal error: provider failed', undefined), 'prompt-outcome-uncertain', true],
+  ])('classifies %s without replaying unknown outcomes', async (error, code, uncertain) => {
+    const client = new FakeDshAcpClient();
+    client.imageSupported = true;
+    const store = new MemoryDshBindingStore();
+    const receipts = fakePromptReceiptStore();
+    const bridge = new DshControlPlane({ scopeId: 'scope-a', client, assertAuthorizedCwd: assertProjectCwd,
+      promptContentAdmission: { prepare: async () => [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }] } });
+    await bridge.initialize();
+    const options = durableOptions(store, receipts);
+    options.runtimeIdentity.runtimeReleaseId = 'cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised';
+    options.runtimeIdentity.runtimeVersion = '0.1.6-alpha.2';
+    bridge.configureDurableBinding(options);
+    const created = await bridge.create({ cindySessionId: 'cindy-1', cwd: '/project' });
+    client.prompt = vi.fn().mockRejectedValueOnce(error).mockResolvedValue({ stopReason: 'end_turn' });
+    await expect(bridge.prompt({ ...created, content: [{ type: 'image', path: '/fixture.png' }] })).rejects.toMatchObject({ code });
+    expect(receipts.markUncertain).toHaveBeenCalledTimes(uncertain ? 1 : 0);
+    expect(receipts.reject).toHaveBeenCalledTimes(uncertain ? 0 : 1);
+    if (!uncertain) {
+      await expect(bridge.prompt({ ...created, text: 'retry by user' })).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(client.calls.some((call) => call.method === 'transport/close')).toBe(false);
+    }
+  });
+
+  it.each([false, true])('upgrades only settled managed image capability bindings after native resume (unresolved=%s)', async (unresolved) => {
+    const store = new MemoryDshBindingStore();
+    const receipts = fakePromptReceiptStore(unresolved);
+    const options = durableOptions(store, receipts);
+    options.runtimeIdentity.runtimeReleaseId = 'cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised';
+    options.runtimeIdentity.runtimeVersion = '0.1.6-alpha.2';
+    options.runtimeIdentity.capabilityFingerprint = 'new-image-fingerprint';
+    await store.recordCreateReceipt({ cindySessionId: 'cindy-1', runtimeSessionId: 'runtime-1', hostScopeId: 'scope-a',
+      ...options.runtimeIdentity, runtimeReleaseId: 'cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised', capabilityFingerprint: 'old-image-fingerprint' });
+    const client = new FakeDshAcpClient();
+    client.imageSupported = true;
+    const bridge = new DshControlPlane({ scopeId: 'scope-a', client, assertAuthorizedCwd: assertProjectCwd });
+    await bridge.initialize();
+    bridge.configureDurableBinding({ ...options, previousImageCapabilityFingerprint: 'old-image-fingerprint' });
+    const restored = await bridge.restoreVerifiedBindings();
+    expect(store.rows.get('cindy-1')?.capabilityFingerprint).toBe('old-image-fingerprint');
+    if (unresolved) {
+      expect(restored).toEqual([]);
+      expect(store.rows.get('cindy-1')?.lifecycleState).toBe('needs_reconcile');
+    } else {
+      expect(restored).toHaveLength(1);
+      await bridge.resume({ ...restored[0]!, cwd: '/project' });
+      expect(store.rows.get('cindy-1')).toMatchObject({ capabilityFingerprint: 'new-image-fingerprint', runtimeReleaseId: options.runtimeIdentity.runtimeReleaseId });
+      expect(client.calls.some((call) => call.method === 'session/new')).toBe(false);
+    }
   });
 
   it('drains projections observed before the native prompt reply before returning its terminal receipt', async () => {

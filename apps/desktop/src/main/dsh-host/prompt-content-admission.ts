@@ -1,11 +1,10 @@
 /**
  * Main-owned admission for DSH prompt attachments.
  *
- * Renderer paths never cross ACP directly.  A user-selected attachment is
- * copied to a task-scoped directory below the DSH process Home, then exposed
- * to the official ACP profile only as a file URI.  This keeps the original
- * selection outside of the runtime's ambient filesystem authority while still
- * making a concrete, readable local attachment available to enabled tools.
+ * Images cross ACP as MIME-sniffed inline bytes, within the aggregate frame
+ * budget. Ordinary files are copied to a unique task-owned batch below the
+ * process Home and exposed as file URIs. Original selections stay unchanged
+ * and outside the runtime's ambient filesystem authority.
  */
 
 import { createHash } from 'node:crypto';
@@ -14,7 +13,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { DshBridgePromptFailure, type DshBridgePromptContent } from '@cindy/maker-core';
+import {
+  DSH_ACP_MAX_FRAME_BYTES,
+  DshBridgePromptFailure,
+  type DshBridgePromptContent,
+} from '@cindy/maker-core';
+import { sniffMediaMime } from '../cindy-media/sniffMediaMime.js';
+import { compressInlineImage } from '../mcp-integrations/inlineImageCompressor.js';
 
 export type DshAcpPromptContent =
   | { readonly type: 'text'; readonly text: string }
@@ -33,10 +38,9 @@ export interface DshPromptContentAdmission {
 }
 
 const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
-// The ACP client bounds one JSON-RPC frame at 16 MiB. Base64 grows by roughly
-// one third, so an inline image gets a smaller independent cap. Larger images
-// still arrive as staged file resources for tool-based processing.
-const MAX_INLINE_IMAGE_BYTES = 3 * 1024 * 1024;
+// Reserve space for the JSON-RPC envelope and the bounded, possibly escaped
+// native session id (4 KiB). The ACP serializer is the final exact guard.
+const MAX_PROMPT_BYTES = DSH_ACP_MAX_FRAME_BYTES - 32 * 1024;
 const MAX_ATTACHMENT_COUNT = 32;
 const MAX_ATTACHMENT_NAME_BYTES = 180;
 const INLINE_IMAGE_MIME_TYPES = new Set<DshInlineImageMimeType>([
@@ -45,13 +49,6 @@ const INLINE_IMAGE_MIME_TYPES = new Set<DshInlineImageMimeType>([
   'image/webp',
   'image/gif',
 ]);
-const INLINE_IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, DshInlineImageMimeType>> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.gif': 'image/gif',
-};
 
 function safeSessionDirectoryName(cindySessionId: string): string {
   return createHash('sha256').update(cindySessionId).digest('hex').slice(0, 40);
@@ -85,7 +82,7 @@ async function readAttachmentSource(value: string): Promise<{ realPath: string; 
     throw new Error('DSH attachment must be a regular local file');
   }
   if (lstat.size > MAX_ATTACHMENT_BYTES) {
-    throw new Error(`DSH attachment exceeds ${MAX_ATTACHMENT_BYTES} bytes`);
+    throw new DshBridgePromptFailure('prompt-too-large', 'DSH attachment exceeds the size limit');
   }
   const realPath = await fs.realpath(value);
   const stat = await fs.stat(realPath);
@@ -95,14 +92,8 @@ async function readAttachmentSource(value: string): Promise<{ realPath: string; 
   return { realPath, size: stat.size };
 }
 
-function inlineImageMimeType(
-  item: Extract<DshBridgePromptContent, { type: 'image' }>,
-): DshInlineImageMimeType | null {
-  if (item.mimeType && INLINE_IMAGE_MIME_TYPES.has(item.mimeType as DshInlineImageMimeType)) {
-    return item.mimeType as DshInlineImageMimeType;
-  }
-  return INLINE_IMAGE_MIME_BY_EXTENSION[path.extname(item.path).toLowerCase()] ?? null;
-}
+const promptBytes = (content: readonly DshAcpPromptContent[]): number =>
+  Buffer.byteLength(JSON.stringify(content), 'utf8');
 
 /**
  * Stage only ordinary files.  Directory mentions remain governed by the
@@ -112,6 +103,8 @@ function inlineImageMimeType(
 export function createDshPromptContentAdmission(input: {
   /** A DSH-owned real directory, normally the contained process HOME. */
   stagingRoot: string;
+  /** Injectable in tests; production uses the existing in-memory compressor. */
+  compressImage?: typeof compressInlineImage;
 }): DshPromptContentAdmission {
   let rootPromise: Promise<string> | null = null;
   const root = async (): Promise<string> => {
@@ -125,88 +118,157 @@ export function createDshPromptContentAdmission(input: {
       content,
       inlineImagePromptSupported,
     }): Promise<readonly DshAcpPromptContent[]> {
-      if (!cindySessionId.trim()) throw new Error('DSH attachment session id is invalid');
-      const attachmentCount = content.filter((item) => item.type !== 'text').length;
-      if (attachmentCount > MAX_ATTACHMENT_COUNT) {
-        throw new Error(`DSH prompt exceeds ${MAX_ATTACHMENT_COUNT} local attachments`);
-      }
-
-      const output: DshAcpPromptContent[] = [];
-      let attachmentIndex = 0;
-      let taskDirectory: string | null = null;
-      for (const item of content) {
-        if (item.type === 'text') {
-          output.push({ type: 'text', text: item.text });
-          continue;
-        }
-        if (item.type === 'mention' && item.kind === 'dir') {
-          throw new Error(
-            'DSH accepts only the task working directory; extra directory mentions are unavailable',
-          );
+      let batchDirectory: string | null = null;
+      try {
+        if (!cindySessionId.trim()) throw new Error('DSH attachment session id is invalid');
+        const attachmentCount = content.filter((item) => item.type !== 'text').length;
+        if (attachmentCount > MAX_ATTACHMENT_COUNT) {
+          throw new Error(`DSH prompt exceeds ${MAX_ATTACHMENT_COUNT} local attachments`);
         }
 
-        if (item.type === 'image' && !inlineImagePromptSupported) {
-          throw new DshBridgePromptFailure(
-            'image-input-unavailable',
-            'DSH active ACP runtime does not advertise image input',
-          );
-        }
-
-        const source = await readAttachmentSource(item.path);
-        if (!taskDirectory) {
-          const stagedRoot = await root();
-          const candidate = path.join(
-            stagedRoot,
-            'dsh-task-attachments',
-            safeSessionDirectoryName(cindySessionId),
-          );
-          await fs.mkdir(candidate, { recursive: true, mode: 0o700 });
-          const stat = await fs.lstat(candidate);
-          if (!stat.isDirectory() || stat.isSymbolicLink()) {
-            throw new Error('DSH attachment staging directory is invalid');
+        const output: DshAcpPromptContent[] = [];
+        let attachmentIndex = 0;
+        for (const item of content) {
+          if (item.type === 'text') {
+            output.push({ type: 'text', text: item.text });
+            continue;
           }
-          taskDirectory = await fs.realpath(candidate);
-          await fs.chmod(taskDirectory, 0o700);
-        }
-        const stagedName = safeAttachmentName(source.realPath, attachmentIndex++);
-        const destination = path.join(taskDirectory, stagedName);
-        // The name is generated locally and taskDirectory has been realpath'd;
-        // still reject a pre-existing non-file rather than overwriting it.
-        try {
-          await fs.lstat(destination);
-          throw new Error('DSH attachment staging name collision');
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        }
-        await fs.copyFile(source.realPath, destination, constants.COPYFILE_EXCL);
-        await fs.chmod(destination, 0o600);
-        const copied = await fs.stat(destination);
-        if (!copied.isFile() || copied.size !== source.size) {
-          throw new Error('DSH attachment copy could not be verified');
-        }
-        const mimeType = item.type === 'image' ? inlineImageMimeType(item) : null;
-        if (
-          item.type === 'image' &&
-          inlineImagePromptSupported &&
-          mimeType !== null &&
-          copied.size <= MAX_INLINE_IMAGE_BYTES
-        ) {
-          // Read only the task-local copy. The renderer-selected source path
-          // is never embedded in ACP and never handed to the runtime.
+          if (item.type === 'mention' && item.kind === 'dir') {
+            throw new Error(
+              'DSH accepts only the task working directory; extra directory mentions are unavailable',
+            );
+          }
+
+          if (item.type === 'image' && !inlineImagePromptSupported) {
+            throw new DshBridgePromptFailure(
+              'image-input-unavailable',
+              'DSH active ACP runtime does not advertise image input',
+            );
+          }
+
+          const source = await readAttachmentSource(item.path);
+          if (item.type === 'image') {
+            const handle = await fs.open(
+              source.realPath,
+              constants.O_RDONLY | constants.O_NOFOLLOW,
+            );
+            let bytes: Buffer;
+            try {
+              const stat = await handle.stat();
+              if (!stat.isFile() || stat.size !== source.size) throw new Error('DSH image changed');
+              bytes = Buffer.alloc(source.size);
+              const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+              const after = await handle.stat();
+              if (
+                bytesRead !== bytes.length ||
+                after.size !== stat.size ||
+                after.mtimeMs !== stat.mtimeMs
+              ) {
+                throw new Error('DSH image changed');
+              }
+            } finally {
+              await handle.close();
+            }
+            const mime = sniffMediaMime(bytes);
+            if (!mime || !INLINE_IMAGE_MIME_TYPES.has(mime as DshInlineImageMimeType)) {
+              throw new DshBridgePromptFailure('image-invalid', 'DSH image format is unsupported');
+            }
+            output.push({
+              type: 'image',
+              data: bytes.toString('base64'),
+              mimeType: mime as DshInlineImageMimeType,
+            });
+            continue;
+          }
+          if (!batchDirectory) {
+            const stagedRoot = await root();
+            let taskDirectory = stagedRoot;
+            // Check each component before descending: recursive mkdir could
+            // otherwise create the task directory through an existing symlink.
+            for (const segment of [
+              'dsh-task-attachments',
+              safeSessionDirectoryName(cindySessionId),
+            ]) {
+              const candidate = path.join(taskDirectory, segment);
+              await fs.mkdir(candidate, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
+                if (error.code !== 'EEXIST') throw error;
+              });
+              taskDirectory = await assertRealDirectory(candidate, 'attachment staging directory');
+              if (!taskDirectory.startsWith(`${stagedRoot}${path.sep}`))
+                throw new Error('DSH staging root escaped');
+              await fs.chmod(taskDirectory, 0o700);
+            }
+            batchDirectory = await fs.mkdtemp(path.join(taskDirectory, 'send-'));
+          }
+          const stagedName = safeAttachmentName(source.realPath, attachmentIndex++);
+          const destination = path.join(batchDirectory, stagedName);
+          // The name is generated locally and the batch parent has been realpath'd;
+          // still reject a pre-existing non-file rather than overwriting it.
+          try {
+            await fs.lstat(destination);
+            throw new Error('DSH attachment staging name collision');
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          }
+          await fs.copyFile(source.realPath, destination, constants.COPYFILE_EXCL);
+          await fs.chmod(destination, 0o600);
+          const copied = await fs.stat(destination);
+          if (!copied.isFile() || copied.size !== source.size) {
+            throw new Error('DSH attachment copy could not be verified');
+          }
           output.push({
-            type: 'image',
-            data: (await fs.readFile(destination)).toString('base64'),
-            mimeType,
+            type: 'resource_link',
+            name: item.type === 'mention' ? item.name : path.basename(source.realPath),
+            uri: pathToFileURL(destination).href,
           });
-          continue;
         }
-        output.push({
-          type: 'resource_link',
-          name: item.type === 'mention' ? item.name : path.basename(source.realPath),
-          uri: pathToFileURL(destination).href,
-        });
+        if (promptBytes(output) > MAX_PROMPT_BYTES) {
+          const images = output.filter((block) => block.type === 'image');
+          const overhead = promptBytes(
+            output.map((block) => (block.type === 'image' ? { ...block, data: '' } : block)),
+          );
+          const targetBytes = Math.floor(
+            ((MAX_PROMPT_BYTES - overhead) * 3) / 4 / Math.max(images.length, 1),
+          );
+          if (targetBytes > 0) {
+            for (let index = 0; index < output.length; index++) {
+              const block = output[index];
+              if (block.type !== 'image') continue;
+              const compressed = await (input.compressImage ?? compressInlineImage)(
+                Buffer.from(block.data, 'base64'),
+                block.mimeType,
+                { targetBytes },
+              );
+              if (
+                compressed &&
+                compressed.buffer.length < Buffer.byteLength(block.data, 'base64') &&
+                INLINE_IMAGE_MIME_TYPES.has(compressed.mime as DshInlineImageMimeType)
+              ) {
+                output[index] = {
+                  type: 'image',
+                  data: compressed.buffer.toString('base64'),
+                  mimeType: compressed.mime as DshInlineImageMimeType,
+                };
+              }
+            }
+          }
+        }
+        if (promptBytes(output) > MAX_PROMPT_BYTES) {
+          throw new DshBridgePromptFailure(
+            'prompt-too-large',
+            'DSH prompt exceeds the ACP frame budget',
+          );
+        }
+        return output;
+      } catch (error) {
+        if (batchDirectory)
+          await fs.rm(batchDirectory, { recursive: true, force: true }).catch(() => undefined);
+        if (error instanceof DshBridgePromptFailure) throw error;
+        throw new DshBridgePromptFailure(
+          'attachment-invalid',
+          'DSH could not admit the selected attachments',
+        );
       }
-      return output;
     },
   };
 }

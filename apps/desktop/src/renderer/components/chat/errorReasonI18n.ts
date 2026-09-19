@@ -14,6 +14,13 @@ import { UPSTREAM_STREAM_INTERRUPTED_REASON } from '@/utils/streamInterruptError
  * active and historical views.
  */
 export const ERROR_REASON_I18N_KEYS: Record<string, string> = {
+  'dsh-prompt-rejected': 'ccAgent.dshRuntimeConfiguration.errors.image-input-unavailable',
+  'dsh-image-input-unavailable': 'ccAgent.dshRuntimeConfiguration.errors.image-input-unavailable',
+  'dsh-image-model-unsupported': 'ccAgent.dshRuntimeConfiguration.errors.image-model-unsupported',
+  'dsh-image-invalid': 'ccAgent.dshRuntimeConfiguration.errors.image-invalid',
+  'dsh-attachment-invalid': 'ccAgent.dshRuntimeConfiguration.errors.attachment-invalid',
+  'dsh-prompt-too-large': 'ccAgent.dshRuntimeConfiguration.errors.prompt-too-large',
+  'dsh-prompt-unconfirmed': 'ccAgent.dshRuntimeConfiguration.errors.uncertain',
   user_model_access_denied: 'chat.errorBanner.modelAccessDenied',
   'empty-response': 'logic.errors.emptyResponse',
   'turn-failed': 'logic.errors.turnFailed',

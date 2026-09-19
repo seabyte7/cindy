@@ -241,6 +241,32 @@ describe("translateDshFollowEvent", () => {
     );
   });
 
+  it("projects native tool images as bounded summaries without carrying image bytes or private metadata", () => {
+    const data = Buffer.from("fixture image bytes").toString("base64");
+    const result = translateDshFollowEvent(follow({
+      sessionUpdate: "tool_call_update", toolCallId: "tool-image", status: "completed",
+      content: [
+        { type: "content", content: { type: "text", text: "before" } },
+        { type: "content", content: { type: "image", mimeType: "image/png", data, uri: "file:///native-private" } },
+        { type: "content", content: { type: "text", text: "after" } },
+      ],
+    }));
+    expect(result).toMatchObject({ kind: "translated", events: [
+      { type: "tool_result_full", data: { fullText: "before\n[Image: image/png]\nafter", isError: false } },
+      { type: "tool_result" },
+    ] });
+    expect(JSON.stringify(result)).not.toContain(data);
+    expect(JSON.stringify(result)).not.toContain("native-private");
+    for (const content of [
+      { type: "image", mimeType: "text/html", data },
+      { type: "image", mimeType: "image/png", data: "a===" },
+      { type: "image", mimeType: "image/png", data: "A".repeat(16 * 1024 * 1024 + 4) },
+    ]) {
+      expect(translateDshFollowEvent(follow({ sessionUpdate: "tool_call_update", toolCallId: "tool-image", status: "completed",
+        content: [{ type: "content", content }] }))).toEqual({ kind: "rejected", reason: "invalid-tool-result" });
+    }
+  });
+
   it("rejects malformed updates and never returns raw input as an event", () => {
     expect(
       translateDshFollowEvent({

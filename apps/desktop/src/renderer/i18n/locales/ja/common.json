@@ -10192,6 +10192,17 @@
       }
     },
     "dshRuntimeConfiguration": {
+      "imageConnectionReady": "この接続では画像入力が有効です。選択したモデルの対応状況は送信時に確認されます。",
+      "imageConnectionUnavailable": "この接続では画像入力が無効です。DSH の設定を確認し、ランタイムを再起動してください。",
+      "imageModelRejected": "選択したモデルが画像入力を拒否しました。画像対応モデルを選択してください。",
+      "errors": {
+        "image-input-unavailable": "この接続では画像入力が無効です。DSH の設定を確認し、ランタイムを再起動してください。",
+        "image-model-unsupported": "選択した DSH モデルは画像に対応していません。画像対応モデルに切り替えて再試行してください。",
+        "image-invalid": "画像の形式、枚数、サイズを確認して再試行してください。",
+        "attachment-invalid": "添付ファイルを読み取れません。ファイルを選び直して再試行してください。",
+        "prompt-too-large": "メッセージが大きすぎます。画像の枚数やサイズを減らして再試行してください。",
+        "uncertain": "DSH の処理結果が不明です。重複実行を避けるため、このタスクの状態を確認して復旧するまで再送しないでください。"
+      },
       "ariaLabel": "DSH ランタイム設定",
       "title": "ランタイム設定",
       "nextMessageOnly": "このタスクでこれから送るメッセージにだけ適用され、プロバイダー設定としては保存されません。",

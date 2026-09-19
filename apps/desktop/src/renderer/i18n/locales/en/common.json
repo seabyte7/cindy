@@ -10207,6 +10207,17 @@
       }
     },
     "dshRuntimeConfiguration": {
+      "imageConnectionReady": "This connection accepts images. Support for the selected model is checked when sending.",
+      "imageConnectionUnavailable": "This connection has not enabled images. Check the DSH configuration and restart its runtime.",
+      "imageModelRejected": "The selected model rejected image input. Choose an image-capable model.",
+      "errors": {
+        "image-input-unavailable": "Image input is unavailable on this connection. Check the DSH configuration and restart its runtime.",
+        "image-model-unsupported": "The selected DSH model does not accept images. Choose an image-capable model and retry.",
+        "image-invalid": "DSH rejected the image format or image limits. Check the attachments and retry.",
+        "attachment-invalid": "The attachments could not be read. Select the files again and retry.",
+        "prompt-too-large": "This message is too large. Use fewer or smaller images and retry.",
+        "uncertain": "The DSH result is uncertain. Do not resend until this task has been reconciled."
+      },
       "ariaLabel": "DSH runtime settings",
       "title": "Runtime settings",
       "nextMessageOnly": "Applies only to later messages in this task and is not saved as a provider setting.",

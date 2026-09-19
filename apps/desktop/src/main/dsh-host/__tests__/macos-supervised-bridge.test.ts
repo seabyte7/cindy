@@ -189,6 +189,13 @@ function createPromptReceiptStore(): DshPromptReceiptStore {
       rows.set(receiptId, next);
       return next;
     },
+    async reject({ receiptId, cindySessionId }) {
+      const row = rows.get(receiptId);
+      if (!row || row.cindySessionId !== cindySessionId || row.state !== 'pending') return null;
+      const next: DshPromptReceipt = { ...row, state: 'rejected', resolvedAt: 2 };
+      rows.set(receiptId, next);
+      return next;
+    },
     async markUncertain({ receiptIds }) {
       for (const receiptId of receiptIds) {
         const row = rows.get(receiptId);
@@ -196,7 +203,7 @@ function createPromptReceiptStore(): DshPromptReceiptStore {
       }
     },
     async hasUnresolved(cindySessionId) {
-      return [...rows.values()].some((row) => row.cindySessionId === cindySessionId && row.state !== 'acknowledged');
+      return [...rows.values()].some((row) => row.cindySessionId === cindySessionId && row.state !== 'acknowledged' && row.state !== 'rejected');
     },
   };
 }

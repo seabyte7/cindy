@@ -168,7 +168,10 @@ export function createDshHostScopeId(input: DshHostScopeInput): {
   const scopeId = sha256(
     JSON.stringify({
       accountScopeId,
-      releaseId: input.releaseId,
+      // build.2 changes only managed attachment durability. Keep the same
+      // owner/task Home; the control plane verifies and CAS-upgrades identity.
+      releaseId: input.homeMode === 'cindy-managed' && input.releaseId === 'cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised'
+        ? 'cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised' : input.releaseId,
       executionLocation: 'local',
       homeMode: input.homeMode,
       taskScopeId: input.taskScopeId ?? null,
@@ -209,6 +212,16 @@ export function createDshHostScopePaths(
   );
   const processHome = ensureRealManagedDirectChild(managedRoot, 'process-home', 'DSH process Home');
   const dshHome = ensureRealManagedDirectChild(managedRoot, 'dsh-home', 'DSH managed Home');
+  // The sandboxed attachment backend cannot fsync ancestors outside its
+  // container. Establish that durability here before the supervisor hands off
+  // the managed-Home proof. Never ignore a failed fsync or grant more access.
+  if (process.platform !== 'win32') {
+    for (let directory = dshHome; ; directory = path.dirname(directory)) {
+      const fd = fs.openSync(directory, fs.constants.O_RDONLY);
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      if (path.dirname(directory) === directory) break;
+    }
+  }
   const launcher = createIsolatedLauncher(tempRoot);
   return {
     ...identity,

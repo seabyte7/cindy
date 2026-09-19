@@ -2,6 +2,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -32,6 +33,83 @@ afterEach(() => {
 });
 
 describe('DSH prompt content admission', () => {
+  it('keeps a >3 MiB image inline, sniffs MIME, preserves order and leaves no image staging copy', async () => {
+    const { stagingRoot, sourceRoot } = fixture();
+    const bytes = Buffer.alloc(4 * 1024 * 1024);
+    Buffer.from('89504e470d0a1a0a', 'hex').copy(bytes);
+    const source = join(sourceRoot, 'misleading.jpg');
+    writeFileSync(source, bytes);
+    const admission = createDshPromptContentAdmission({ stagingRoot });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const output = await admission.prepare({
+        cindySessionId: 'images',
+        inlineImagePromptSupported: true,
+        content: [
+          { type: 'text', text: 'before' },
+          { type: 'image', path: source, mimeType: 'image/jpeg' },
+          { type: 'text', text: 'after' },
+        ],
+      });
+      expect(output.map((block) => block.type)).toEqual(['text', 'image', 'text']);
+      expect(output[1]).toEqual({
+        type: 'image',
+        data: bytes.toString('base64'),
+        mimeType: 'image/png',
+      });
+    }
+    expect(readdirSync(stagingRoot)).toEqual([]);
+    expect(readFileSync(source).equals(bytes)).toBe(true);
+  });
+
+  it('compresses only the in-memory copy for the aggregate frame budget, and rejects if it still cannot fit', async () => {
+    const { stagingRoot, sourceRoot } = fixture();
+    const bytes = Buffer.alloc(7 * 1024 * 1024);
+    Buffer.from('89504e470d0a1a0a', 'hex').copy(bytes);
+    const source = join(sourceRoot, 'large.png');
+    writeFileSync(source, bytes);
+    const input = {
+      cindySessionId: 'images',
+      inlineImagePromptSupported: true,
+      content: [
+        { type: 'image' as const, path: source },
+        { type: 'image' as const, path: source },
+      ],
+    };
+    const refused = createDshPromptContentAdmission({
+      stagingRoot,
+      compressImage: async () => null,
+    });
+    await expect(refused.prepare(input)).rejects.toMatchObject({ code: 'prompt-too-large' });
+    const compressed = createDshPromptContentAdmission({
+      stagingRoot,
+      compressImage: async () => ({ buffer: bytes.subarray(0, 1024), mime: 'image/png' }),
+    });
+    const output = await compressed.prepare(input);
+    expect(output.map((block) => block.type)).toEqual(['image', 'image']);
+    expect(Buffer.byteLength(JSON.stringify(output))).toBeLessThan(16 * 1024 * 1024);
+    expect(readFileSync(source).equals(bytes)).toBe(true);
+  });
+
+  it('stages repeat file sends separately and cleans an entire rejected batch', async () => {
+    const { stagingRoot, sourceRoot } = fixture();
+    const source = join(sourceRoot, 'notes.txt');
+    writeFileSync(source, 'notes');
+    const admission = createDshPromptContentAdmission({ stagingRoot });
+    const input = {
+      cindySessionId: 'files',
+      inlineImagePromptSupported: true,
+      content: [{ type: 'file' as const, path: source }],
+    };
+    const first = await admission.prepare(input);
+    const second = await admission.prepare(input);
+    expect(first).not.toEqual(second);
+    const before = readdirSync(stagingRoot, { recursive: true });
+    await expect(
+      admission.prepare({ ...input, content: [...input.content, { type: 'image', path: source }] }),
+    ).rejects.toMatchObject({ code: 'image-invalid' });
+    expect(readdirSync(stagingRoot, { recursive: true })).toEqual(before);
+  });
+
   it('copies a host-normalized file into the task-owned DSH staging area before ACP sees it', async () => {
     const { stagingRoot, sourceRoot } = fixture();
     const source = join(sourceRoot, 'unique notes.md');
@@ -61,7 +139,10 @@ describe('DSH prompt content admission', () => {
   it('uses actual image bytes only after this ACP carrier advertises inline-image input', async () => {
     const { stagingRoot, sourceRoot } = fixture();
     const source = join(sourceRoot, 'pixel.png');
-    const image = Buffer.from('not-a-real-png-but-a-safe-acp-fixture');
+    const image = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=',
+      'base64',
+    );
     writeFileSync(source, image, { mode: 0o600 });
     const admission = createDshPromptContentAdmission({ stagingRoot });
 
@@ -74,11 +155,13 @@ describe('DSH prompt content admission', () => {
       { type: 'image', data: image.toString('base64'), mimeType: 'image/png' },
     ]);
 
-    await expect(admission.prepare({
-      cindySessionId: 'task-file-image',
-      inlineImagePromptSupported: false,
-      content: [{ type: 'image', path: source, mimeType: 'image/png' }],
-    })).rejects.toMatchObject({
+    await expect(
+      admission.prepare({
+        cindySessionId: 'task-file-image',
+        inlineImagePromptSupported: false,
+        content: [{ type: 'image', path: source, mimeType: 'image/png' }],
+      }),
+    ).rejects.toMatchObject({
       name: 'DshBridgePromptFailure',
       code: 'image-input-unavailable',
     });
@@ -98,13 +181,29 @@ describe('DSH prompt content admission', () => {
         inlineImagePromptSupported: false,
         content: [{ type: 'file', path: link }],
       }),
-    ).rejects.toThrow('regular local file');
+    ).rejects.toMatchObject({ code: 'attachment-invalid' });
     await expect(
       admission.prepare({
         cindySessionId: 'task-extra-dir',
         inlineImagePromptSupported: false,
         content: [{ type: 'mention', name: 'another directory', path: sourceRoot, kind: 'dir' }],
       }),
-    ).rejects.toThrow('extra directory mentions');
+    ).rejects.toMatchObject({ code: 'attachment-invalid' });
+  });
+
+  it('refuses a linked staging parent before creating anything outside the managed Home', async () => {
+    const { stagingRoot, sourceRoot } = fixture();
+    const source = join(sourceRoot, 'notes.txt');
+    writeFileSync(source, 'notes');
+    symlinkSync(sourceRoot, join(stagingRoot, 'dsh-task-attachments'));
+    const admission = createDshPromptContentAdmission({ stagingRoot });
+    await expect(
+      admission.prepare({
+        cindySessionId: 'linked-parent',
+        inlineImagePromptSupported: true,
+        content: [{ type: 'file', path: source }],
+      }),
+    ).rejects.toMatchObject({ code: 'attachment-invalid' });
+    expect(readdirSync(sourceRoot)).toEqual(['notes.txt']);
   });
 });

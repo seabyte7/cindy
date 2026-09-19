@@ -15,7 +15,7 @@ import { hasDshAsciiControlCharacter } from '../../shared/dshSession.js';
 import type { DbClient } from './client/DbClient.js';
 import { dshPromptReceipts } from './schema.js';
 
-export type DshPromptReceiptState = 'pending' | 'acknowledged' | 'uncertain';
+export type DshPromptReceiptState = 'pending' | 'acknowledged' | 'rejected' | 'uncertain';
 
 export interface DshPromptReceipt {
   receiptId: string;
@@ -38,6 +38,7 @@ export interface DshPromptReceiptStore {
     receiptIds: readonly string[];
   }): Promise<void>;
   hasUnresolved(cindySessionId: string): Promise<boolean>;
+  reject(input: { receiptId: string; cindySessionId: string }): Promise<DshPromptReceipt | null>;
 }
 
 const MAX_OPAQUE_ID_LENGTH = 512;
@@ -69,6 +70,7 @@ function toReceipt(row: DshPromptReceiptRow): DshPromptReceipt {
     row.state !== 'pending'
     && row.state !== 'acknowledged'
     && row.state !== 'uncertain'
+    && row.state !== 'rejected'
   ) {
     throw new Error('DSH prompt receipt stored state is unsupported');
   }
@@ -99,7 +101,7 @@ function toReceipt(row: DshPromptReceiptRow): DshPromptReceipt {
 }
 
 /**
- * All writes are one-way: pending becomes acknowledged or uncertain, never
+ * All writes are one-way: pending becomes acknowledged, rejected or uncertain, never
  * returns to pending. This lets a disconnect survive process loss as a
  * durable no-replay fact rather than a guess based on local memory.
  */
@@ -153,6 +155,21 @@ export function createDshPromptReceiptStore(
       return updated ? toReceipt(updated) : null;
     },
 
+    async reject(input) {
+      assertOpaqueId(input.receiptId, 'receiptId');
+      assertOpaqueId(input.cindySessionId, 'cindySessionId');
+      const timestamp = now();
+      assertTimestamp(timestamp);
+      const [updated] = await db.update(dshPromptReceipts)
+        .set({ state: 'rejected', stopReason: null, resolvedAt: timestamp })
+        .where(and(
+          eq(dshPromptReceipts.receiptId, input.receiptId),
+          eq(dshPromptReceipts.cindySessionId, input.cindySessionId),
+          eq(dshPromptReceipts.state, 'pending'),
+        )).returning();
+      return updated ? toReceipt(updated) : null;
+    },
+
     async markUncertain(input) {
       assertOpaqueId(input.cindySessionId, 'cindySessionId');
       if (input.receiptIds.length === 0) return;
@@ -192,6 +209,14 @@ export function createDshPromptReceiptStore(
                AND ${dshPromptReceipts.stopReason} IN ('end_turn', 'cancelled')
                AND ${dshPromptReceipts.resolvedAt} IS NOT NULL
               THEN 0
+              WHEN ${dshPromptReceipts.state} = 'rejected'
+               AND ${dshPromptReceipts.stopReason} IS NULL
+               AND typeof(${dshPromptReceipts.createdAt}) = 'integer'
+               AND typeof(${dshPromptReceipts.resolvedAt}) = 'integer'
+               AND ${dshPromptReceipts.resolvedAt} >= ${dshPromptReceipts.createdAt}
+               AND ${dshPromptReceipts.createdAt} >= 0
+               AND ${dshPromptReceipts.resolvedAt} <= 9007199254740991
+              THEN 0
               ELSE 1
             END = 1`,
           ),
@@ -199,7 +224,8 @@ export function createDshPromptReceiptStore(
         .orderBy(asc(dshPromptReceipts.createdAt), asc(dshPromptReceipts.receiptId))
         .limit(1);
       if (!row) return false;
-      return toReceipt(row).state !== 'acknowledged';
+      const receipt = toReceipt(row);
+      return receipt.state !== 'acknowledged' && receipt.state !== 'rejected';
     },
   };
 }

@@ -402,6 +402,22 @@ describe('DshAgent', () => {
     expect(bridge.close).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['image-input-unavailable', 'image-model-unsupported', 'image-invalid', 'attachment-invalid', 'prompt-too-large'] as const)(
+    'preserves the safe terminal reason for %s without exposing native diagnostics', async (code) => {
+      const bridge = new FakeDshBridge();
+      const handle = await new DshAgent(deps(), {
+        bridge, scopeId: 'scope-1', admission: { committedFollowProjection: true, promptReceiptLedger: true },
+      }).startSession({ sessionId: 'cindy-1', workingDir: '/project', model: 'native-dsh' });
+      await handle.send({ type: 'user', content: 'image input' });
+      await nextEvent(handle);
+      bridge.promptDeferred.reject(new DshBridgePromptFailure(code, 'native-private-diagnostic'));
+      const error = await nextEvent(handle);
+      expect(error).toMatchObject({ type: 'error', data: { code, reason: `dsh-${code}`, isTerminal: true } });
+      expect(JSON.stringify(error)).not.toContain('native-private-diagnostic');
+      await handle.close();
+    },
+  );
+
   it('contains an unconfirmed bridge failure in a generic terminal event', async () => {
     const bridge = new FakeDshBridge();
     const handle = await new DshAgent(deps(), {

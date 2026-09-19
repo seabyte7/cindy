@@ -1,7 +1,13 @@
 import type { Logger } from '../../interfaces/logger.js';
 import type { DshAcpTransport } from './transport.js';
 
-const DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024;
+export const DSH_ACP_MAX_FRAME_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_LINE_BYTES = DSH_ACP_MAX_FRAME_BYTES;
+
+/** Raised only before writeLine is invoked, never for a transport failure. */
+export class DshAcpFrameTooLargeError extends Error {
+  readonly name = 'DshAcpFrameTooLargeError';
+}
 const MAX_SESSION_ID_LENGTH = 4 * 1024;
 const MAX_PROTOCOL_ID_LENGTH = 4 * 1024;
 const MAX_PROTOCOL_METHOD_LENGTH = 256;
@@ -14,10 +20,10 @@ export class DshAcpRequestError extends Error {
   constructor(
     public readonly method: string,
     public readonly code: number,
-    message: string,
+    public readonly protocolMessage: string,
     public readonly data: unknown,
   ) {
-    super(`DSH ACP ${method} error ${code}: ${message}`);
+    super(`DSH ACP ${method} error ${code}: ${protocolMessage}`);
     this.name = 'DshAcpRequestError';
   }
 }
@@ -550,7 +556,7 @@ export class DshAcpClient implements DshAcpSessionClient {
     const line = JSON.stringify(payload);
     const bytes = Buffer.byteLength(line, 'utf8');
     if (bytes > this.maxLineBytes) {
-      throw new Error(`DSH ACP outbound NDJSON line exceeds maxLineBytes (${bytes} > ${this.maxLineBytes})`);
+      throw new DshAcpFrameTooLargeError(`DSH ACP outbound NDJSON line exceeds maxLineBytes (${bytes} > ${this.maxLineBytes})`);
     }
     // JSON.stringify escapes literal CR/LF in string fields. Retain an
     // explicit final guard so a future serializer change cannot create two

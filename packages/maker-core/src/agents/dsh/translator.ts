@@ -18,6 +18,8 @@ import type { AgentEvent } from "../../types/events.js";
 const MAX_NATIVE_ID_LENGTH = 4 * 1024;
 const MAX_TEXT_LENGTH = 1024 * 1024;
 const MAX_TOOL_RESULT_BLOCKS = 128;
+const MAX_IMAGE_BASE64_LENGTH = 16 * 1024 * 1024;
+const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const MAX_SAFE_JSON_DEPTH = 12;
 const MAX_SAFE_JSON_ITEMS = 1_024;
 const BLOCKED_JSON_KEYS = new Set(["__proto__", "constructor", "prototype"]);
@@ -287,6 +289,19 @@ function textFromToolResultContent(value: unknown): string | undefined {
   const text: string[] = [];
   for (const item of value) {
     if (!isRecord(item) || item.type !== "content") return undefined;
+    if (isRecord(item.content) && item.content.type === "image") {
+      const { mimeType, data } = item.content;
+      // ACP already carries these native attachment bytes to the model. The
+      // product projection records only a finite summary, never base64, a
+      // native attachment id or an unvalidated URI. Malformed blocks still
+      // fail closed instead of being silently discarded.
+      if (typeof mimeType !== "string" || !IMAGE_MIME_TYPES.has(mimeType) ||
+          typeof data !== "string" || data.length === 0 ||
+          data.length > MAX_IMAGE_BASE64_LENGTH || data.length % 4 !== 0 ||
+          Buffer.from(data, "base64").toString("base64") !== data) return undefined;
+      text.push(`[Image: ${mimeType}]`);
+      continue;
+    }
     const part = extractTextContent(item.content);
     if (part === undefined) return undefined;
     text.push(part);

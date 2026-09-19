@@ -36,6 +36,17 @@ function initialize(): DshAcpInitializeResult {
 }
 
 describe('DSH host scope', () => {
+  it('retains the managed build.1 Home for the reviewed build.2 storage fix, without aliasing other owners or Homes', () => {
+    const old = { accountId: 'owner-a', taskScopeId: 'task-a', homeMode: 'cindy-managed' as const,
+      releaseId: 'cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised' };
+    const next = { ...old, releaseId: 'cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised' };
+    expect(createDshHostScopeId(next)).toEqual(createDshHostScopeId(old));
+    for (const different of [{ ...next, accountId: 'owner-b' }, { ...next, taskScopeId: 'task-b' },
+      { ...next, homeMode: 'existing-dsh-home' as const }, { ...next, releaseId: 'unknown-release' }]) {
+      expect(createDshHostScopeId(different).scopeId).not.toBe(createDshHostScopeId(old).scopeId);
+    }
+  });
+
   it('hashes account identity into scope keys and creates isolated managed Home and launcher paths', () => {
     const base = root();
     const userData = join(base, 'user-data');

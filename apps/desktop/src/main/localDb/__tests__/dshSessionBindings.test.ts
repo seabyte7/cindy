@@ -28,6 +28,19 @@ describe('DSH session binding store', () => {
     rawDb = null;
   });
 
+  it('atomically upgrades the verified release and capability only from the expected closed revision', async () => {
+    const store = createDshSessionBindingStore(createTestDbClient());
+    await seedSession('cindy-session-a');
+    const releaseUpgrade = { previous: 'cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised', next: 'cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised' };
+    await store.recordCreateReceipt({ ...BASE_BINDING, runtimeReleaseId: releaseUpgrade.previous, runtimeVersion: '0.1.6-alpha.2' });
+    const closed = await store.markClosed({ cindySessionId: BASE_BINDING.cindySessionId, expectedRevision: 1 });
+    const args = { cindySessionId: BASE_BINDING.cindySessionId, expectedRevision: closed!.revision,
+      capabilityUpgrade: { previous: BASE_BINDING.capabilityFingerprint, next: 'new-image-capability' }, releaseUpgrade };
+    expect(await store.markActiveAfterVerifiedRuntimeState({ ...args, capabilityUpgrade: { ...args.capabilityUpgrade, previous: 'wrong' } })).toBeNull();
+    expect(await store.markActiveAfterVerifiedRuntimeState(args)).toMatchObject({ lifecycleState: 'active', capabilityFingerprint: 'new-image-capability', runtimeReleaseId: releaseUpgrade.next });
+    expect(await store.markActiveAfterVerifiedRuntimeState(args)).toBeNull();
+  });
+
   it('persists only the restart/reconcile ownership tuple after an acknowledged create receipt', async () => {
     const store = createDshSessionBindingStore(createTestDbClient(), {
       now: () => 1_700_000_000_000,

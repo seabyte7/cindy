@@ -10192,6 +10192,17 @@
       }
     },
     "dshRuntimeConfiguration": {
+      "imageConnectionReady": "目前連線已開啟圖片輸入，所選模型是否支援將在傳送時確認。",
+      "imageConnectionUnavailable": "目前連線未開啟圖片輸入，請檢查 DSH 設定並重新啟動其執行階段。",
+      "imageModelRejected": "所選模型拒絕了圖片輸入，請選擇支援圖片的模型。",
+      "errors": {
+        "image-input-unavailable": "目前連線未開啟圖片輸入，請檢查 DSH 設定並重新啟動其執行階段。",
+        "image-model-unsupported": "所選 DSH 模型不支援圖片，請切換至支援圖片的模型後重試。",
+        "image-invalid": "圖片格式或數量、大小不符合要求，請檢查附件後重試。",
+        "attachment-invalid": "無法讀取附件，請重新選擇檔案後重試。",
+        "prompt-too-large": "這則訊息過大，請減少圖片數量或縮小圖片後重試。",
+        "uncertain": "DSH 的處理結果尚未確定，請核對並復原此任務後再傳送，避免重複執行。"
+      },
       "ariaLabel": "DSH 執行階段設定",
       "title": "執行階段設定",
       "nextMessageOnly": "只對此任務後續傳送的訊息生效，不會儲存為供應商設定。",

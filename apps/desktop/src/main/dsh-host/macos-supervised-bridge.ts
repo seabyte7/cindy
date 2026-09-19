@@ -207,6 +207,9 @@ export async function startMacosSupervisedDshBridge(
       store: options.bindingStore,
       promptReceiptStore: options.promptReceiptStore,
       runtimeIdentity,
+      ...(scope.homeMode === 'cindy-managed' && snapshot.inlineImagePromptSupported
+        ? { previousImageCapabilityFingerprint: capabilityFingerprint({ ...snapshot, inlineImagePromptSupported: false }) }
+        : {}),
     });
     // A fresh carrier must prove every persisted binding against its own ACP
     // session/list result before any adapter can request a continuation. This

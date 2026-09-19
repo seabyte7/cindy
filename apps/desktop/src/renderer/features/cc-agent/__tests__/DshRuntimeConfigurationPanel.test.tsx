@@ -52,6 +52,19 @@ afterEach(() => {
 });
 
 describe('DshRuntimeConfigurationPanel', () => {
+  it('refreshes the native model refusal when the turn settles without confusing it with connection support', async () => {
+    const maker = runtimeConfigurationApi({ ...initialSnapshot, imageInput: { connectionSupported: true } });
+    (window as unknown as { electronAPI: unknown }).electronAPI = { maker };
+    const { rerender } = render(<DshRuntimeConfigurationPanel sessionId="task-1" />);
+    expect(await screen.findByText('ccAgent.dshRuntimeConfiguration.imageConnectionReady')).toBeTruthy();
+    rerender(<DshRuntimeConfigurationPanel sessionId="task-1" disabled />);
+    maker.getDshRuntimeConfiguration.mockResolvedValue({ ...initialSnapshot,
+      imageInput: { connectionSupported: true, lastRejection: 'image-model-unsupported' } });
+    rerender(<DshRuntimeConfigurationPanel sessionId="task-1" />);
+    expect(await screen.findByText('ccAgent.dshRuntimeConfiguration.imageModelRejected')).toBeTruthy();
+    expect(screen.queryByText('ccAgent.dshRuntimeConfiguration.imageConnectionUnavailable')).toBeNull();
+  });
+
   it('renders only Main-issued display choices and uses the narrow configuration API', async () => {
     const updated: DshRuntimeConfigurationSnapshot = {
       controls: [

@@ -53,6 +53,7 @@ import { isQuotaExhaustedErrorMessage } from '@/utils/quotaError';
 import { parseTerminalRateLimitRetryProgress } from '@/utils/rateLimitRetry';
 import type { UsageLimitRecoveryHint } from '@/lib/usageLimitRecovery';
 import { ERROR_REASON_I18N_KEYS } from './errorReasonI18n';
+import { DSH_REJECTED_INPUT_REASONS } from '../../../shared/dshPromptFailure';
 import { getToolLoopI18nKey } from './toolLoopI18n';
 import {
   CLAUDE_GATEWAY_OPUS_PLAN_MISMATCH_REASON,
@@ -329,6 +330,8 @@ export function ErrorBanner({
   // 订阅套餐错误保留 Retry：用户重新连接 Anthropic 后可从当前错误卡片重试；
   // Gateway 错误则隐藏 Retry，改走切换到 Claude.ai 的明确恢复动作。
   const hideRetry =
+    errorReason === 'dsh-prompt-unconfirmed' ||
+    DSH_REJECTED_INPUT_REASONS.has(errorReason ?? '') ||
     isSilentStopExhausted ||
     isClaudeGatewayOpusPlanMismatch ||
     isGatewayProxyTokenInvalid ||

@@ -62,7 +62,42 @@
 > 已成功执行且 packaged App 通过已列的 E2E，**不**解除 capability floor，也不是 installer、发布、跨平台或生产 endpoint
 > 结论。
 
-> **当前 source release / Settings 刷新（2026-09-18）**：当前 Cindy 本机 pin 已更新为上游 tag
+> **图片链路 / dev capsule 更新（2026-09-19）**：当前 macOS supervised pin 为
+> `cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised`，上游 tag/commit 不变。受控 archive SHA-256 为
+> `0e1be7b1d8319671d9cc7ed6ee5b1274513350fd3aecb9bbdd948f6fd07ac4ce`，tree manifest SHA-256 为
+> `63b09892136ad04c790a006dfc4cfdefb9bb59dc73efa77a897b7ba17114f579`。
+> Main 的 managed ACP profile 显式默认 `deepseek-flash`，继续使用 Messages 与 thinking；
+> 不改 Existing Home、不增加静态模型目录。连接的 image handshake 与当前模型能力分开：后者以原生
+> session 配置及本轮拒绝为准，不能用启动时的 image=true 宣称每个模型都能看图。
+>
+> 图片按实际 MIME 作为 ACP inline image 发送，不再将超过 3 MiB 的图片降级成 resource_link。
+> 总体按 16 MiB ACP frame 预算预留 envelope 空间，必要时仅压缩内存副本，仍超限则明确拒绝；
+> 普通文件逐次进入独立 batch，准备失败清理该 batch。原图不修改。`read_image` 的合法 ACP 图片
+> 工具结果投影为有限摘要，图片仍由 DSH 原生交给模型，不把 base64 复制进 Cindy 事件库。
+>
+> 新增受控 source adaptation 修复 App Sandbox 内附件持久化：Main 先 fsync managed Home 与祖先，
+> 固定 Supervisor 仅为 managed 模式发出内部持久化标记，runtime 在 Home 边界继续证明附件目录持久性。
+> 不扩张 entitlement；Existing Home 继续上游逻辑；子进程不继承 `CINDY_DSH_*`。
+> 新增 `rejected` receipt 仅用于固定版本 ACP 已证明的入队前拒绝和本地序列化拒绝；未知错误、超时、
+> 断链、有 follow 的错误仍为 uncertain，禁止自动重放。拒绝输入恢复进草稿并去重，用户替换或清空后不复活。
+>
+> build.1 → build.2 仅在相同 owner/task/managed Home 中复用 scope，固定 runtime version、controller
+> 与其余 capability 必须一致。仅允许 image=false → true 的精确指纹变化；必须 receipt 已结算、原生
+> list 命中、resume 成功后 CAS 更新绑定。`needs_reconcile` 不自动解除，不重写原生历史或强改已有模型。
+> 已有 request header 的模型由 DSH 恢复；尚未产生 request header 的空任务遵循原生 fallback 新默认。
+> 回退旧 build 不自动降级已升级绑定，不能通过手改 DB 或复制历史规避校验。
+>
+> 本地 dev 必须使用该 build.2 的签名 `out/Cindy-darwin-arm64/Cindy.app` capsule，并重启 Main；
+> Renderer 热更新不足以更新 ACP 进程。验收区分新任务默认、旧任务已存模型、明确拒绝、结果未确认四种状态。
+> 本机该 capsule 已通过 13/13 signed-Helper loopback 集成测试，包含 build.1 的空任务和已有模型历史两种
+> 升级路径、重复多图、选模拒绝后重试、图片历史恢复、独立 `read_image`、原有 lifecycle/MCP/权限/cancel。
+> 复验使用 `macos-supervised-runtime.integration.test.ts`：设置 `CINDY_DSH_E2E_APP`、
+> `CINDY_DSH_E2E_HOME`、`CINDY_DSH_E2E_RELEASE_ID`、`CINDY_DSH_E2E_PROMPT=1`；升级两例另外需要
+> `CINDY_DSH_E2E_PREVIOUS_APP` 指向签名 build.1 的 `Cindy.app`。测试只创建独立临时 Home/任务和假密钥。
+> 回环测试只证明本机 signed Helper 的模型传输与存储链路，不代表真实 DeepSeek 识图质量、双主题目检、
+> Windows/Linux、远端或移动端已验收。
+
+> **上一版 source release / Settings 刷新（2026-09-18）**：当时 Cindy 本机 pin 更新为上游 tag
 > `dsh-v0.1.6-alpha.2`、commit `ddefc45fbc7f8e46dd73185e68295696d1297887`、tree
 > `5aca5ee6f8dfd110dc3ae199fbddf8a0f606625f`。`darwin-arm64` 受控 archive SHA-256 为
 > `326631758bfc967fc90dd1e0304ba513505d96608517787b4ffdc496556172a9`，tree manifest SHA-256 为

@@ -12,6 +12,8 @@ import { isAbsolute } from 'node:path';
 import {
   DSH_BRIDGE_CONTRACT_VERSION,
   DshBridgePromptFailure,
+  DshAcpRequestError,
+  DshAcpFrameTooLargeError,
   translateDshFollowEvent,
   type DshAcpSessionClient,
   type DshBridgeAgentReceipt,
@@ -25,6 +27,7 @@ import {
   type DshBridgePermissionResolver,
   type DshBridgePort,
   type DshBridgePromptContent,
+  type DshBridgePromptFailureCode,
   type DshBridgePromptReceipt,
   type DshBridgePromptStopReason,
   type DshBridgeReceiptId,
@@ -109,6 +112,8 @@ export interface DshDurableRuntimeIdentity {
 export interface DshDurableBindingOptions {
   store: DshSessionBindingStore;
   runtimeIdentity: DshDurableRuntimeIdentity;
+  /** Main factory derives this by changing only the current handshake image bit. */
+  previousImageCapabilityFingerprint?: string;
   /**
    * Optional until the complete F3 recovery service is wired by its owning
    * Main factory. When present, every prompt is ledgered before ACP send and
@@ -211,6 +216,9 @@ interface LiveBindingState {
   pendingPromptReceiptIds: Set<string>;
   /** A native prompt must finish before a live option can affect a later turn. */
   promptInFlight: boolean;
+  lastImageRejection?: DshBridgePromptFailureCode;
+  previousCapabilityFingerprint?: string;
+  previousRuntimeReleaseId?: string;
   /** Sequence is owner-local so one DSH session cannot create another's gap. */
   nextFollowSequence: number;
   /** Serializes durable projection for this owner without delaying ACP notifications. */
@@ -843,6 +851,7 @@ export class DshControlPlane implements DshBridgePort {
       state.configuration = configuration.options;
       state.configurationLabels = configuration.labels;
       state.configurationTokens.clear();
+      if (input.configId === 'model') state.lastImageRejection = undefined;
       return this.getConfigurationOptionsForMain(state.binding);
     } finally {
       state.configurationMutationInFlight = false;
@@ -894,7 +903,13 @@ export class DshControlPlane implements DshBridgePort {
         }),
       );
     }
-    return Object.freeze({ controls: Object.freeze(controls) });
+    return Object.freeze({
+      controls: Object.freeze(controls),
+      imageInput: Object.freeze({
+        connectionSupported: this.capabilitySnapshot?.inlineImagePromptSupported === true,
+        lastRejection: state.lastImageRejection,
+      }),
+    });
   }
 
   /**
@@ -1006,7 +1021,7 @@ export class DshControlPlane implements DshBridgePort {
       0,
     );
     if (textBytes > DSH_BRIDGE_MAX_PROMPT_BYTES) {
-      throw new Error(`DSH bridge prompt text exceeds ${DSH_BRIDGE_MAX_PROMPT_BYTES} UTF-8 bytes`);
+      throw new DshBridgePromptFailure('prompt-too-large', 'DSH prompt text exceeds the input limit');
     }
     if (!content.length) throw new Error('DSH bridge prompt content is required');
     // Attachment staging performs async filesystem work. Hold the same turn
@@ -1019,13 +1034,15 @@ export class DshControlPlane implements DshBridgePort {
         prompt = await this.admitPromptContent(input.cindySessionId, content);
       } catch (error) {
         this.logPromptFailure(state, error, 'prompt-admission-rejected');
-        throw error;
+        throw error instanceof DshBridgePromptFailure ? error :
+          new DshBridgePromptFailure('attachment-invalid', 'DSH could not admit this prompt');
       }
       const receiptId = this.newReceiptId();
       assertNonEmpty(receiptId, 'prompt receiptId');
       const acceptedAt = this.now().toISOString();
       await this.recordPendingPromptReceipt(state, receiptId);
       let result: { stopReason: DshBridgePromptStopReason };
+      const sequenceBeforeSend = state.nextFollowSequence;
       try {
         result = await this.withOperationTimeout(
           'prompt',
@@ -1035,6 +1052,13 @@ export class DshControlPlane implements DshBridgePort {
           }),
         );
       } catch (error) {
+        const rejection = this.definitivePromptRejection(error, prompt);
+        if (rejection && state.nextFollowSequence === sequenceBeforeSend && !this.needsReconcileReason) {
+          this.logPromptFailure(state, error, 'prompt-admission-rejected');
+          await this.rejectPromptReceipt(state, receiptId);
+          if (prompt.some((block) => (block as { type?: string }).type === 'image')) state.lastImageRejection = rejection;
+          throw new DshBridgePromptFailure(rejection, 'DSH rejected this prompt before queuing it');
+        }
         this.logPromptFailure(state, error);
         await this.markPromptReceiptUncertain(state, receiptId);
         return await this.blockAfterPromptReceiptUncertain();
@@ -1046,6 +1070,7 @@ export class DshControlPlane implements DshBridgePort {
       await state.projectionTail;
       this.assertReady();
       await this.acknowledgePromptReceipt(state, receiptId, result.stopReason);
+      if (prompt.some((block) => (block as { type?: string }).type === 'image')) state.lastImageRejection = undefined;
       return {
         contractVersion: DSH_BRIDGE_CONTRACT_VERSION,
         operation: 'prompt',
@@ -1085,6 +1110,44 @@ export class DshControlPlane implements DshBridgePort {
     });
   }
 
+  private definitivePromptRejection(error: unknown, prompt: readonly unknown[]): DshBridgePromptFailureCode | null {
+    if (error instanceof DshAcpFrameTooLargeError) return 'prompt-too-large';
+    // This allowlist is tied to the inspected public ACP implementation. A
+    // provider failure or an unknown protocol error never establishes no-send.
+    if (!['cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised', 'cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised'].includes(this.durableBinding?.runtimeIdentity.runtimeReleaseId ?? '') ||
+        this.durableBinding?.runtimeIdentity.runtimeVersion !== '0.1.6-alpha.2' ||
+        !(error instanceof DshAcpRequestError) || error.method !== 'session/prompt' || error.code !== -32602 ||
+        !prompt.some((block) => (block as { type?: string }).type === 'image')) return null;
+    const detail = error.protocolMessage.replace(/^Invalid params: /, '');
+    if (/^model "[^"\r\n]{1,512}" does not declare image input$/.test(detail)) return 'image-model-unsupported';
+    if (detail === 'inline image prompts were not advertised by this connection') return 'image-input-unavailable';
+    if ([
+      'image mimeType must be image/png, image/jpeg, image/webp, or image/gif',
+      'image data must be canonical base64',
+      'Image batch exceeds the configured image-count limit.',
+      'Image batch exceeds the configured aggregate image-byte limit.',
+      'Unsupported or malformed image data.',
+      'Image is empty.',
+      'Declared image type does not match its bytes.',
+      'Image exceeds the configured byte limit.',
+      'Image exceeds the configured decoded-pixel limit.',
+      'Image exceeds the configured per-side pixel limit.',
+    ].includes(detail)) return 'image-invalid';
+    return null;
+  }
+
+  private async rejectPromptReceipt(state: LiveBindingState, receiptId: string): Promise<void> {
+    const store = this.durableBinding?.promptReceiptStore;
+    if (!store) return;
+    try {
+      if (!await store.reject({ receiptId, cindySessionId: state.binding.cindySessionId })) throw new Error('Receipt conflict');
+      state.pendingPromptReceiptIds.delete(receiptId);
+    } catch {
+      await this.markPromptReceiptUncertain(state, receiptId);
+      await this.blockAfterPromptReceiptUncertain();
+    }
+  }
+
   private logSessionRuntimeState(
     cindySessionId: string,
     operation: 'session/new' | 'session/resume',
@@ -1111,7 +1174,7 @@ export class DshControlPlane implements DshBridgePort {
   ): void {
     const diagnostics = safeErrorDiagnostics(error);
     const model = state.configuration.get('model');
-    this.logger?.error('DSH prompt terminal receipt unavailable', {
+    this.logger?.error(reason === 'prompt-admission-rejected' ? 'DSH prompt admission rejected' : 'DSH prompt terminal receipt unavailable', {
       cindySessionId: state.binding.cindySessionId,
       reason,
       ...diagnostics,
@@ -1281,6 +1344,10 @@ export class DshControlPlane implements DshBridgePort {
         nextFollowSequence: firstUnprojectedSequence(normalized.lastProjectedSequence),
         projectionTail: Promise.resolve(),
         durableRevision: normalized.revision,
+        previousRuntimeReleaseId: normalized.runtimeReleaseId !== this.durableBinding.runtimeIdentity.runtimeReleaseId
+          ? normalized.runtimeReleaseId : undefined,
+        previousCapabilityFingerprint: normalized.capabilityFingerprint !== this.durableBinding.runtimeIdentity.capabilityFingerprint
+          ? normalized.capabilityFingerprint : undefined,
         // A fresh carrier has only session/list evidence at this point. ACP
         // returns the live configuration allowlist only after session/resume.
         configuration: new Map(),
@@ -1345,6 +1412,14 @@ export class DshControlPlane implements DshBridgePort {
       persisted = await this.durableBinding.store.markActiveAfterVerifiedRuntimeState({
         cindySessionId: state.binding.cindySessionId,
         expectedRevision,
+        ...(state.previousRuntimeReleaseId ? { releaseUpgrade: {
+          previous: state.previousRuntimeReleaseId,
+          next: this.durableBinding.runtimeIdentity.runtimeReleaseId,
+        } } : {}),
+        ...(state.previousCapabilityFingerprint ? { capabilityUpgrade: {
+          previous: state.previousCapabilityFingerprint,
+          next: this.durableBinding.runtimeIdentity.capabilityFingerprint,
+        } } : {}),
       });
     } catch {
       return this.blockAfterDurableFailure(
@@ -1357,6 +1432,8 @@ export class DshControlPlane implements DshBridgePort {
       );
     }
     state.durableRevision = persisted.revision;
+    state.previousCapabilityFingerprint = undefined;
+    state.previousRuntimeReleaseId = undefined;
   }
 
   /**
@@ -1588,10 +1665,19 @@ export class DshControlPlane implements DshBridgePort {
     const configured = this.durableBinding?.runtimeIdentity;
     return (
       configured !== undefined &&
-      binding.runtimeReleaseId === configured.runtimeReleaseId &&
+      (binding.runtimeReleaseId === configured.runtimeReleaseId ||
+        (configured.homeMode === 'cindy-managed' && configured.runtimeReleaseId === 'cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised' &&
+         binding.runtimeReleaseId === 'cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised' &&
+         this.durableBinding?.promptReceiptStore !== undefined)) &&
       binding.runtimeVersion === configured.runtimeVersion &&
       binding.controllerApiVersion === configured.controllerApiVersion &&
-      binding.capabilityFingerprint === configured.capabilityFingerprint &&
+      (binding.capabilityFingerprint === configured.capabilityFingerprint ||
+        (configured.homeMode === 'cindy-managed' &&
+         ['cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised', 'cindy-dsh-0.1.6-alpha.2-build.2-macos-supervised'].includes(configured.runtimeReleaseId) &&
+         configured.runtimeVersion === '0.1.6-alpha.2' &&
+         this.capabilitySnapshot?.inlineImagePromptSupported === true &&
+         this.durableBinding?.promptReceiptStore !== undefined &&
+         binding.capabilityFingerprint === this.durableBinding?.previousImageCapabilityFingerprint)) &&
       binding.homeMode === configured.homeMode
     );
   }

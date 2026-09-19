@@ -19,4 +19,9 @@ export interface DshRuntimeConfigurationControl {
 
 export interface DshRuntimeConfigurationSnapshot {
   controls: readonly DshRuntimeConfigurationControl[];
+  /** Handshake fact only: does not claim that every selectable model supports images. */
+  imageInput?: Readonly<{
+    connectionSupported: boolean;
+    lastRejection?: import('@cindy/maker-core').DshBridgePromptFailureCode;
+  }>;
 }

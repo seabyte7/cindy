@@ -10192,6 +10192,17 @@
       }
     },
     "dshRuntimeConfiguration": {
+      "imageConnectionReady": "当前连接已开启图片输入，所选模型是否支持将在发送时确认。",
+      "imageConnectionUnavailable": "当前连接未开启图片输入，请检查 DSH 配置并重启其运行时。",
+      "imageModelRejected": "所选模型拒绝了图片输入，请选择支持图片的模型。",
+      "errors": {
+        "image-input-unavailable": "当前连接未开启图片输入，请检查 DSH 配置并重启其运行时。",
+        "image-model-unsupported": "所选 DSH 模型不支持图片，请切换到支持图片的模型后重试。",
+        "image-invalid": "图片格式或数量、大小不符合要求，请检查附件后重试。",
+        "attachment-invalid": "无法读取附件，请重新选择文件后重试。",
+        "prompt-too-large": "这条消息过大，请减少图片数量或缩小图片后重试。",
+        "uncertain": "DSH 的处理结果尚不确定，请核对并恢复此任务后再发送，避免重复执行。"
+      },
       "ariaLabel": "DSH 运行时设置",
       "title": "运行时设置",
       "nextMessageOnly": "仅对该任务后续发送的消息生效，不会保存为供应商设置。",

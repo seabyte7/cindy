@@ -53,6 +53,10 @@ export type DshBridgePromptStopReason = 'end_turn' | 'cancelled';
  */
 export type DshBridgePromptFailureCode =
   | 'image-input-unavailable'
+  | 'image-model-unsupported'
+  | 'image-invalid'
+  | 'attachment-invalid'
+  | 'prompt-too-large'
   | 'prompt-outcome-uncertain'
   | 'prompt-failed';
 

@@ -3,7 +3,7 @@
  * skipped until a local macOS evidence run supplies that exact test App and
  * its owning user's home directory. It never falls back to a PATH runtime.
  */
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +19,7 @@ import {
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import Database from 'better-sqlite3';
+import sharp from 'sharp';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -65,6 +66,7 @@ const unusedPromptReceiptStore: DshPromptReceiptStore = {
     throw new Error('unexpected DSH prompt uncertainty in lifecycle evidence');
   },
   hasUnresolved: async () => false,
+  reject: async () => { throw new Error('unused receipt store'); },
 };
 
 const unusedProjectionJournal: DshProjectionJournal = {
@@ -94,6 +96,7 @@ interface LoopbackProvider {
 }
 
 interface LoopbackProviderOptions {
+  inspectRequest?: (body: unknown) => void;
   /** Leave only the second completion response open for session/cancel proof. */
   keepSecondResponseOpen?: boolean;
   /**
@@ -103,6 +106,7 @@ interface LoopbackProviderOptions {
    * request body or authorization value.
    */
   toolCall?: Readonly<{
+    name?: 'bash' | 'read_image';
     arguments: Readonly<Record<string, unknown>>;
     finalText: string;
   }>;
@@ -182,6 +186,7 @@ async function createLoopbackProvider(
         return;
       }
       acceptedRequests += 1;
+      options.inspectRequest?.(body);
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       openResponses.add(response);
       response.once('close', () => {
@@ -204,7 +209,7 @@ async function createLoopbackProvider(
               content_block: {
                 type: 'tool_use',
                 id: 'cindy-dsh-supervised-e2e-tool-call',
-                name: 'bash',
+                name: options.toolCall.name ?? 'bash',
                 input: options.toolCall.arguments,
               },
             },
@@ -953,6 +958,208 @@ describeRuntime('packaged macOS supervised DSH host integration', () => {
 });
 
 describePromptRuntime('packaged macOS supervised DSH prompt integration', () => {
+  it.runIf(Boolean(process.env.CINDY_DSH_E2E_PREVIOUS_APP)).each([false, true])('upgrades a build.1 binding through native list/resume (persisted selection=%s)', async (persistedSelection) => {
+    const evidence = runtimeEvidence!;
+    const previousRelease = 'cindy-dsh-0.1.6-alpha.2-build.1-macos-supervised';
+    const resourcesPath = join(evidence.appPath, 'Contents', 'Resources');
+    const layout = resolveMacosSupervisedDshRuntime({ resourcesPath, homePath: evidence.homePath });
+    const cindySessionId = `image-upgrade-e2e-${process.pid}-${Date.now()}`;
+    const input = { accountId: cindySessionId, releaseId: previousRelease, homeMode: 'cindy-managed' as const, taskScopeId: cindySessionId };
+    const managedScopeRoot = join(layout.helperContainerDataPath, 'dsh-agent-home', createDshHostScopeId(input).scopeId);
+    const workspace = mkdtempSync(join(tmpdir(), 'cindy-dsh-upgrade-e2e-'));
+    const persistence = createPromptPersistence(cindySessionId);
+    let provider: LoopbackProvider | undefined;
+    let host: Awaited<ReturnType<typeof startMacosSupervisedDshBridge>> | undefined;
+    const common = {
+      homePath: evidence.homePath, logger: createConsoleLogger('dsh-image-upgrade-e2e'),
+      assertAuthorizedCwd: (cwd: string) => { if (cwd !== workspace) throw new Error('unexpected fixture cwd'); },
+      bindingStore: persistence.bindingStore, promptReceiptStore: persistence.promptReceiptStore,
+      projectionJournal: persistence.projectionJournal,
+    };
+    try {
+      provider = await createLoopbackProvider();
+      // One variant has the old false image handshake and no request header;
+      // the other persists an explicit model through a real loopback turn.
+      host = await startMacosSupervisedDshBridge({ ...common,
+        resourcesPath: join(process.env.CINDY_DSH_E2E_PREVIOUS_APP!, 'Contents', 'Resources'),
+        ...(persistedSelection ? { providerRoute: createLoopbackE2eDshProviderRoute(provider.baseUrl) } : {}),
+        loadSecrets: () => persistedSelection ? [{ name: 'CINDY_DSH_PROVIDER_API_KEY', value: LOOPBACK_PROVIDER_API_KEY }] : [],
+      }, input);
+      expect(host.bridge.getCapabilitySnapshot()?.inlineImagePromptSupported).toBe(persistedSelection);
+      const created = await host.bridge.create({ cindySessionId, cwd: workspace });
+      const native = await persistence.bindingStore.getByCindySessionId(cindySessionId);
+      const oldRef = { cindySessionId, scopeId: host.scopeId, runtimeSessionId: native!.runtimeSessionId };
+      const oldModel = host.bridge.getConfigurationOptionsForMain(oldRef).find((option) => option.id === 'model')!;
+      if (persistedSelection) {
+        const textModel = oldModel.allowedValues.find((value) => value.includes('deepseek-v4-pro'))!;
+        await host.bridge.setConfigurationOptionForMain({ ...oldRef, configId: 'model', value: textModel });
+        await host.bridge.prompt({ ...created, content: [{ type: 'text', text: 'persist this model selection' }] });
+      }
+      await host.bridge.close(created);
+      await host.close('old runtime fixture complete');
+      const oldBinding = await persistence.bindingStore.getByCindySessionId(cindySessionId);
+      host = await startMacosSupervisedDshBridge({ ...common, resourcesPath,
+        providerRoute: createLoopbackE2eDshProviderRoute(provider.baseUrl),
+        loadSecrets: () => [{ name: 'CINDY_DSH_PROVIDER_API_KEY', value: LOOPBACK_PROVIDER_API_KEY }],
+      }, { ...input, releaseId: evidence.releaseId });
+      expect(host.bridge.getCapabilitySnapshot()?.inlineImagePromptSupported).toBe(true);
+      expect((await persistence.bindingStore.getByCindySessionId(cindySessionId))?.runtimeReleaseId).toBe(previousRelease);
+      const resumed = await host.bridge.resumeForAdapter({ cindySessionId, cwd: workspace });
+      const upgraded = await persistence.bindingStore.getByCindySessionId(cindySessionId);
+      expect(upgraded).toMatchObject({ runtimeSessionId: oldBinding!.runtimeSessionId, hostScopeId: oldBinding!.hostScopeId,
+        runtimeReleaseId: evidence.releaseId, lifecycleState: 'active' });
+      if (persistedSelection) expect(upgraded!.capabilityFingerprint).toBe(oldBinding!.capabilityFingerprint);
+      else expect(upgraded!.capabilityFingerprint).not.toBe(oldBinding!.capabilityFingerprint);
+      const ref = { cindySessionId, scopeId: host.scopeId, runtimeSessionId: upgraded!.runtimeSessionId };
+      const model = host.bridge.getConfigurationOptionsForMain(ref).find((option) => option.id === 'model')!;
+      expect(model.currentValue).toContain(persistedSelection ? 'deepseek-v4-pro' : 'deepseek-flash');
+      const flash = model.allowedValues.find((value) => value.includes('deepseek-flash'))!;
+      await host.bridge.setConfigurationOptionForMain({ ...ref, configId: 'model', value: flash });
+      const imagePath = join(workspace, 'after-upgrade.png');
+      writeFileSync(imagePath, await sharp({ create: { width: 2, height: 2, channels: 3, background: 'red' } }).png().toBuffer());
+      await expect(host.bridge.prompt({ ...resumed, content: [{ type: 'image', path: imagePath }] })).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(provider.acceptedRequestCount()).toBe(persistedSelection ? 2 : 1);
+    } finally {
+      await host?.close('upgrade fixture complete');
+      await provider?.close();
+      persistence.rawDb.close();
+      rmSync(workspace, { recursive: true, force: true });
+      if (existsSync(managedScopeRoot)) rmSync(managedScopeRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('delivers native inline images repeatedly, rejects text-only model input without poisoning the task, and resumes image history', async () => {
+    const evidence = runtimeEvidence!;
+    const resourcesPath = join(evidence.appPath, 'Contents', 'Resources');
+    const cindySessionId = `images-e2e-${process.pid}-${Date.now()}`;
+    const input = { accountId: cindySessionId, releaseId: evidence.releaseId, homeMode: 'cindy-managed' as const, taskScopeId: cindySessionId };
+    const layout = resolveMacosSupervisedDshRuntime({ resourcesPath, homePath: evidence.homePath });
+    const managedScopeRoot = join(layout.helperContainerDataPath, 'dsh-agent-home', createDshHostScopeId(input).scopeId);
+    const workspace = mkdtempSync(join(tmpdir(), 'cindy-dsh-images-e2e-'));
+    const image = await sharp({ create: { width: 3, height: 2, channels: 4, background: { r: 1, g: 2, b: 3, alpha: 1 } } }).png().toBuffer();
+    const imagePath = join(workspace, 'pixel.png');
+    writeFileSync(imagePath, image);
+    const persistence = createPromptPersistence(cindySessionId);
+    const observed: unknown[] = [];
+    let provider: LoopbackProvider | undefined;
+    let host: Awaited<ReturnType<typeof startMacosSupervisedDshBridge>> | undefined;
+    const start = () => startMacosSupervisedDshBridge({
+      resourcesPath, homePath: evidence.homePath,
+      logger: createConsoleLogger('dsh-images-e2e'),
+      providerRoute: createLoopbackE2eDshProviderRoute(provider!.baseUrl),
+      loadSecrets: () => [{ name: 'CINDY_DSH_PROVIDER_API_KEY', value: LOOPBACK_PROVIDER_API_KEY }],
+      assertAuthorizedCwd: (cwd) => { if (cwd !== workspace) throw new Error('unexpected fixture cwd'); },
+      bindingStore: persistence.bindingStore, promptReceiptStore: persistence.promptReceiptStore,
+      projectionJournal: persistence.projectionJournal,
+    }, input);
+    try {
+      provider = await createLoopbackProvider({ inspectRequest: (body) => observed.push(body) });
+      host = await start();
+      expect(host.bridge.getCapabilitySnapshot()?.inlineImagePromptSupported).toBe(true);
+      const created = await host.bridge.create({ cindySessionId, cwd: workspace });
+      const sendImages = () => host!.bridge.prompt({ ...created, content: [
+        { type: 'text', text: 'first' }, { type: 'image', path: imagePath, mimeType: 'image/jpeg' },
+        { type: 'text', text: 'second' }, { type: 'image', path: imagePath },
+      ] });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(sendImages()).resolves.toMatchObject({ stopReason: 'end_turn' });
+        const request = observed.at(-1) as { model: string; messages: Array<{ role: string; content: unknown[] }> };
+        expect(request.model).toBe('deepseek-flash');
+        const content = request.messages.filter((message) => message.role === 'user').at(-1)!.content;
+        // DSH also inserts attachment descriptions and a runtime-context block.
+        // Verify every image and the caller's interleaved text in original order.
+        const callerContent = content.filter((block) => {
+          const part = block as { type: string; text?: string };
+          return part.type === 'image' || part.text === 'first' || part.text === 'second';
+        });
+        expect(callerContent).toEqual([
+          { type: 'text', text: 'first' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image.toString('base64') } },
+          { type: 'text', text: 'second' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image.toString('base64') } },
+        ]);
+      }
+      const native = await persistence.bindingStore.getByCindySessionId(cindySessionId);
+      const ref = { cindySessionId, scopeId: host.scopeId, runtimeSessionId: native!.runtimeSessionId };
+      const model = host.bridge.getConfigurationOptionsForMain(ref).find((option) => option.id === 'model')!;
+      const flash = model.currentValue;
+      const textOnly = model.allowedValues.find((value) => value.includes('deepseek-v4-pro'))!;
+      expect(textOnly).toBeTruthy();
+      await host.bridge.setConfigurationOptionForMain({ ...ref, configId: 'model', value: textOnly });
+      const requestsBeforeRejection = provider.acceptedRequestCount();
+      await expect(sendImages()).rejects.toMatchObject({ code: 'image-model-unsupported' });
+      expect(provider.acceptedRequestCount()).toBe(requestsBeforeRejection);
+      expect(await persistence.promptReceiptStore.hasUnresolved(cindySessionId)).toBe(false);
+      expect(persistence.rawDb.prepare("SELECT count(*) AS n FROM dsh_prompt_receipts WHERE state = 'rejected'").get()).toEqual({ n: 1 });
+      await host.bridge.setConfigurationOptionForMain({ ...ref, configId: 'model', value: flash });
+      await expect(sendImages()).resolves.toMatchObject({ stopReason: 'end_turn' });
+      await host.bridge.close(created);
+      await host.close('image fixture restart');
+      host = await start();
+      const resumed = await host.bridge.resumeForAdapter({ cindySessionId, cwd: workspace });
+      await expect(host.bridge.prompt({ ...resumed, content: [{ type: 'text', text: 'recall the images' }] })).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(JSON.stringify(observed.at(-1))).toContain(image.toString('base64'));
+      expect(await persistence.promptReceiptStore.hasUnresolved(cindySessionId)).toBe(false);
+    } finally {
+      await host?.close('image fixture complete');
+      await provider?.close();
+      persistence.rawDb.close();
+      rmSync(workspace, { recursive: true, force: true });
+      if (existsSync(managedScopeRoot)) rmSync(managedScopeRoot, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('returns actual image bytes from the native read_image tool in the signed Helper', async () => {
+    const evidence = runtimeEvidence!;
+    const resourcesPath = join(evidence.appPath, 'Contents', 'Resources');
+    const layout = resolveMacosSupervisedDshRuntime({ resourcesPath, homePath: evidence.homePath });
+    const cindySessionId = `read-image-e2e-${process.pid}-${Date.now()}`;
+    const input = { accountId: cindySessionId, releaseId: evidence.releaseId, homeMode: 'cindy-managed' as const, taskScopeId: cindySessionId };
+    const managedScopeRoot = join(layout.helperContainerDataPath, 'dsh-agent-home', createDshHostScopeId(input).scopeId);
+    const workspace = mkdtempSync(join(layout.helperContainerDataPath, 'dsh-read-image-e2e-'));
+    const persistence = createPromptPersistence(cindySessionId);
+    let provider: LoopbackProvider | undefined;
+    let host: Awaited<ReturnType<typeof startMacosSupervisedDshBridge>> | undefined;
+    try {
+      const image = await sharp({ create: { width: 3, height: 2, channels: 4, background: { r: 1, g: 2, b: 3, alpha: 1 } } }).png().toBuffer();
+      const imagePath = join(workspace, 'tool.png');
+      writeFileSync(imagePath, image);
+      const observed: unknown[] = [];
+      provider = await createLoopbackProvider({
+        inspectRequest: (body) => observed.push(body),
+        toolCall: { name: 'read_image', arguments: { file_path: imagePath }, finalText: 'IMAGE_READ_COMPLETE' },
+      });
+      host = await startMacosSupervisedDshBridge({
+        resourcesPath, homePath: evidence.homePath, logger: createConsoleLogger('dsh-read-image-e2e'),
+        providerRoute: createLoopbackE2eDshProviderRoute(provider.baseUrl),
+        loadSecrets: () => [{ name: 'CINDY_DSH_PROVIDER_API_KEY', value: LOOPBACK_PROVIDER_API_KEY }],
+        assertAuthorizedCwd: (cwd) => { if (cwd !== workspace) throw new Error('unexpected fixture cwd'); },
+        bindingStore: persistence.bindingStore, promptReceiptStore: persistence.promptReceiptStore,
+        projectionJournal: persistence.projectionJournal,
+      }, input);
+      const created = await host.bridge.create({ cindySessionId, cwd: workspace });
+      // Only text enters ACP: the bytes in the second provider request must
+      // come from native read_image, independently of the inline-image path.
+      await expect(host.bridge.prompt({ ...created, content: [{ type: 'text', text: 'Read tool.png.' }] })).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(provider.acceptedRequestCount()).toBe(2);
+      const first = JSON.stringify(observed[0]);
+      const continuation = JSON.stringify(observed[1]);
+      expect(first).not.toContain(image.toString('base64'));
+      expect(continuation).toContain(image.toString('base64'));
+      expect(continuation).not.toContain('does not declare image input');
+      const projected = JSON.stringify(persistence.rawDb.prepare('SELECT event_json FROM dsh_projection_events').all());
+      expect(projected).toContain('[Image: image/png]');
+      expect(projected).not.toContain(image.toString('base64'));
+      expect(await persistence.promptReceiptStore.hasUnresolved(cindySessionId)).toBe(false);
+    } finally {
+      await host?.close('read_image fixture complete');
+      await provider?.close();
+      persistence.rawDb.close();
+      rmSync(workspace, { recursive: true, force: true });
+      if (existsSync(managedScopeRoot)) rmSync(managedScopeRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('executes a signed Helper bash tool after one Main-owned approval without leaking provider credentials', async () => {
     const evidence = runtimeEvidence!;
     const resourcesPath = join(evidence.appPath, 'Contents', 'Resources');
@@ -978,7 +1185,7 @@ describePromptRuntime('packaged macOS supervised DSH prompt integration', () => 
           // Main-only provider variables before invoking bash.  The command
           // prints only the test workspace and makes no filesystem mutation.
           arguments: {
-            command: 'printf %s "$PWD"; test -z "${CINDY_DSH_PROVIDER_API_KEY:-}"; test -z "${CINDY_DSH_PROVIDER_BASE_URL:-}"',
+            command: 'printf %s "$PWD"; test -z "${CINDY_DSH_PROVIDER_API_KEY:-}"; test -z "${CINDY_DSH_PROVIDER_BASE_URL:-}"; test -z "${CINDY_DSH_MANAGED_HOME_DURABLE:-}"',
             description: 'Print the sealed test workspace',
             run_in_background: false,
             // The normal profile starts at workspace-write.  Requesting this

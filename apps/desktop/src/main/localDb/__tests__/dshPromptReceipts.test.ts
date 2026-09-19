@@ -47,6 +47,21 @@ describe('DSH prompt receipt ledger', () => {
     );
   });
 
+  it('settles only proven pending rejections and never unlocks an uncertain receipt', async () => {
+    const store = createDshPromptReceiptStore(createTestDbClient(), { now: () => 42 });
+    seedBinding('cindy-session-a');
+    const input = { receiptId: 'rejected', cindySessionId: 'cindy-session-a' };
+    await store.recordPending(input);
+    expect(await store.reject({ ...input, cindySessionId: 'other' })).toBeNull();
+    expect(await store.reject(input)).toMatchObject({ state: 'rejected', stopReason: null, resolvedAt: 42 });
+    expect(await store.hasUnresolved(input.cindySessionId)).toBe(false);
+    expect(await store.acknowledge({ ...input, stopReason: 'end_turn' })).toBeNull();
+    await store.recordPending({ ...input, receiptId: 'unknown' });
+    await store.markUncertain({ cindySessionId: input.cindySessionId, receiptIds: ['unknown'] });
+    expect(await store.reject({ ...input, receiptId: 'unknown' })).toBeNull();
+    expect(await store.hasUnresolved(input.cindySessionId)).toBe(true);
+  });
+
   it('makes an interrupted receipt uncertain exactly once and never re-acknowledges it', async () => {
     const store = createDshPromptReceiptStore(createTestDbClient(), { now: () => 99 });
     seedBinding('cindy-session-a');
@@ -76,6 +91,16 @@ describe('DSH prompt receipt ledger', () => {
         .prepare('SELECT state FROM dsh_prompt_receipts WHERE receipt_id = ?')
         .get('dsh-receipt-b'),
     ).toEqual({ state: 'pending' });
+  });
+
+  it('does not treat a rejected receipt with a damaged timestamp as settled', async () => {
+    const store = createDshPromptReceiptStore(createTestDbClient(), { now: () => 42 });
+    seedBinding('cindy-session-a');
+    const input = { receiptId: 'damaged', cindySessionId: 'cindy-session-a' };
+    await store.recordPending(input);
+    await store.reject(input);
+    rawDb!.prepare('UPDATE dsh_prompt_receipts SET resolved_at = 42.5 WHERE receipt_id = ?').run(input.receiptId);
+    await expect(store.hasUnresolved(input.cindySessionId)).rejects.toThrow('timestamp');
   });
 
   it('rejects unsafe identifiers and receipt-state corruption before a recovery path can consume it', async () => {

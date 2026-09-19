@@ -1,0 +1,12 @@
+diff --git a/packages/attachment/attachment-local/src/store.ts b/packages/attachment/attachment-local/src/store.ts
+--- a/packages/attachment/attachment-local/src/store.ts
++++ b/packages/attachment/attachment-local/src/store.ts
+@@ -179,1 +179,7 @@
+-    await ensureDurableDirectory(home, parse(home).root)
++    // Cindy Main has fsynced the managed Home and its ancestors before the
++    // fixed App-Sandbox supervisor issues this marker. The runtime cannot
++    // reopen ancestors outside its container. Existing user Homes never get
++    // this marker and retain the upstream durability proof.
++    const boundary = process.env.CINDY_DSH_MANAGED_HOME_DURABLE === '1' ? home : parse(home).root
++    await ensureDurableDirectory(home, boundary)
++    if (boundary === home) await syncDirectory(home)

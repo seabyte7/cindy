@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { DshAcpClient, DshAcpRequestError } from './acp-client.js';
+import { DshAcpClient, DshAcpRequestError, DshAcpFrameTooLargeError } from './acp-client.js';
 import type { Logger } from '../../interfaces/logger.js';
 import type {
   DshAcpCloseHandler,
@@ -472,7 +472,7 @@ describe('DshAcpClient', () => {
     const client = new DshAcpClient({ createTransport: () => transport, logger, maxLineBytes: 64 });
     client.start();
     await expect(client.request('session/list', { payload: 'é'.repeat(64) }))
-      .rejects.toThrow('outbound NDJSON line exceeds maxLineBytes');
+      .rejects.toBeInstanceOf(DshAcpFrameTooLargeError);
     expect(transport.writes).toEqual([]);
 
     for (let id = 0; id < 5; id += 1) {

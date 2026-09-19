@@ -2687,6 +2687,13 @@ export class AgentInputCoordinator {
     const state = this.getState(sessionId);
     const recovery = state.recovery;
     if (!recovery) return { projection: this.getProjection(sessionId), outcome: 'superseded' };
+    // DSH retains the complete failed input for explicit recovery. Never
+    // automatically repeat a deterministic refusal, or replay an uncertain
+    // native operation even when the local transcript has no assistant row.
+    if (state.errorReason === 'dsh-prompt-unconfirmed' ||
+        (opts?.auto && state.errorReason?.startsWith('dsh-'))) {
+      return { projection: this.getProjection(sessionId), outcome: 'no-progress' };
+    }
     // auto 路径的第二道守卫:接管态必须**仍然**成立。
     //
     // 只看 recovery 不够 —— 用户在退避窗口里自己发了消息时 `enqueue` 清的是接管态,
@@ -5875,6 +5882,9 @@ export class AgentInputCoordinator {
     message?: string,
     signals?: Omit<InterruptedTurnErrorSignals, 'message'>,
   ): boolean {
+    // DSH receipts decide whether replay is safe; generic network heuristics
+    // must not take over either a proved rejection or an uncertain prompt.
+    if (signals?.reason?.startsWith('dsh-')) return false;
     if (!this.deps.isResumableTurnErrorCandidate) return false;
     try {
       return this.deps.isResumableTurnErrorCandidate({ ...(signals ?? {}), message }) === true;
