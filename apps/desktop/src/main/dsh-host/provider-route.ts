@@ -195,7 +195,10 @@ const PROFILE_PATCH = [
   '    protocol: messages',
   `    apiKeyEnv: ${DSH_PROVIDER_API_KEY_ENV}`,
   `    baseURL: !!js process.env.${DSH_PROVIDER_BASE_URL_ENV}`,
-  '    thinking: disabled',
+  // DeepSeek V4 exposes both non-thinking and thinking modes. Keep thinking
+  // enabled at the provider boundary so the runtime can advertise Off/Low/
+  // High/Max instead of being restricted to Off-only.
+  '    thinking: enabled',
   '',
 ].join('\n');
 

@@ -96,6 +96,8 @@ describe('Main-owned DSH provider route', () => {
     expect(patch).toContain('protocol: messages');
     expect(patch).toContain('CINDY_DSH_PROVIDER_API_KEY');
     expect(patch).toContain('CINDY_DSH_PROVIDER_BASE_URL');
+    expect(patch).toContain('thinking: enabled');
+    expect(patch).not.toContain('thinking: disabled');
     expect(patch).not.toContain(route.baseUrl);
     expect(patch).not.toContain('fixture-secret');
     // The Home-level patch is repaired rather than merged with stale route

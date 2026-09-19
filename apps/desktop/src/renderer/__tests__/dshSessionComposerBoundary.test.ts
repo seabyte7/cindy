@@ -51,6 +51,7 @@ describe('DSH session composer boundary', () => {
 
     expect(chatInputSource).toContain("const isDshManagedRuntime = vendorKey === 'dsh';");
     expect(chatInputSource).toContain('data-testid="dsh-managed-runtime-badge"');
+    expect(chatInputSource).toContain("{t('newChat.dsh.runtimeBadgeLabel')}");
     expect(chatInputSource).toContain("title={t('newChat.dsh.managedRuntimeDetails')}");
     expect(chatInputSource).toContain("aria-label={t('newChat.dsh.managedRuntimeDetails')}");
     expect(chatInputSource).toContain('{!isDshManagedRuntime && (\n                  <PermissionSelector');
@@ -62,7 +63,9 @@ describe('DSH session composer boundary', () => {
     expect(newMakerDraftSource).toContain('{isDshDraft && (');
     expect(newMakerDraftSource).toContain('data-testid="dsh-managed-runtime-notice"');
     expect(newMakerDraftSource).toContain("t('newChat.dsh.managedRuntimeDetails')");
-    expect(newMakerDraftSource).toContain('const dshAllowedAtTarget = !isRemoteProjectDraft && !effectiveDeviceLinkDeviceId;');
+    expect(newMakerDraftSource).toContain(
+      "const dshAllowedAtTarget =\n    window.electronAPI.platform === 'darwin' &&\n    !isRemoteProjectDraft &&\n    !effectiveDeviceLinkDeviceId;",
+    );
     expect(newMakerDraftSource).not.toContain("if (isDshDraft) {\n      return {\n        ...attachmentState");
   });
 

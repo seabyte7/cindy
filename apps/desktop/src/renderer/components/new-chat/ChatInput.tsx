@@ -8770,7 +8770,7 @@ export function ChatInput({
                       title={t('newChat.dsh.managedRuntimeDetails')}
                       aria-label={t('newChat.dsh.managedRuntimeDetails')}
                     >
-                      {t('newChat.dsh.managedRuntime')}
+                      {t('newChat.dsh.runtimeBadgeLabel')}
                     </span>
                   ) : (
                   <ModelSelector

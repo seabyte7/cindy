@@ -8387,6 +8387,7 @@
       }
     },
     "dsh": {
+      "runtimeBadgeLabel": "DSH",
       "managedRuntime": "受管 DSH 运行时",
       "managedRuntimeDetails": "在本机受管 DSH 运行时中执行。文件和图片会复制到当前任务的受限附件区；工具每次运行均需单独确认。重启后，只有在已验证本机绑定可用时，才能继续同一个任务。",
       "notReady": "DeepSeek 尚未就绪，正在打开对应的供应商设置。",
