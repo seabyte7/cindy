@@ -39,7 +39,10 @@ import { isModelEnabled, useModelVisibilityVersion } from '@/state/modelVisibili
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { NEW_MAKER_DRAFT_KEY } from './newMakerDraftKeys';
-import { shouldShowNewMakerAgentSelect } from './newMakerAgentSelectVisibility';
+import {
+  dshRecoverySettingsPath,
+  shouldShowNewMakerAgentSelect,
+} from './newMakerAgentSelectVisibility';
 import { CreateWorkerPopover, type CreateWorkerForm } from './CreateWorkerPopover';
 import { createWorkerLabel } from './workerLabel';
 import { useLocation, useNavigate, useOutletContext } from 'react-router-dom';
@@ -949,7 +952,10 @@ export function NewMakerDraftRoute() {
   // DSH is a local, fixed Helper runtime in the current release scope. It is
   // never projected to SSH or device-link targets, even if their catalog has a
   // similarly named entry.
-  const dshAllowedAtTarget = !isRemoteProjectDraft && !effectiveDeviceLinkDeviceId;
+  const dshAllowedAtTarget =
+    window.electronAPI.platform === 'darwin' &&
+    !isRemoteProjectDraft &&
+    !effectiveDeviceLinkDeviceId;
   // 入口门控:只在 runtime 已注册的 agent 上开放创建入口(Pi 二进制缺失时 buildPiAgent 返回
   // null,agent map 无 pi,但模型目录仍投影 Pi → 需按 maker:list-available-agents 过滤,
   // 否则一路创建到 requireAgent 的 not-registered 报错,codex review P2)。远程草稿以被控端
@@ -962,10 +968,14 @@ export function NewMakerDraftRoute() {
   const hiddenSwitcherVendors = useMemo<NewMakerSelectableVendor[]>(() => {
     return NEW_MAKER_SELECTABLE_VENDORS.filter((vendor) =>
       vendor === 'dsh'
-        ? !dshAvailableForDraft
+        ? !dshAllowedAtTarget
         : availableAgentsLoaded && !availableVendors.has(vendor),
     );
-  }, [availableAgentsLoaded, availableVendors, dshAvailableForDraft]);
+  }, [availableAgentsLoaded, availableVendors, dshAllowedAtTarget]);
+  const unavailableSwitcherVendors = useMemo<NewMakerSelectableVendor[]>(
+    () => (dshAllowedAtTarget && !dshAvailableForDraft ? ['dsh'] : []),
+    [dshAllowedAtTarget, dshAvailableForDraft],
+  );
   const availableDraftVendors = useMemo(() => {
     const result = new Set(availableVendors);
     if (!dshAllowedAtTarget) result.delete('dsh');
@@ -1352,7 +1362,7 @@ export function NewMakerDraftRoute() {
   const showNewMakerAgentSelect = shouldShowNewMakerAgentSelect({
     unifiedModelPanelActive,
     isDshDraft,
-    dshAvailableForDraft,
+    dshEntryVisible: dshAllowedAtTarget,
   });
   const remoteModelListStatus = !isDeviceLinkDraft
     ? 'idle'
@@ -2633,6 +2643,54 @@ export function NewMakerDraftRoute() {
     markDefaultTupleCustomized();
     switchVendor(next);
   }, []);
+
+  const dshRecoveryInFlightRef = useRef<Promise<void> | null>(null);
+  const [dshSelectionPending, setDshSelectionPending] = useState(false);
+
+  useEffect(() => {
+    if (!dshSelectionPending) return;
+    if (!dshAllowedAtTarget) {
+      setDshSelectionPending(false);
+      return;
+    }
+    // Main owns registration. Wait for its roster push to invalidate and
+    // refresh the Renderer cache before changing the draft; otherwise the
+    // stale unavailable roster can immediately coerce DSH back to a fallback.
+    if (!dshAvailableForDraft) return;
+    setDshSelectionPending(false);
+    markDefaultTupleCustomized();
+    switchVendor('dsh');
+  }, [dshAllowedAtTarget, dshAvailableForDraft, dshSelectionPending]);
+
+  const handleUnavailableVendorSelect = useCallback(
+    (next: NewMakerSelectableVendor) => {
+      if (next !== 'dsh' || !dshAllowedAtTarget || dshRecoveryInFlightRef.current) return;
+      const recovery = (async () => {
+        try {
+          const status = await window.electronAPI.maker.retryDshRuntimeRegistration();
+          if (status.registration === 'task-factory-ready') {
+            setDshSelectionPending(true);
+            return;
+          }
+          toast.info(t('newChat.dsh.notReady'));
+          navigate(dshRecoverySettingsPath(status.configuration, localProviders));
+        } catch {
+          toast.error(t('newChat.dsh.retryFailed'));
+          navigate(
+            dshRecoverySettingsPath(
+              { status: 'unavailable', reason: 'unavailable' },
+              localProviders,
+            ),
+          );
+        }
+      })();
+      dshRecoveryInFlightRef.current = recovery;
+      void recovery.finally(() => {
+        if (dshRecoveryInFlightRef.current === recovery) dshRecoveryInFlightRef.current = null;
+      });
+    },
+    [dshAllowedAtTarget, localProviders, navigate, t],
+  );
 
   // 当前草稿选中的 vendor 变为不可用(如 Pi 未注册 / 被控端无 Pi)时,coerce 到首个可用来源
   // (优先 cc),避免 tablist 卡在被隐藏段、且防止创建出注定 requireAgent 报错的会话。
@@ -5592,8 +5650,9 @@ export function NewMakerDraftRoute() {
                     // 统一模型选择器(model-selector-unified §1.1):引擎不再是工具条上的
                     // 独立控件 —— 它跟着模型走(推荐映射自动配好,并在模型 pill 与每一行
                     // 右侧常驻显示),高级调整收进行配置浮层。仅在老被控端
-                    // capabilities-only 降级，或本机已注册 DSH（它不进入模型目录）时
-                    // 恢复独立引擎下拉；已选 DSH 即使随后失效也保留切出入口。
+                    // capabilities-only 降级，或本机支持 DSH 入口（它不进入模型目录）时
+                    // 恢复独立引擎下拉。DSH 尚未就绪时保留入口并引导配置，不把它静默隐藏；
+                    // 已选 DSH 即使随后失效也保留切出入口。
                     middleToolbarSlot={
                       showNewMakerAgentSelect ? (
                         <AgentSelect
@@ -5604,6 +5663,8 @@ export function NewMakerDraftRoute() {
                           className="shrink-0"
                           disabled={wtCreating}
                           hiddenVendors={hiddenSwitcherVendors}
+                          unavailableVendors={unavailableSwitcherVendors}
+                          onUnavailableSelect={handleUnavailableVendorSelect}
                         />
                       ) : undefined
                     }
@@ -5662,6 +5723,8 @@ export function NewMakerDraftRoute() {
                           className="shrink-0"
                           disabled={wtCreating}
                           hiddenVendors={hiddenSwitcherVendors}
+                          unavailableVendors={unavailableSwitcherVendors}
+                          onUnavailableSelect={handleUnavailableVendorSelect}
                         />
                       ) : undefined
                     }

@@ -70,6 +70,13 @@ interface AgentSelectProps<V extends NewMakerSelectableVendor = SelectableVendor
    */
   hiddenVendors?: readonly V[];
   /**
+   * 保留在列表中、但当前不能直接创建任务的引擎。点击这类行不触发
+   * `onChange`，而交给 `onUnavailableSelect` 做重试或配置引导。这样可选
+   * runtime 不会因为暂未注册而从产品入口静默消失。
+   */
+  unavailableVendors?: readonly V[];
+  onUnavailableSelect?: (vendor: V) => void;
+  /**
    * 面板弹出方向。工具条在底部所以默认 'top'; 设置面板里的字段在
    * 页面中部, 往下弹才不遮住自己(与 ModelSelector 的 popoverSide 同口径)。
    */
@@ -114,6 +121,8 @@ export function AgentSelect<V extends NewMakerSelectableVendor = SelectableVendo
   iconOnly = false,
   visualVariant = 'default',
   hiddenVendors,
+  unavailableVendors,
+  onUnavailableSelect,
   side = 'top',
   ariaContext,
   reselectEmitsChange = false,
@@ -185,6 +194,10 @@ export function AgentSelect<V extends NewMakerSelectableVendor = SelectableVendo
 
   const select = (next: NewMakerSelectableVendor) => {
     setOpen(false);
+    if (unavailableVendors?.includes(next as V)) {
+      onUnavailableSelect?.(next as V);
+      return;
+    }
     if (next !== value || reselectEmitsChange) onChange(next as V);
   };
 
@@ -322,6 +335,7 @@ export function AgentSelect<V extends NewMakerSelectableVendor = SelectableVendo
         </div>
         {visibleOptions.map((opt) => {
           const selected = opt.vendor === value;
+          const unavailable = unavailableVendors?.includes(opt.vendor as V) === true;
           return (
             <button
               ref={selected ? selectedOptionRef : undefined}
@@ -330,6 +344,7 @@ export function AgentSelect<V extends NewMakerSelectableVendor = SelectableVendo
               role="option"
               aria-selected={selected}
               data-agent-selected={selected ? 'true' : undefined}
+              data-agent-unavailable={unavailable ? 'true' : undefined}
               // MorphPopover 形变结束后按此标记聚焦 —— 缺它会回落到"面板内第一个
               // 可交互项",焦点跳到 Claude,回车就选错引擎(3 个 reviewer 同时指出)。
               data-morph-autofocus={selected ? 'true' : undefined}
@@ -346,9 +361,13 @@ export function AgentSelect<V extends NewMakerSelectableVendor = SelectableVendo
               <span className="min-w-0 flex-1 truncate text-13 font-medium text-[var(--model-item-text)]">
                 {opt.label}
               </span>
-              {selected && (
+              {unavailable ? (
+                <span className="shrink-0 text-11 font-normal text-[var(--text-tertiary)]">
+                  {t('newChat.agentSelect.notReady')}
+                </span>
+              ) : selected ? (
                 <Check size={15} className="shrink-0 text-[var(--model-item-check)]" />
-              )}
+              ) : null}
             </button>
           );
         })}

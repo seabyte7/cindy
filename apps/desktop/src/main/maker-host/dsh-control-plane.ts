@@ -988,6 +988,11 @@ export class DshControlPlane implements DshBridgePort {
         await this.markPromptReceiptUncertain(state, receiptId);
         return await this.blockAfterPromptReceiptUncertain();
       }
+      // ACP notifications are queued synchronously as transport frames are
+      // decoded, but their durable projection is asynchronous. Drain every
+      // update observed before the native terminal reply so the adapter can
+      // never emit Done ahead of an earlier text/tool/usage projection.
+      await state.projectionTail;
       this.assertReady();
       await this.acknowledgePromptReceipt(state, receiptId, result.stopReason);
       return {

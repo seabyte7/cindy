@@ -8285,6 +8285,7 @@
     },
     "agentSelect": {
       "label": "引擎",
+      "notReady": "尚未就緒",
       "trigger": {
         "aria": "選擇引擎：{{agent}}"
       }
@@ -8387,7 +8388,9 @@
     },
     "dsh": {
       "managedRuntime": "受管 DSH 執行環境",
-      "managedRuntimeDetails": "在本機受管 DSH 執行環境中執行。檔案與圖片會複製到目前任務的受限附件區，每次工具執行都需個別確認；重新啟動後，只有已驗證的本機繫結可用時，才能繼續同一個任務。"
+      "managedRuntimeDetails": "在本機受管 DSH 執行環境中執行。檔案與圖片會複製到目前任務的受限附件區，每次工具執行都需個別確認；重新啟動後，只有已驗證的本機繫結可用時，才能繼續同一個任務。",
+      "notReady": "DeepSeek 尚未就緒，正在開啟對應的供應商設定。",
+      "retryFailed": "DeepSeek 準備失敗，請檢查對應的供應商設定。"
     }
   },
   "onboarding": {

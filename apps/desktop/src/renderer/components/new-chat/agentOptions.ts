@@ -51,7 +51,7 @@ export const AGENT_OPTIONS: readonly AgentOption[] = SELECTABLE_VENDORS.map((ven
 /** DSH is deliberately exposed only by New Maker, never by the model catalog. */
 export const DSH_NEW_MAKER_AGENT_OPTION = {
   vendor: 'dsh' as const,
-  label: 'DSH',
+  label: 'DeepSeek',
   Mark: DshMark,
 };
 

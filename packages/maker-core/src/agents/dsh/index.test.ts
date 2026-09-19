@@ -207,6 +207,52 @@ describe('DshAgent', () => {
     });
   });
 
+  it('keeps usage telemetry inside the active prompt and preserves an authoritative Done state', async () => {
+    const bridge = new FakeDshBridge();
+    const handle = await new DshAgent(deps(), {
+      bridge, scopeId: 'scope-1', admission: { committedFollowProjection: true, promptReceiptLedger: true },
+    }).startSession({
+      sessionId: 'cindy-1', workingDir: '/project', model: 'native-dsh',
+    });
+
+    // An idle usage notification may refresh the private snapshot, but cannot
+    // make a task look active before the user dispatches a prompt.
+    bridge.emit({ sessionUpdate: 'usage_update', used: 1_024, size: 8_192 });
+    await handle.send({ type: 'user', content: 'run once' });
+    expect(await nextEvent(handle)).toMatchObject({
+      type: 'status',
+      data: { status: 'Running', isRunning: true, contextTokens: 1_024 },
+    });
+
+    bridge.emit({ sessionUpdate: 'usage_update', used: 2_048, size: 8_192 });
+    expect(await nextEvent(handle)).toMatchObject({
+      type: 'status',
+      data: { status: 'Running', isRunning: true, contextTokens: 2_048 },
+    });
+
+    bridge.promptDeferred.resolve(promptReceipt('end_turn'));
+    expect(await nextEvent(handle)).toMatchObject({
+      type: 'done', data: { stopReason: 'end_turn' },
+    });
+    expect(await nextEvent(handle)).toMatchObject({
+      type: 'status',
+      data: { status: 'Done', isRunning: false, contextTokens: 2_048 },
+    });
+
+    // A provider update that arrives after the terminal receipt cannot revive
+    // the turn. A following text event proves the usage status was not queued.
+    bridge.emit({ sessionUpdate: 'usage_update', used: 3_072, size: 8_192 });
+    bridge.emit({
+      sessionUpdate: 'agent_message_chunk',
+      messageId: 'native-late-message',
+      content: { type: 'text', text: 'late text remains observable' },
+    });
+    expect(await nextEvent(handle)).toMatchObject({
+      type: 'text', data: { text: 'late text remains observable' },
+    });
+    await handle.close();
+  });
+
   it('maps the generic interaction decision to one DSH request only and never retains a resolver after close', async () => {
     const bridge = new FakeDshBridge();
     const handle = await new DshAgent(deps(), {

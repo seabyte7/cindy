@@ -3325,7 +3325,14 @@ export async function getDshRuntimeStatusForCurrentOwner(): Promise<DshRuntimeSt
 }
 
 export async function retryDshRuntimeRegistration(): Promise<DshRuntimeStatus> {
-  await registerDshAgentIfAvailable();
+  const wasAlreadyRegistered = _maker?.listAvailableAgents().includes('dsh') === true;
+  const ready = await registerDshAgentIfAvailable();
+  if (ready && wasAlreadyRegistered) {
+    // A Renderer may have reached this explicit retry because its roster cache
+    // missed an earlier registration broadcast. Re-announce the already-ready
+    // state so the unavailable row converges without requiring a window focus.
+    broadcastDshAgentAvailabilityChanged();
+  }
   return await getDshRuntimeStatusForCurrentOwner();
 }
 

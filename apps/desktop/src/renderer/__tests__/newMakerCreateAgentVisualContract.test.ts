@@ -71,8 +71,8 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     // A 默认包含引擎选择；仅在老被控端缺供应商目录时恢复独立引擎下拉。
     expect(source).not.toContain('<VendorSegmentedSwitcher');
     // DSH is a fixed managed runtime rather than a generic model catalog
-    // consumer, so it keeps AgentSelect visible even when the unified panel is
-    // active for the other engines.
+    // consumer, so its local setup/recovery entry keeps AgentSelect visible
+    // even before the runtime roster reports DSH ready.
     expect(source).toContain('const showNewMakerAgentSelect = shouldShowNewMakerAgentSelect({');
     expect(source).toMatch(
       /middleToolbarSlot=\{\s*\n\s*showNewMakerAgentSelect \? \(/,
@@ -80,6 +80,12 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     expect(source).toMatch(
       /compactMiddleToolbarSlot=\{\s*\n\s*showNewMakerAgentSelect \? \(/,
     );
+    expect(source).toContain('unavailableVendors={unavailableSwitcherVendors}');
+    expect(source).toContain('onUnavailableSelect={handleUnavailableVendorSelect}');
+    expect(source).toContain("window.electronAPI.platform === 'darwin'");
+    expect(source).toContain("dshAllowedAtTarget && !dshAvailableForDraft ? ['dsh'] : []");
+    expect(source).toContain('setDshSelectionPending(true)');
+    expect(source).toContain('if (!dshAvailableForDraft) return;');
     // 新旧用户只按能力启用，不读取历史样式偏好。
     expect(source).toMatch(/const unifiedModelPanelActive = unifiedModelPanelEnabled;/);
     expect(source).not.toContain('<HomeUsageDashboard');

@@ -625,6 +625,10 @@ create transaction。F5b 的例外仅是 Main roster 已确认后、本机 New M
 同一任务 composer 的文本边界：它固定使用 opaque runtime marker，不提供模型、来源、权限或附件选择，
 且 Main 必须再次拒绝不匹配的 marker 或 renderer-selected provider。它不得给 Mobile、scheduler、SSH remote
 或任意 generic provider API 直接启动入口。
+本机 macOS New Maker 可以在 roster 尚未就绪时保留一个明确标为“未就绪”的 DeepSeek 设置／恢复入口，
+但该行不得改写草稿为 DSH，也不得触发 create transaction；它只能调用 Main-owned registration retry，
+成功后按 roster 进入上述文本入口，失败则定位到对应 provider 设置。Windows、Linux、SSH remote 与
+device-link 目标不显示这个本机入口。
 所有进程、runtime id、credential、Home 和持久化仍只允许 Desktop Main 的
 `DshControlPlane` / bridge 持有。adapter 只能回传同一 bridge 的 ephemeral capability key，不能伪造另一
 Cindy session、scope 或 native id。F5c 仅在 fresh bridge 用同一 scope 的 settled durable binding 和 ACP
@@ -960,6 +964,10 @@ sequence、lifecycle 状态和创建 / 更新时刻；不保存 token、credenti
 - Main 用 `ACP sequence + request correlation` 持久化投影游标。消息提交必须先登记 Cindy
   request id，再由 runtime receipt / 历史回查确认；超时或 carrier 断开后不盲目 retry，以免重复
   执行带副作用的 prompt。
+- `session/prompt` 的终止 receipt 必须先等待 wire 上更早的 notification queue，再等这些通知形成的
+  projection tail 全部持久化并投递，之后才能越过 adapter 边界。`usage_update` 只更新用量快照，
+  仅在当前 prompt 尚未终止时可投递 running 状态；它不独立拥有 turn 生命周期。空闲期或终止后的
+  迟到用量不得把任务重新置为 running，终态只能由已确认的 prompt receipt 收口。
 - 重连一律先 follow、再以页式 history 补洞并按 sequence 去重；无法证明连续性时停止 live
   projection，显示“需同步”，不可把 Cindy 缓存当作新的 native truth。
 - migration 只追加，绝不修改历史 migration。旧 `cc` / `codex` / `pi` 数据保持原样；`dsh`

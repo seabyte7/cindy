@@ -8287,6 +8287,7 @@
     },
     "agentSelect": {
       "label": "Engine",
+      "notReady": "Not ready",
       "trigger": {
         "aria": "Select engine: {{agent}}"
       }
@@ -8389,7 +8390,9 @@
     },
     "dsh": {
       "managedRuntime": "Managed DSH runtime",
-      "managedRuntimeDetails": "Runs locally in a managed DSH runtime. Files and images are copied into this task's restricted attachment area, and every tool run needs a separate approval. After a restart, only this same task may continue when its verified local binding is available."
+      "managedRuntimeDetails": "Runs locally in a managed DSH runtime. Files and images are copied into this task's restricted attachment area, and every tool run needs a separate approval. After a restart, only this same task may continue when its verified local binding is available.",
+      "notReady": "DeepSeek is not ready. Opening its provider settings.",
+      "retryFailed": "DeepSeek could not be prepared. Check its provider settings."
     }
   },
   "onboarding": {

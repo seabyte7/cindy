@@ -249,6 +249,49 @@ describe('DshAcpClient', () => {
     await expect(prompt).rejects.toThrow('unsupported stopReason');
   });
 
+  it('delivers earlier wire notifications before resolving the matching prompt response', async () => {
+    const transport = new FakeDshAcpTransport();
+    const client = new DshAcpClient({ createTransport: () => transport, logger });
+    let releaseNotification!: () => void;
+    const notificationBarrier = new Promise<void>((resolve) => {
+      releaseNotification = resolve;
+    });
+    const delivery: string[] = [];
+    client.onNotification('session/update', async () => {
+      delivery.push('notification-started');
+      await notificationBarrier;
+      delivery.push('notification-finished');
+    });
+    client.start();
+
+    const prompt = client.prompt({
+      sessionId: 'runtime-session-1',
+      prompt: [{ type: 'text', text: 'hello' }],
+    });
+    const request = sent(transport);
+    transport.emit({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: 'runtime-session-1',
+        update: { sessionUpdate: 'usage_update', used: 2_048, size: 8_192 },
+      },
+    });
+    reply(transport, request, { stopReason: 'end_turn' });
+
+    await vi.waitFor(() => expect(delivery).toEqual(['notification-started']));
+    let promptSettled = false;
+    void prompt.then(() => {
+      promptSettled = true;
+    });
+    await Promise.resolve();
+    expect(promptSettled).toBe(false);
+
+    releaseNotification();
+    await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(delivery).toEqual(['notification-started', 'notification-finished']);
+  });
+
   it('fails initialize when the runtime omits a valid protocol version', async () => {
     const transport = new FakeDshAcpTransport();
     const client = new DshAcpClient({ createTransport: () => transport, logger });

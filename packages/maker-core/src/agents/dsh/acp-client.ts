@@ -278,6 +278,12 @@ export class DshAcpClient implements DshAcpSessionClient {
     if (!isRecord(result) || (result.stopReason !== 'end_turn' && result.stopReason !== 'cancelled')) {
       this.protocolViolation('DSH ACP session/prompt returned an unsupported stopReason');
     }
+    // A runtime writes session/update notifications before the matching
+    // prompt response, but the transport intentionally dispatches notification
+    // handlers through an async serial queue. Do not let the response overtake
+    // those earlier wire frames; Main still drains their durable projection
+    // before exposing this terminal result to the adapter.
+    await this.notificationChain;
     return { stopReason: result.stopReason };
   }
 

@@ -38,6 +38,7 @@ vi.mock('react-i18next', () => ({
     t: (key: string, options?: Record<string, string>) => {
       if (key === 'newChat.agentSelect.label') return '引擎';
       if (key === 'newChat.agentSelect.trigger.aria') return `选择引擎：${options?.agent ?? ''}`;
+      if (key === 'newChat.agentSelect.notReady') return '未就绪';
       return key;
     },
   }),
@@ -132,6 +133,42 @@ describe('AgentSelect', () => {
     expect(screen.getByTestId('agent-select-option-dsh')).toBeTruthy();
     fireEvent.click(screen.getByTestId('agent-select-option-dsh'));
     expect(onChange).toHaveBeenCalledWith('dsh');
+  });
+
+  it('未就绪的 DeepSeek 保留可发现入口，但交给恢复动作而不切换草稿', () => {
+    const onChange = vi.fn<(next: 'cc' | 'codex' | 'pi' | 'dsh') => void>();
+    const onUnavailableSelect = vi.fn<(next: 'cc' | 'codex' | 'pi' | 'dsh') => void>();
+    const { rerender } = render(
+      <AgentSelect
+        value="codex"
+        onChange={onChange}
+        includeDsh
+        unavailableVendors={['dsh']}
+        onUnavailableSelect={onUnavailableSelect}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '选择引擎：Codex' }));
+    const deepSeek = screen.getByTestId('agent-select-option-dsh');
+    expect(deepSeek.textContent).toContain('DeepSeek');
+    expect(deepSeek.textContent).toContain('未就绪');
+    expect(deepSeek.getAttribute('data-agent-unavailable')).toBe('true');
+    fireEvent.click(deepSeek);
+
+    expect(onUnavailableSelect).toHaveBeenCalledWith('dsh');
+    expect(onChange).not.toHaveBeenCalled();
+
+    rerender(
+      <AgentSelect
+        value="dsh"
+        onChange={onChange}
+        includeDsh
+        unavailableVendors={['dsh']}
+        onUnavailableSelect={onUnavailableSelect}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '选择引擎：DeepSeek' }));
+    expect(screen.getByTestId('agent-select-option-dsh').textContent).toContain('未就绪');
   });
 
   // 以下三条对应设置页 / 工作目录偏好行的复用需求(#1490)。默认行为不许变:

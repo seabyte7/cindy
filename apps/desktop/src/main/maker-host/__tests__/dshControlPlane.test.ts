@@ -1147,6 +1147,103 @@ describe('DshControlPlane', () => {
     expect(promptReceipts.markUncertain).not.toHaveBeenCalled();
   });
 
+  it('drains projections observed before the native prompt reply before returning its terminal receipt', async () => {
+    const pendingProjection = deferred<void>();
+    const client = new FakeDshAcpClient();
+    const store = new MemoryDshBindingStore();
+    const promptReceipts = fakePromptReceiptStore();
+    const coordinator: DshFollowProjectionCoordinator = {
+      project: vi.fn(
+        async ({ event, expectedBindingRevision }): Promise<DshFollowProjectionResult> => {
+          await pendingProjection.promise;
+          const committed = await store.advanceProjectionCursor({
+            cindySessionId: event.cindySessionId,
+            expectedRevision: expectedBindingRevision,
+            nextSequence: event.sequence,
+          });
+          return committed.kind === 'advanced'
+            ? { kind: 'translated', events: [], binding: committed.binding }
+            : { kind: 'failed', reason: 'commit-conflict' };
+        },
+      ),
+    };
+    const bridge = new DshControlPlane({
+      scopeId: 'scope-a',
+      client,
+      assertAuthorizedCwd: assertProjectCwd,
+      projectionCoordinator: coordinator,
+      receiptId: () => 'receipt-1',
+    });
+    await initializeWithDurableBinding(bridge, store, promptReceipts);
+    await bridge.create({ cindySessionId: 'cindy-1', cwd: '/project' });
+    const binding = (await bridge.list({ scopeId: 'scope-a' }))[0]!;
+    client.prompt = vi.fn(async (): Promise<DshAcpPromptResult> => {
+      client.emitNotification('session/update', {
+        sessionId: binding.runtimeSessionId,
+        update: { sessionUpdate: 'usage_update', used: 2_048, size: 8_192 },
+      });
+      return { stopReason: 'end_turn' };
+    });
+
+    const prompting = bridge.prompt({ ...binding, text: 'safe fixture prompt' });
+    await vi.waitFor(() => expect(coordinator.project).toHaveBeenCalledTimes(1));
+    let settled = false;
+    void prompting.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(promptReceipts.acknowledge).not.toHaveBeenCalled();
+
+    pendingProjection.resolve();
+    await expect(prompting).resolves.toMatchObject({
+      receiptId: 'receipt-1',
+      stopReason: 'end_turn',
+    });
+    expect(promptReceipts.acknowledge).toHaveBeenCalledWith({
+      receiptId: 'receipt-1',
+      cindySessionId: 'cindy-1',
+      stopReason: 'end_turn',
+    });
+    expect(store.rows.get('cindy-1')).toMatchObject({ lastProjectedSequence: 1 });
+  });
+
+  it('fails closed instead of exposing a terminal receipt when an earlier projection cannot commit', async () => {
+    const client = new FakeDshAcpClient();
+    const store = new MemoryDshBindingStore();
+    const promptReceipts = fakePromptReceiptStore();
+    const coordinator: DshFollowProjectionCoordinator = {
+      project: vi.fn().mockResolvedValue({ kind: 'failed', reason: 'commit-conflict' }),
+    };
+    const bridge = new DshControlPlane({
+      scopeId: 'scope-a',
+      client,
+      assertAuthorizedCwd: assertProjectCwd,
+      projectionCoordinator: coordinator,
+      receiptId: () => 'receipt-1',
+    });
+    await initializeWithDurableBinding(bridge, store, promptReceipts);
+    await bridge.create({ cindySessionId: 'cindy-1', cwd: '/project' });
+    const binding = (await bridge.list({ scopeId: 'scope-a' }))[0]!;
+    client.prompt = vi.fn(async (): Promise<DshAcpPromptResult> => {
+      client.emitNotification('session/update', {
+        sessionId: binding.runtimeSessionId,
+        update: { sessionUpdate: 'usage_update', used: 2_048, size: 8_192 },
+      });
+      return { stopReason: 'end_turn' };
+    });
+
+    await expect(
+      bridge.prompt({ ...binding, text: 'must not expose a false terminal' }),
+    ).rejects.toThrow('needs reconciliation');
+    expect(promptReceipts.acknowledge).not.toHaveBeenCalled();
+    expect(promptReceipts.markUncertain).toHaveBeenCalledWith({
+      cindySessionId: 'cindy-1',
+      receiptIds: ['receipt-1'],
+    });
+    expect(store.rows.get('cindy-1')).toMatchObject({ lifecycleState: 'needs_reconcile' });
+  });
+
   it('blocks a prompt behind an unresolved durable receipt without calling the native runtime', async () => {
     const client = new FakeDshAcpClient();
     const store = new MemoryDshBindingStore();

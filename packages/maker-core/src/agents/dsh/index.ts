@@ -259,15 +259,24 @@ function contentFromUserMessage(message: UserMessage): readonly DshBridgePromptC
   return content;
 }
 
-function isUsageStatus(data: unknown): data is UsageSnapshot {
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+function usageSnapshotFromStatus(data: unknown): UsageSnapshot | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   const value = data as Record<string, unknown>;
-  return (
+  if (!(
     typeof value.tokenUsage === 'number' && Number.isFinite(value.tokenUsage) && value.tokenUsage >= 0 &&
     typeof value.contextTokens === 'number' && Number.isSafeInteger(value.contextTokens) && value.contextTokens >= 0 &&
     typeof value.contextWindow === 'number' && Number.isSafeInteger(value.contextWindow) && value.contextWindow >= 0 &&
     typeof value.costUsd === 'number' && Number.isFinite(value.costUsd) && value.costUsd >= 0
-  );
+  )) return null;
+  // Keep lifecycle fields out of the cached usage snapshot. DSH usage updates
+  // are status events, but their `Running` marker must never overwrite the
+  // adapter-owned terminal `Done` status when the snapshot is spread later.
+  return {
+    tokenUsage: value.tokenUsage,
+    contextTokens: value.contextTokens,
+    contextWindow: value.contextWindow,
+    costUsd: value.costUsd,
+  };
 }
 
 /**
@@ -420,6 +429,7 @@ export class DshAgent extends BaseAgent {
     };
     let closed = false;
     let promptInFlight = false;
+    let promptTerminalReceived = false;
     let cancelPromise: Promise<void> | null = null;
     let promptCompletion: Promise<void> | null = null;
     let interactionResolver: InteractionResolver | null = null;
@@ -436,7 +446,16 @@ export class DshAgent extends BaseAgent {
           return;
         }
         for (const event of follow.events) {
-          if (event.type === 'status' && isUsageStatus(event.data)) usage = { ...event.data };
+          const nextUsage = event.type === 'status'
+            ? usageSnapshotFromStatus(event.data)
+            : null;
+          if (nextUsage) {
+            usage = nextUsage;
+            // ACP usage is telemetry, not an independent turn lifecycle. A
+            // delayed update may refresh the next terminal snapshot, but it
+            // cannot start or revive a task outside the current prompt.
+            if (!promptInFlight || promptTerminalReceived) continue;
+          }
           queue.push(event);
         }
       });
@@ -523,6 +542,7 @@ export class DshAgent extends BaseAgent {
           throw new TurnDispatchRejectedError('DSH requires text or a local attachment');
         }
         promptInFlight = true;
+        promptTerminalReceived = false;
         queue.push({
           type: 'status',
           data: { status: 'Running', ...usage, isRunning: true },
@@ -532,6 +552,7 @@ export class DshAgent extends BaseAgent {
         const completion = bridge.prompt({ ...reference, content })
           .then((receipt) => {
             const stopReason = assertPromptReceipt(receipt);
+            promptTerminalReceived = true;
             queue.push({
               type: 'done',
               data: { stopReason },
@@ -546,6 +567,7 @@ export class DshAgent extends BaseAgent {
           })
           .catch((error: unknown) => {
             void error;
+            promptTerminalReceived = true;
             logger.warn('DSH prompt did not reach a terminal receipt', {
               cindySessionId: reference.cindySessionId,
               reason: 'terminal-receipt-unavailable',
