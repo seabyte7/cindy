@@ -125,6 +125,12 @@ import { createDshProjectionJournal } from '../localDb/dshProjectionJournal.js';
 import { createDshActivitySnapshotStore } from '../localDb/dshActivitySnapshots.js';
 import { resolveMacosSupervisedDshRuntime } from '../dsh-host/macos-supervised-runtime.js';
 import {
+  assertDshDevelopmentCapsule,
+  assertDshDevelopmentCapsulePin,
+  DSH_DEVELOPMENT_CAPSULE_ENV,
+  resolveDshRuntimeResources,
+} from '../dsh-host/development-capsule.js';
+import {
   createDshExistingHomeSettingsStore,
   type DshExistingHomeSettingsStore,
 } from '../dsh-host/existing-home-settings.js';
@@ -412,6 +418,28 @@ let _dshRegistrationInFlight: Promise<DshAgentRegistrationResult> | null = null;
 let _dshRegisteredAgent: DshAgent | null = null;
 /** A provider mutation found a stale DSH generation while one of its tasks was still alive. */
 let _dshReplacementPending = false;
+
+/**
+ * Source Desktop may opt into one fixed, signed local DSH capsule through
+ * dsh:dev.  This stays Main-only and re-validates the capsule on both the
+ * task-start bookmark path and the registration path, before any native code
+ * or supervisor resource is loaded.
+ */
+function resolveDshSupervisedRuntimeForCurrentProcess() {
+  const resources = resolveDshRuntimeResources({
+    isPackaged: app.isPackaged,
+    desktopAppPath: app.getAppPath(),
+    currentResourcesPath: process.resourcesPath,
+    developmentCapsuleEnabled: process.env[DSH_DEVELOPMENT_CAPSULE_ENV] === '1',
+  });
+  assertDshDevelopmentCapsule(resources);
+  const runtime = resolveMacosSupervisedDshRuntime({
+    resourcesPath: resources.resourcesPath,
+    homePath: app.getPath('home'),
+  });
+  assertDshDevelopmentCapsulePin(resources, runtime.runtime);
+  return Object.freeze({ resources, runtime });
+}
 let _removeDshMakerLifecycleListener: (() => void) | null = null;
 let _dshRuntimeRegistrationStatus: DshRuntimeRegistrationStatus = 'not-registered';
 let _dshRuntimeStatusRevision = 0;
@@ -2668,6 +2696,7 @@ export function getMaker(): Maker {
             // the exact selected workspace and converts the picker bookmark
             // inside Main into a one-launch descriptor. The raw path and
             // persistent bookmark never enter Maker, ACP, or SQLite.
+            const dshRuntime = resolveDshSupervisedRuntimeForCurrentProcess();
             const workspaceBookmark = await selectDshTaskWorkspaceBookmarkFromMain({
               cindySessionId: sessionId,
               cwd: validated.dir,
@@ -2683,7 +2712,9 @@ export function getMaker(): Maker {
                     securityScopedBookmarks: options.properties.includes('securityScopedBookmarks'),
                   }),
               },
-              bridge: loadMacosDshMainBookmarkBridge({ resourcesPath: process.resourcesPath }),
+              bridge: loadMacosDshMainBookmarkBridge({
+                resourcesPath: dshRuntime.resources.resourcesPath,
+              }),
               isTaskCurrent: () =>
                 !isAppSessionBoundaryPending() &&
                 getActiveAppSession().dataOwnerId === ownerIdAtWorkspaceSelection &&
@@ -2912,10 +2943,7 @@ export function getMaker(): Maker {
           // Re-resolve the packaged Helper identity before every launch. No
           // PATH, user runtime, source checkout, or Renderer data can choose
           // this binary or its release id.
-          const runtime = resolveMacosSupervisedDshRuntime({
-            resourcesPath: process.resourcesPath,
-            homePath: app.getPath('home'),
-          });
+          const dshRuntime = resolveDshSupervisedRuntimeForCurrentProcess();
           const providerId = configuration.provider.id;
           const routeBaseUrl = configuration.route.baseUrl;
           const routeOrigin = configuration.route.origin;
@@ -2970,7 +2998,9 @@ export function getMaker(): Maker {
                 createImplicitBookmark: (persistentBookmark) =>
                   createDshImplicitBookmarkHandoff({
                     persistentBookmark,
-                    bridge: loadMacosDshMainBookmarkBridge({ resourcesPath: process.resourcesPath }),
+                    bridge: loadMacosDshMainBookmarkBridge({
+                      resourcesPath: dshRuntime.resources.resourcesPath,
+                    }),
                   }),
               });
               const dbClient = getDbClient();
@@ -2981,7 +3011,7 @@ export function getMaker(): Maker {
               }
               const bridgeHost = await startMacosSupervisedDshBridge(
                 {
-                  resourcesPath: process.resourcesPath,
+                  resourcesPath: dshRuntime.resources.resourcesPath,
                   homePath: app.getPath('home'),
                   logger: desktopMakerLogger.child('dsh-host'),
                   loadSecrets: () => launchedSecrets,
@@ -3001,7 +3031,7 @@ export function getMaker(): Maker {
                 },
                 {
                   accountId: ownerId,
-                  releaseId: runtime.runtime.releaseId,
+                  releaseId: dshRuntime.runtime.runtime.releaseId,
                   homeMode: homeLaunch.homeMode,
                   taskScopeId: cindySessionId,
                 },
@@ -3019,7 +3049,7 @@ export function getMaker(): Maker {
           return {
             bridge: router,
             scopeId: router.scopeId,
-            binaryPath: runtime.supervisorPath,
+            binaryPath: dshRuntime.runtime.supervisorPath,
             adapterAdmission: Object.freeze({ committedFollowProjection: true, promptReceiptLedger: true }),
             close: async (reason) => await router.closeAll(reason),
             assertCurrentConfiguration,

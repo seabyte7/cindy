@@ -904,6 +904,9 @@ export function devEnvPrefix(env = process.env, platform = process.platform) {
     ['XDT_DESKTOP_DEV_STARTUP_STATUS_FILE', env.XDT_DESKTOP_DEV_STARTUP_STATUS_FILE],
     // 插件存储启动边界的 dev 黑盒验收：仅显式临时结果路径时启用。
     ['XDT_PLUGIN_STORAGE_SMOKE_RESULT_FILE', env.XDT_PLUGIN_STORAGE_SMOKE_RESULT_FILE],
+    // DSH 日常源码调试只准读取固定、签名且与 pin 相符的本地 package capsule。
+    // 值由 dsh:dev 注入；Main 仍会在每次 bridge launch 前重复验签和验布局。
+    ['XDT_DSH_DEVELOPMENT_CAPSULE', env.XDT_DSH_DEVELOPMENT_CAPSULE],
   ].filter(([, value]) => value);
 
   if (platform === 'win32') {
