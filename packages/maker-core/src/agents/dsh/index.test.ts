@@ -442,6 +442,29 @@ describe('DshAgent', () => {
     await handle.close();
   });
 
+  it('preserves the safe timeout category without exposing Main diagnostics', async () => {
+    const bridge = new FakeDshBridge();
+    const handle = await new DshAgent(deps(), {
+      bridge, scopeId: 'scope-1', admission: { committedFollowProjection: true, promptReceiptLedger: true },
+    }).startSession({
+      sessionId: 'cindy-1', workingDir: '/project', model: 'native-dsh',
+    });
+    await handle.send({ type: 'user', content: 'wait safely' });
+    await nextEvent(handle);
+    bridge.promptDeferred.reject(new DshBridgePromptFailure(
+      'prompt-timeout',
+      'native provider https://private.example timed out with token secret',
+    ));
+    const error = await nextEvent(handle);
+    expect(error).toMatchObject({
+      type: 'error',
+      data: { code: 'prompt-timeout', reason: 'dsh-prompt-timeout', isTerminal: true },
+    });
+    expect(JSON.stringify(error)).not.toContain('private.example');
+    expect(JSON.stringify(error)).not.toContain('secret');
+    await handle.close();
+  });
+
   it('does not accept another bridge session follow event as this session output', async () => {
     const bridge = new FakeDshBridge();
     const handle = await new DshAgent(deps(), {

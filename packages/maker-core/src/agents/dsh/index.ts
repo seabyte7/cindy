@@ -191,6 +191,9 @@ function promptFailureMessage(code: DshBridgePromptFailureCode): string {
   if (code === 'image-invalid') return 'DSH rejected the image format or image limits. Check the attachments and retry.';
   if (code === 'attachment-invalid') return 'DSH could not read the selected attachments. Select the files again and retry.';
   if (code === 'prompt-too-large') return 'This message exceeds the DSH input limit. Use fewer or smaller images and retry.';
+  if (code === 'prompt-timeout') {
+    return 'DSH did not return a completion receipt before the deadline. The request may have run, so it will not be resent.';
+  }
   return 'DSH prompt did not complete; reconcile the session before retrying.';
 }
 

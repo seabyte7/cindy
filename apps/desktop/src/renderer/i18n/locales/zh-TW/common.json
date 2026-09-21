@@ -5760,6 +5760,27 @@
       "saveFailed": "儲存 DeepSeek Harness home 失敗，請重試。",
       "restored": "已恢復 Cindy 受管的 home。重啟 Cindy 後生效。",
       "restoreFailed": "恢復 Cindy 受管的 home 失敗，請重試。"
+    },
+    "dshWorkspaceAccess": {
+      "title": "DSH 工作目錄授權",
+      "description": "為常用的本機工作目錄儲存授權。設定中不會顯示目錄位置。",
+      "status": {
+        "default": "尚未儲存工作目錄授權",
+        "configured": "已儲存工作目錄授權",
+        "unavailable": "工作目錄授權無法使用"
+      },
+      "savedCount": "已儲存 {{count}} 個工作目錄授權",
+      "hint": "新的 DSH 任務會在工作目錄相符時重用已儲存的授權。目錄移動或替換後會再次要求授權。",
+      "unavailableHint": "Cindy 無法讀取這台 Mac 上儲存的授權。安全儲存恢復可用前，新的 DSH 任務會再次要求授權。",
+      "resetHint": "清除目前帳號儲存的所有 DSH 工作目錄授權。",
+      "choose": "儲存一個工作目錄",
+      "choosing": "儲存中…",
+      "reset": "清除已儲存授權",
+      "resetting": "清除中…",
+      "selectionSaved": "工作目錄授權已儲存。",
+      "saveFailed": "儲存工作目錄授權失敗，請重試。",
+      "resetDone": "已清除儲存的工作目錄授權。",
+      "resetFailed": "清除工作目錄授權失敗，請重試。"
     }
   },
   "remoteDevice": {
@@ -10201,7 +10222,8 @@
         "image-invalid": "圖片格式或數量、大小不符合要求，請檢查附件後重試。",
         "attachment-invalid": "無法讀取附件，請重新選擇檔案後重試。",
         "prompt-too-large": "這則訊息過大，請減少圖片數量或縮小圖片後重試。",
-        "uncertain": "DSH 的處理結果尚未確定，請核對並復原此任務後再傳送，避免重複執行。"
+        "timeout": "DSH 未在截止時間前傳回完成回條。這個請求可能已經執行，因此不會重新傳送；請先核對這個任務，再傳送下一則訊息。",
+        "uncertain": "DSH 未傳回可驗證的完成回條。這個請求可能已經執行，因此不會重新傳送；請先核對這個任務，再傳送下一則訊息。"
       },
       "ariaLabel": "DSH 執行階段設定",
       "title": "執行階段設定",

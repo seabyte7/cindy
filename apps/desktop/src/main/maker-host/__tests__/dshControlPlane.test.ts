@@ -1950,6 +1950,56 @@ describe('DshControlPlane', () => {
     await expect(bridge.list({ scopeId: 'scope-a' })).rejects.toThrow('needs reconciliation');
   });
 
+  it('reports a prompt deadline as a safe terminal category and records no prompt contents', async () => {
+    vi.useFakeTimers();
+    const client = new FakeDshAcpClient();
+    const store = new MemoryDshBindingStore();
+    const promptReceipts = fakePromptReceiptStore();
+    const errorLog = vi.fn();
+    const logger = {
+      trace: vi.fn(),
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: errorLog,
+      fatal: vi.fn(),
+      child: vi.fn(),
+    } as unknown as Logger;
+    const bridge = new DshControlPlane({
+      scopeId: 'scope-a',
+      client,
+      logger,
+      assertAuthorizedCwd: assertProjectCwd,
+      operationTimeoutMs: 5,
+      receiptId: () => 'receipt-timeout',
+    });
+    await initializeWithDurableBinding(bridge, store, promptReceipts);
+    const created = await bridge.create({ cindySessionId: 'cindy-1', cwd: '/project' });
+    client.prompt = vi.fn(() => new Promise(() => undefined));
+
+    const prompting = bridge.prompt({
+      ...created,
+      text: 'private prompt must not reach diagnostics',
+    });
+    const timeoutExpectation = expect(prompting).rejects.toMatchObject({ code: 'prompt-timeout' });
+    await vi.advanceTimersByTimeAsync(5);
+    await timeoutExpectation;
+    expect(promptReceipts.markUncertain).toHaveBeenCalledWith({
+      cindySessionId: 'cindy-1',
+      receiptIds: ['receipt-timeout'],
+    });
+    expect(errorLog).toHaveBeenCalledWith(
+      'DSH prompt terminal receipt unavailable',
+      expect.objectContaining({
+        reason: 'terminal-receipt-unavailable',
+        failureClass: 'timeout',
+        timeoutMs: 5,
+        followUpdatesObserved: false,
+      }),
+    );
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('private prompt');
+  });
+
   it('rejects an invalid operation timeout at construction', () => {
     expect(
       () =>

@@ -2690,8 +2690,11 @@ export class AgentInputCoordinator {
     // DSH retains the complete failed input for explicit recovery. Never
     // automatically repeat a deterministic refusal, or replay an uncertain
     // native operation even when the local transcript has no assistant row.
-    if (state.errorReason === 'dsh-prompt-unconfirmed' ||
-        (opts?.auto && state.errorReason?.startsWith('dsh-'))) {
+    if (
+      state.errorReason === 'dsh-prompt-unconfirmed' ||
+      state.errorReason === 'dsh-prompt-timeout' ||
+      (opts?.auto && state.errorReason?.startsWith('dsh-'))
+    ) {
       return { projection: this.getProjection(sessionId), outcome: 'no-progress' };
     }
     // auto 路径的第二道守卫:接管态必须**仍然**成立。

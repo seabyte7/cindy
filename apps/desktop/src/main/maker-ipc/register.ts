@@ -438,11 +438,25 @@ import { configureBotCanonicalReplacementCoordinator } from './botCanonicalRepla
 import { botSessionInputBlockReason } from './botSessionInputGuard.js';
 import { configureBotRuntimeEpochRefreshRequest } from './botRuntimeEpochRefreshSignal.js';
 import { createDshExistingHomeIpc } from './dsh-existing-home-ipc.js';
+import { createDshWorkspaceAccessIpc } from './dsh-workspace-access-ipc.js';
 import {
   createDshExistingHomeSettingsStore,
   selectExistingDshHomeFromMain,
   type DshExistingHomeSettingsStore,
 } from '../dsh-host/existing-home-settings.js';
+import {
+  createDshWorkspaceAccessSettingsStore,
+  type DshWorkspaceAccessSettingsStore,
+} from '../dsh-host/workspace-access-settings.js';
+import { selectDshWorkspaceAccessFromMain } from '../dsh-host/workspace-bookmark-grant.js';
+import {
+  assertDshDevelopmentCapsule,
+  assertDshDevelopmentCapsulePin,
+  DSH_DEVELOPMENT_CAPSULE_ENV,
+  resolveDshRuntimeResources,
+} from '../dsh-host/development-capsule.js';
+import { resolveMacosSupervisedDshRuntime } from '../dsh-host/macos-supervised-runtime.js';
+import { loadMacosDshMainBookmarkBridge } from '../dsh-host/main-bookmark-bridge.js';
 import { createGitSnapshotCoordinator } from '../maker-host/git-snapshot-host.js';
 import {
   cancelCodexAuthModeChange,
@@ -1581,6 +1595,60 @@ const dshExistingHomeIpc = createDshExistingHomeIpc({
       isAccountCurrent,
     }),
   reset: (accountId) => getDshExistingHomeSettingsStore().reset(accountId),
+});
+
+let dshWorkspaceAccessSettingsStore: DshWorkspaceAccessSettingsStore | null = null;
+function getDshWorkspaceAccessSettingsStore(): DshWorkspaceAccessSettingsStore {
+  if (dshWorkspaceAccessSettingsStore) return dshWorkspaceAccessSettingsStore;
+  dshWorkspaceAccessSettingsStore = createDshWorkspaceAccessSettingsStore({
+    userDataPath: app.getPath('userData'),
+    safeStorage,
+  });
+  return dshWorkspaceAccessSettingsStore;
+}
+
+function loadDshWorkspaceBookmarkBridge() {
+  const resources = resolveDshRuntimeResources({
+    isPackaged: app.isPackaged,
+    desktopAppPath: app.getAppPath(),
+    currentResourcesPath: process.resourcesPath,
+    developmentCapsuleEnabled: process.env[DSH_DEVELOPMENT_CAPSULE_ENV] === '1',
+  });
+  assertDshDevelopmentCapsule(resources);
+  const runtime = resolveMacosSupervisedDshRuntime({
+    resourcesPath: resources.resourcesPath,
+    homePath: app.getPath('home'),
+  });
+  assertDshDevelopmentCapsulePin(resources, runtime.runtime);
+  return loadMacosDshMainBookmarkBridge({ resourcesPath: resources.resourcesPath });
+}
+
+const dshWorkspaceAccessIpc = createDshWorkspaceAccessIpc({
+  assertTrustedSender: (event) =>
+    assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+  isSupportedPlatform: () => process.platform === 'darwin' && process.arch === 'arm64',
+  getActiveOwner: getActiveAppSession,
+  getProjection: (accountId) => getDshWorkspaceAccessSettingsStore().getProjection(accountId),
+  selectWorkspace: (accountId, isAccountCurrent) =>
+    selectDshWorkspaceAccessFromMain({
+      accountId,
+      picker: {
+        showOpenDialog: (options) =>
+          dialog.showOpenDialog({
+            title: options.title,
+            buttonLabel: options.buttonLabel,
+            ...(options.defaultPath ? { defaultPath: options.defaultPath } : {}),
+            properties: options.properties.filter(
+              (property): property is 'openDirectory' => property === 'openDirectory',
+            ),
+            securityScopedBookmarks: options.properties.includes('securityScopedBookmarks'),
+          }),
+      },
+      bridge: loadDshWorkspaceBookmarkBridge(),
+      store: getDshWorkspaceAccessSettingsStore(),
+      isAccountCurrent,
+    }),
+  reset: (accountId) => getDshWorkspaceAccessSettingsStore().reset(accountId),
 });
 
 function memorySettingsWire() {
@@ -11014,6 +11082,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   ipcMain.handle(MAKER_INVOKE.DSH_EXISTING_HOME_GET, (e) => dshExistingHomeIpc.get(e));
   ipcMain.handle(MAKER_INVOKE.DSH_EXISTING_HOME_SELECT, (e) => dshExistingHomeIpc.select(e));
   ipcMain.handle(MAKER_INVOKE.DSH_EXISTING_HOME_RESET, (e) => dshExistingHomeIpc.reset(e));
+
+  // ─── Persisted DSH task workspace access ───────────────────────────────
+  // The native picker and account identity are Main-owned. Renderer sees only
+  // a count/status projection and cannot select a path by invoking an arbitrary
+  // filesystem IPC endpoint.
+  ipcMain.handle(MAKER_INVOKE.DSH_WORKSPACE_ACCESS_GET, (e) => dshWorkspaceAccessIpc.get(e));
+  ipcMain.handle(MAKER_INVOKE.DSH_WORKSPACE_ACCESS_SELECT, (e) => dshWorkspaceAccessIpc.select(e));
+  ipcMain.handle(MAKER_INVOKE.DSH_WORKSPACE_ACCESS_RESET, (e) => dshWorkspaceAccessIpc.reset(e));
 
   // ─── Idle watcher ────────────────────────────────────────────────────────
   // 只扫描 active team/session，避免已归档 Worker 被终态筛选重新捞起。

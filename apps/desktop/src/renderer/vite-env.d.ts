@@ -5144,6 +5144,10 @@ interface ElectronAPI {
     getDshExistingHome: () => Promise<import('../shared/dshExistingHome').DshExistingHomeProjection>;
     selectDshExistingHome: () => Promise<import('../shared/dshExistingHome').DshExistingHomeProjection>;
     resetDshExistingHome: () => Promise<import('../shared/dshExistingHome').DshExistingHomeProjection>;
+    /** Display-safe state for Main-owned persisted DSH task workspace access. */
+    getDshWorkspaceAccess: () => Promise<import('../shared/dshWorkspaceAccess').DshWorkspaceAccessProjection>;
+    selectDshWorkspaceAccess: () => Promise<import('../shared/dshWorkspaceAccess').DshWorkspaceAccessProjection>;
+    resetDshWorkspaceAccess: () => Promise<import('../shared/dshWorkspaceAccess').DshWorkspaceAccessProjection>;
     /** workflow 逐 agent 进度树(只读);读不到 / 解析失败返回 null → 回退 workflow 级卡片。 */
     getWorkflowProgress: (
       sessionId: string,

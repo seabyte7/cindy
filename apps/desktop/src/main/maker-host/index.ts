@@ -134,11 +134,17 @@ import {
   createDshExistingHomeSettingsStore,
   type DshExistingHomeSettingsStore,
 } from '../dsh-host/existing-home-settings.js';
+import {
+  createDshWorkspaceAccessSettingsStore,
+  type DshWorkspaceAccessSettingsStore,
+} from '../dsh-host/workspace-access-settings.js';
 import { resolveDshExistingHomeLaunch } from '../dsh-host/existing-home-launch.js';
 import {
   createDshImplicitBookmarkHandoff,
+  createDshWorkspaceBookmarkHandoff,
   loadMacosDshMainBookmarkBridge,
 } from '../dsh-host/main-bookmark-bridge.js';
+import type { DshWorkspaceBookmarkHandoff } from '../dsh-host/implicit-bookmark-handoff.js';
 import {
   startMacosSupervisedDshBridge,
   type MacosSupervisedDshBridge,
@@ -488,6 +494,15 @@ function getDshExistingHomeSettingsStore(): DshExistingHomeSettingsStore {
     safeStorage,
   });
   return _dshExistingHomeSettingsStore;
+}
+let _dshWorkspaceAccessSettingsStore: DshWorkspaceAccessSettingsStore | null = null;
+function getDshWorkspaceAccessSettingsStore(): DshWorkspaceAccessSettingsStore {
+  if (_dshWorkspaceAccessSettingsStore) return _dshWorkspaceAccessSettingsStore;
+  _dshWorkspaceAccessSettingsStore = createDshWorkspaceAccessSettingsStore({
+    userDataPath: app.getPath('userData'),
+    safeStorage,
+  });
+  return _dshWorkspaceAccessSettingsStore;
 }
 // A DSH native session can be created only after the normal Maker start path
 // has reserved its exact, canonical local workspace for that Cindy session.
@@ -2690,6 +2705,9 @@ export function getMaker(): Maker {
             }
             opts.workingDir = validated.dir;
             const ownerIdAtWorkspaceSelection = getActiveAppSession().dataOwnerId;
+            if (!ownerIdAtWorkspaceSelection) {
+              throw new Error('DSH local workspace access requires an active account');
+            }
             const ownerScopeAtWorkspaceSelection = activeOwnerScopeKey();
             // A valid local path is not enough for the separately-signed
             // sandbox Helper. This explicit task-start action asks macOS for
@@ -2697,29 +2715,62 @@ export function getMaker(): Maker {
             // inside Main into a one-launch descriptor. The raw path and
             // persistent bookmark never enter Maker, ACP, or SQLite.
             const dshRuntime = resolveDshSupervisedRuntimeForCurrentProcess();
-            const workspaceBookmark = await selectDshTaskWorkspaceBookmarkFromMain({
-              cindySessionId: sessionId,
-              cwd: validated.dir,
-              picker: {
-                showOpenDialog: (options) =>
-                  dialog.showOpenDialog({
-                    title: options.title,
-                    buttonLabel: options.buttonLabel,
-                    defaultPath: options.defaultPath,
-                    properties: options.properties.filter(
-                      (property): property is 'openDirectory' => property === 'openDirectory',
-                    ),
-                    securityScopedBookmarks: options.properties.includes('securityScopedBookmarks'),
-                  }),
-              },
-              bridge: loadMacosDshMainBookmarkBridge({
-                resourcesPath: dshRuntime.resources.resourcesPath,
-              }),
-              isTaskCurrent: () =>
-                !isAppSessionBoundaryPending() &&
-                getActiveAppSession().dataOwnerId === ownerIdAtWorkspaceSelection &&
-                activeOwnerScopeKey() === ownerScopeAtWorkspaceSelection,
+            const bookmarkBridge = loadMacosDshMainBookmarkBridge({
+              resourcesPath: dshRuntime.resources.resourcesPath,
             });
+            let workspaceBookmark: DshWorkspaceBookmarkHandoff | undefined;
+            const persistedBookmark = getDshWorkspaceAccessSettingsStore().readWorkspaceBookmark(
+              ownerIdAtWorkspaceSelection,
+              validated.dir,
+            );
+            if (persistedBookmark) {
+              try {
+                workspaceBookmark = createDshWorkspaceBookmarkHandoff({
+                  persistentBookmark: persistedBookmark,
+                  bridge: bookmarkBridge,
+                });
+              } catch {
+                // A moved, replaced, or revoked directory falls back to the
+                // explicit picker and is replaced after the user confirms it.
+              }
+            }
+            if (!workspaceBookmark) {
+              workspaceBookmark = await selectDshTaskWorkspaceBookmarkFromMain({
+                cindySessionId: sessionId,
+                cwd: validated.dir,
+                picker: {
+                  showOpenDialog: (options) =>
+                    dialog.showOpenDialog({
+                      title: options.title,
+                      buttonLabel: options.buttonLabel,
+                      defaultPath: options.defaultPath,
+                      properties: options.properties.filter(
+                        (property): property is 'openDirectory' => property === 'openDirectory',
+                      ),
+                      securityScopedBookmarks: options.properties.includes('securityScopedBookmarks'),
+                    }),
+                },
+                bridge: bookmarkBridge,
+                savePersistentBookmark: (workspaceDirectory, persistentBookmark) => {
+                  try {
+                    getDshWorkspaceAccessSettingsStore().selectWorkspace(
+                      ownerIdAtWorkspaceSelection,
+                      workspaceDirectory,
+                      persistentBookmark,
+                    );
+                  } catch {
+                    // The one-shot handoff is already valid. A storage failure
+                    // must not discard the user's current task authorization;
+                    // the next task will ask again and Settings will show the
+                    // unavailable state when it cannot persist the grant.
+                  }
+                },
+                isTaskCurrent: () =>
+                  !isAppSessionBoundaryPending() &&
+                  getActiveAppSession().dataOwnerId === ownerIdAtWorkspaceSelection &&
+                  activeOwnerScopeKey() === ownerScopeAtWorkspaceSelection,
+              });
+            }
             dshSessionCwdAdmission.reserve(sessionId, validated.dir, workspaceBookmark);
           }
           // 所有创建路径共用的派发边界,opts.providerId 此刻已是本次启动的终值。

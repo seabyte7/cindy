@@ -146,6 +146,13 @@ export const MAKER_INVOKE = {
   DSH_EXISTING_HOME_SELECT: 'maker:dsh-existing-home:select',
   DSH_EXISTING_HOME_RESET: 'maker:dsh-existing-home:reset',
   /**
+   * Display-safe, Main-owned persisted DSH task workspace access. These
+   * handlers never accept or return a pathname or bookmark.
+   */
+  DSH_WORKSPACE_ACCESS_GET: 'maker:dsh-workspace-access:get',
+  DSH_WORKSPACE_ACCESS_SELECT: 'maker:dsh-workspace-access:select',
+  DSH_WORKSPACE_ACCESS_RESET: 'maker:dsh-workspace-access:reset',
+  /**
    * device-link 远程草稿镜像:控制端为被控设备新建项目草稿时,经隧道读被控端**当前
    * New Maker 草稿**在某 vendor 的完整选择(model/effort/fast/permission/source/是否显式
    * 选过模型),1:1 seed 控制端草稿(绝不取控制端本地)。只读、无 sender 依赖、语义在被控端执行 → 进 device-link

@@ -5762,6 +5762,27 @@
       "saveFailed": "Failed to save the DeepSeek Harness home. Try again.",
       "restored": "Cindy-managed home restored. Restart Cindy to use it.",
       "restoreFailed": "Failed to restore Cindy-managed home. Try again."
+    },
+    "dshWorkspaceAccess": {
+      "title": "DSH workspace access",
+      "description": "Save local authorization for workspaces you use often. Cindy never shows their locations in Settings.",
+      "status": {
+        "default": "No workspace authorization saved",
+        "configured": "Workspace authorization saved",
+        "unavailable": "Workspace authorization unavailable"
+      },
+      "savedCount": "{{count}} workspace authorization(s) saved",
+      "hint": "New DSH tasks reuse saved authorization when their working directory matches. A changed or moved directory asks again.",
+      "unavailableHint": "Cindy cannot read the saved authorization on this Mac. New DSH tasks will ask again until secure storage is available.",
+      "resetHint": "Clear all saved DSH workspace authorization for this account.",
+      "choose": "Save a workspace",
+      "choosing": "Saving…",
+      "reset": "Clear saved access",
+      "resetting": "Clearing…",
+      "selectionSaved": "Workspace authorization saved.",
+      "saveFailed": "Failed to save workspace authorization. Try again.",
+      "resetDone": "Saved workspace authorization cleared.",
+      "resetFailed": "Failed to clear saved workspace authorization. Try again."
     }
   },
   "remoteDevice": {
@@ -10216,7 +10237,8 @@
         "image-invalid": "DSH rejected the image format or image limits. Check the attachments and retry.",
         "attachment-invalid": "The attachments could not be read. Select the files again and retry.",
         "prompt-too-large": "This message is too large. Use fewer or smaller images and retry.",
-        "uncertain": "The DSH result is uncertain. Do not resend until this task has been reconciled."
+        "timeout": "DSH did not return a completion receipt before the deadline. This request may have run, so it will not be resent. Check this task before sending another message.",
+        "uncertain": "DSH did not return a verifiable completion receipt. This request may have run, so it will not be resent. Check this task before sending another message."
       },
       "ariaLabel": "DSH runtime settings",
       "title": "Runtime settings",

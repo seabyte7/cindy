@@ -331,6 +331,7 @@ export function ErrorBanner({
   // Gateway 错误则隐藏 Retry，改走切换到 Claude.ai 的明确恢复动作。
   const hideRetry =
     errorReason === 'dsh-prompt-unconfirmed' ||
+    errorReason === 'dsh-prompt-timeout' ||
     DSH_REJECTED_INPUT_REASONS.has(errorReason ?? '') ||
     isSilentStopExhausted ||
     isClaudeGatewayOpusPlanMismatch ||

@@ -16,18 +16,23 @@ import { hasDshAsciiControlCharacter } from '../../shared/dshSession.js';
 import type { DshMainBookmarkNativeBridge } from './main-bookmark-bridge.js';
 import { createDshWorkspaceBookmarkHandoff } from './main-bookmark-bridge.js';
 import type { DshWorkspaceBookmarkHandoff } from './implicit-bookmark-handoff.js';
+import type { DshWorkspaceAccessSettingsStore } from './workspace-access-settings.js';
 
 export interface DshWorkspaceBookmarkPicker {
-  showOpenDialog(input: Readonly<{
-    title: string;
-    buttonLabel: string;
-    defaultPath: string;
-    properties: readonly ('openDirectory' | 'securityScopedBookmarks')[];
-  }>): Promise<Readonly<{
-    canceled: boolean;
-    filePaths: readonly string[];
-    bookmarks?: readonly string[];
-  }>>;
+  showOpenDialog(
+    input: Readonly<{
+      title: string;
+      buttonLabel: string;
+      defaultPath?: string;
+      properties: readonly ('openDirectory' | 'securityScopedBookmarks')[];
+    }>,
+  ): Promise<
+    Readonly<{
+      canceled: boolean;
+      filePaths: readonly string[];
+      bookmarks?: readonly string[];
+    }>
+  >;
 }
 
 /**
@@ -41,6 +46,7 @@ export async function selectDshTaskWorkspaceBookmarkFromMain(input: {
   picker: DshWorkspaceBookmarkPicker;
   bridge: DshMainBookmarkNativeBridge;
   isTaskCurrent: () => boolean;
+  savePersistentBookmark?: (workspaceDirectory: string, persistentBookmark: string) => void;
 }): Promise<DshWorkspaceBookmarkHandoff> {
   if (
     typeof input.cindySessionId !== 'string' ||
@@ -89,8 +95,55 @@ export async function selectDshTaskWorkspaceBookmarkFromMain(input: {
   } else {
     throw new Error('DSH workspace picker did not return one security-scoped directory bookmark');
   }
-  return createDshWorkspaceBookmarkHandoff({
+  const handoff = createDshWorkspaceBookmarkHandoff({
     persistentBookmark,
     bridge: input.bridge,
   });
+  input.savePersistentBookmark?.(selected, persistentBookmark);
+  return handoff;
+}
+
+/**
+ * Settings entry point for an explicit, reusable workspace grant. The picker
+ * result is committed only after the exact real directory and account scope
+ * have been checked in Main.
+ */
+export async function selectDshWorkspaceAccessFromMain(input: {
+  accountId: string;
+  picker: DshWorkspaceBookmarkPicker;
+  bridge: DshMainBookmarkNativeBridge;
+  store: DshWorkspaceAccessSettingsStore;
+  isAccountCurrent?: () => boolean;
+}): Promise<ReturnType<DshWorkspaceAccessSettingsStore['getProjection']>> {
+  const selection = await input.picker.showOpenDialog({
+    title: 'Allow DeepSeek Harness to use a workspace',
+    buttonLabel: 'Save this workspace',
+    properties: ['openDirectory', 'securityScopedBookmarks'],
+  });
+  if (input.isAccountCurrent && !input.isAccountCurrent()) {
+    throw new Error('DSH workspace access account changed while choosing a directory');
+  }
+  if (selection.canceled) return input.store.getProjection(input.accountId);
+  if (selection.filePaths.length !== 1) {
+    throw new Error('DSH workspace access picker did not return one directory');
+  }
+  const selected = await fs.realpath(selection.filePaths[0]!).catch(() => null);
+  if (!selected) throw new Error('DSH workspace access selection is unavailable');
+
+  const pickerBookmark = selection.bookmarks;
+  let persistentBookmark: string;
+  if (pickerBookmark?.length === 1 && typeof pickerBookmark[0] === 'string') {
+    persistentBookmark = pickerBookmark[0];
+  } else if (pickerBookmark === undefined || pickerBookmark.length === 0) {
+    const createPersistentBookmarkForPath = input.bridge.createPersistentBookmarkForPath;
+    if (!createPersistentBookmarkForPath) {
+      throw new Error(
+        'DSH workspace access picker did not return one security-scoped directory bookmark',
+      );
+    }
+    persistentBookmark = createPersistentBookmarkForPath(selected);
+  } else {
+    throw new Error('DSH workspace access picker returned malformed bookmark data');
+  }
+  return input.store.selectWorkspace(input.accountId, selected, persistentBookmark);
 }

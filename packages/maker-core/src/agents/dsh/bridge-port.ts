@@ -57,6 +57,8 @@ export type DshBridgePromptFailureCode =
   | 'image-invalid'
   | 'attachment-invalid'
   | 'prompt-too-large'
+  /** The Main-owned ACP prompt deadline elapsed without a terminal receipt. */
+  | 'prompt-timeout'
   | 'prompt-outcome-uncertain'
   | 'prompt-failed';
 

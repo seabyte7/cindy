@@ -401,6 +401,37 @@ function safeErrorDiagnostics(error: unknown): { errorName: string; errorCode: n
   };
 }
 
+/**
+ * Internal only: its fields are deliberately a closed, non-secret timeout
+ * classification. It must never be forwarded through the bridge or IPC.
+ */
+class DshOperationTimeoutError extends Error {
+  readonly name = 'DshOperationTimeoutError';
+
+  constructor(
+    readonly operation: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`DSH bridge ${operation} timed out after ${timeoutMs}ms`);
+  }
+}
+
+function safePromptFailureClass(
+  error: unknown,
+  reason: 'prompt-admission-rejected' | 'terminal-receipt-unavailable',
+): {
+  failureClass: 'rejected' | 'timeout' | 'unconfirmed';
+  timeoutMs: number | null;
+} {
+  if (reason === 'prompt-admission-rejected') {
+    return { failureClass: 'rejected', timeoutMs: null };
+  }
+  if (error instanceof DshOperationTimeoutError && error.operation === 'prompt') {
+    return { failureClass: 'timeout', timeoutMs: error.timeoutMs };
+  }
+  return { failureClass: 'unconfirmed', timeoutMs: null };
+}
+
 const DEFAULT_OPERATION_TIMEOUT_MS = 30_000;
 const DEFAULT_PERMISSION_TIMEOUT_MS = 60_000;
 const MAX_PENDING_PERMISSION_TOOLS = 256;
@@ -1059,9 +1090,15 @@ export class DshControlPlane implements DshBridgePort {
           if (prompt.some((block) => (block as { type?: string }).type === 'image')) state.lastImageRejection = rejection;
           throw new DshBridgePromptFailure(rejection, 'DSH rejected this prompt before queuing it');
         }
-        this.logPromptFailure(state, error);
+        this.logPromptFailure(state, error, 'terminal-receipt-unavailable', {
+          followUpdatesObserved: state.nextFollowSequence !== sequenceBeforeSend,
+        });
         await this.markPromptReceiptUncertain(state, receiptId);
-        return await this.blockAfterPromptReceiptUncertain();
+        return await this.blockAfterPromptReceiptUncertain(
+          error instanceof DshOperationTimeoutError && error.operation === 'prompt'
+            ? 'prompt-timeout'
+            : 'prompt-outcome-uncertain',
+        );
       }
       // ACP notifications are queued synchronously as transport frames are
       // decoded, but their durable projection is asynchronous. Drain every
@@ -1171,20 +1208,31 @@ export class DshControlPlane implements DshBridgePort {
     state: LiveBindingState,
     error: unknown,
     reason: 'prompt-admission-rejected' | 'terminal-receipt-unavailable' = 'terminal-receipt-unavailable',
+    context?: Readonly<{ followUpdatesObserved: boolean }>,
   ): void {
     const diagnostics = safeErrorDiagnostics(error);
+    const failure = safePromptFailureClass(error, reason);
     const model = state.configuration.get('model');
-    this.logger?.error(reason === 'prompt-admission-rejected' ? 'DSH prompt admission rejected' : 'DSH prompt terminal receipt unavailable', {
-      cindySessionId: state.binding.cindySessionId,
-      reason,
-      ...diagnostics,
-      runtimeReleaseId: this.durableBinding?.runtimeIdentity.runtimeReleaseId ?? null,
-      runtimeVersion: this.durableBinding?.runtimeIdentity.runtimeVersion ?? null,
-      agentName: this.capabilitySnapshot?.agentName ?? null,
-      agentVersion: this.capabilitySnapshot?.agentVersion ?? null,
-      inlineImagePromptSupported: this.capabilitySnapshot?.inlineImagePromptSupported === true,
-      model: safeModelConfigurationValue(model?.currentValue),
-    });
+    this.logger?.error(
+      reason === 'prompt-admission-rejected'
+        ? 'DSH prompt admission rejected'
+        : 'DSH prompt terminal receipt unavailable',
+      {
+        cindySessionId: state.binding.cindySessionId,
+        reason,
+        ...diagnostics,
+        ...failure,
+        // A boolean is enough to distinguish an entirely silent timeout from
+        // one that made observable progress. Never log projected contents.
+        followUpdatesObserved: context?.followUpdatesObserved ?? null,
+        runtimeReleaseId: this.durableBinding?.runtimeIdentity.runtimeReleaseId ?? null,
+        runtimeVersion: this.durableBinding?.runtimeIdentity.runtimeVersion ?? null,
+        agentName: this.capabilitySnapshot?.agentName ?? null,
+        agentVersion: this.capabilitySnapshot?.agentVersion ?? null,
+        inlineImagePromptSupported: this.capabilitySnapshot?.inlineImagePromptSupported === true,
+        model: safeModelConfigurationValue(model?.currentValue),
+      },
+    );
   }
 
   async cancel(input: DshControlPlaneSessionRef): Promise<DshBridgeAgentReceipt<'cancel'>> {
@@ -1628,12 +1676,14 @@ export class DshControlPlane implements DshBridgePort {
     ).catch(() => undefined);
   }
 
-  private async blockAfterPromptReceiptUncertain(): Promise<never> {
+  private async blockAfterPromptReceiptUncertain(
+    failureCode: 'prompt-outcome-uncertain' | 'prompt-timeout' = 'prompt-outcome-uncertain',
+  ): Promise<never> {
     this.needsReconcileReason ??= 'DSH prompt outcome is uncertain';
     await this.persistAllBindingsNeedReconcile().catch(() => undefined);
     await this.client.close('DSH prompt outcome is uncertain').catch(() => undefined);
     throw new DshBridgePromptFailure(
-      'prompt-outcome-uncertain',
+      failureCode,
       'DSH bridge requires reconciliation because prompt outcome is uncertain',
     );
   }
@@ -1772,13 +1822,14 @@ export class DshControlPlane implements DshBridgePort {
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        const reason = `DSH bridge ${operation} timed out after ${this.operationTimeoutMs}ms`;
+        const timeoutError = new DshOperationTimeoutError(operation, this.operationTimeoutMs);
+        const reason = timeoutError.message;
         this.needsReconcileReason ??= reason;
         // A request could have reached the runtime even though its receipt did
         // not return. Tear down the privileged carrier and leave F3 to inspect
         // durable receipt/history state; do not retry or mutate the binding.
         void this.client.close(reason).catch(() => undefined);
-        reject(new Error(reason));
+        reject(timeoutError);
       }, this.operationTimeoutMs);
       timer.unref?.();
 

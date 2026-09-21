@@ -5674,6 +5674,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('maker:dsh-existing-home:select'),
     resetDshExistingHome: (): Promise<import('../shared/dshExistingHome').DshExistingHomeProjection> =>
       ipcRenderer.invoke('maker:dsh-existing-home:reset'),
+    /** Persisted DSH task workspace access; only display-safe status crosses preload. */
+    getDshWorkspaceAccess: (): Promise<import('../shared/dshWorkspaceAccess').DshWorkspaceAccessProjection> =>
+      ipcRenderer.invoke('maker:dsh-workspace-access:get'),
+    selectDshWorkspaceAccess: (): Promise<import('../shared/dshWorkspaceAccess').DshWorkspaceAccessProjection> =>
+      ipcRenderer.invoke('maker:dsh-workspace-access:select'),
+    resetDshWorkspaceAccess: (): Promise<import('../shared/dshWorkspaceAccess').DshWorkspaceAccessProjection> =>
+      ipcRenderer.invoke('maker:dsh-workspace-access:reset'),
     listTurnChangeSets: (
       sessionId: string,
     ): Promise<import('../shared/turnChangeSet').TurnChangeSetSummary[]> =>

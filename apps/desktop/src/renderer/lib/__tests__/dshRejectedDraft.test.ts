@@ -45,7 +45,7 @@ describe('DSH rejected input recovery', () => {
     expect(getDraft(sessionId)).toBeUndefined();
   });
 
-  it.each(['dsh-prompt-unconfirmed', 'unknown-error'])(
+  it.each(['dsh-prompt-unconfirmed', 'dsh-prompt-timeout', 'unknown-error'])(
     'never turns %s into a resendable draft',
     (errorReason) => {
       const sessionId = `dsh-rejection-${errorReason}`;

@@ -44,6 +44,7 @@ import { AgentResourceSection } from './AgentResourceSection';
 import { PiPackagesSection } from './PiPackagesSection';
 import { CollaborationSection } from './CollaborationSection';
 import { DshExistingHomeSection } from './DshExistingHomeSection';
+import { DshWorkspaceAccessSection } from './DshWorkspaceAccessSection';
 import { BuiltinToolsSection } from './BuiltinToolsSection';
 import { ContactsSection } from './contacts/ContactsSection';
 import { ComputerUseSection } from './ComputerUseSection';
@@ -350,12 +351,20 @@ export function SettingsView() {
                         macOS Main process; no remote or mobile surface gets
                         this directory-grant entry point. */}
                     {isMac && (
-                      <section
-                        className="py-[18px]"
-                        aria-label={t('settings.dshExistingHome.title')}
-                      >
-                        <DshExistingHomeSection />
-                      </section>
+                      <>
+                        <section
+                          className="py-[18px]"
+                          aria-label={t('settings.dshExistingHome.title')}
+                        >
+                          <DshExistingHomeSection />
+                        </section>
+                        <section
+                          className="py-[18px]"
+                          aria-label={t('settings.dshWorkspaceAccess.title')}
+                        >
+                          <DshWorkspaceAccessSection />
+                        </section>
+                      </>
                     )}
 
                     {/* Section — Notifications (py 18) */}

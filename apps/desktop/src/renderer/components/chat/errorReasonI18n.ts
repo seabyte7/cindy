@@ -20,6 +20,7 @@ export const ERROR_REASON_I18N_KEYS: Record<string, string> = {
   'dsh-image-invalid': 'ccAgent.dshRuntimeConfiguration.errors.image-invalid',
   'dsh-attachment-invalid': 'ccAgent.dshRuntimeConfiguration.errors.attachment-invalid',
   'dsh-prompt-too-large': 'ccAgent.dshRuntimeConfiguration.errors.prompt-too-large',
+  'dsh-prompt-timeout': 'ccAgent.dshRuntimeConfiguration.errors.timeout',
   'dsh-prompt-unconfirmed': 'ccAgent.dshRuntimeConfiguration.errors.uncertain',
   user_model_access_denied: 'chat.errorBanner.modelAccessDenied',
   'empty-response': 'logic.errors.emptyResponse',
