@@ -171,11 +171,19 @@ export interface DshControlPlaneOptions {
   now?: () => Date;
   receiptId?: () => string;
   /**
-   * Bound every operation that can have reached the runtime. A timeout is an
-   * ambiguous native outcome, so this control plane closes its carrier and
-   * requires a fresh, durable F3 bridge to reconcile rather than retrying.
+   * Bound every non-prompt operation that can have reached the runtime. An
+   * elapsed guard is an ambiguous native outcome, so this control plane closes
+   * its carrier and requires a fresh, durable F3 bridge to reconcile rather
+   * than retrying.
    */
   operationTimeoutMs?: number;
+  /**
+   * Report one observation when an active ACP prompt has no owned progress for
+   * this long. This is diagnostic-only: an active session and unresolved
+   * native prompt remain authoritative until an ACP terminal reply, explicit
+   * cancellation, or transport failure.
+   */
+  promptObservationTimeoutMs?: number;
   permissionTimeoutMs?: number;
   /**
    * F3/F4 Main-only event persistence. When configured, no raw follow update
@@ -216,6 +224,8 @@ interface LiveBindingState {
   pendingPromptReceiptIds: Set<string>;
   /** A native prompt must finish before a live option can affect a later turn. */
   promptInFlight: boolean;
+  /** Display-safe lifecycle context for a still-running native prompt. */
+  promptWaitReason: 'running' | 'permission' | null;
   lastImageRejection?: DshBridgePromptFailureCode;
   previousCapabilityFingerprint?: string;
   previousRuntimeReleaseId?: string;
@@ -433,6 +443,7 @@ function safePromptFailureClass(
 }
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 30_000;
+const DEFAULT_PROMPT_OBSERVATION_TIMEOUT_MS = 120_000;
 const DEFAULT_PERMISSION_TIMEOUT_MS = 60_000;
 const MAX_PENDING_PERMISSION_TOOLS = 256;
 /** Bound user-originated prompt allocation before it becomes an ACP JSON frame. */
@@ -521,6 +532,7 @@ export class DshControlPlane implements DshBridgePort {
   private readonly now: () => Date;
   private readonly newReceiptId: () => string;
   private readonly operationTimeoutMs: number;
+  private readonly promptObservationTimeoutMs: number;
   private readonly permissionTimeoutMs: number;
   private readonly projectionCoordinator: DshFollowProjectionCoordinator | undefined;
   private readonly sessionActivity: DshSessionActivityCoordinator | undefined;
@@ -528,6 +540,11 @@ export class DshControlPlane implements DshBridgePort {
   private readonly promptContentAdmission: DshPromptContentAdmission | undefined;
   private durableBinding: DshDurableBindingOptions | null;
   private readonly byCindySession = new Map<string, LiveBindingState>();
+  /** One diagnostic-only no-progress observer per live prompt. */
+  private readonly promptObservationWatchdogs = new Map<string, {
+    refresh: () => void;
+    clear: () => void;
+  }>();
   /**
    * Native lifecycle calls mutate a binding only after an ACP reply. Keep one
    * transition in flight per Cindy session so two callers cannot both pass an
@@ -552,6 +569,8 @@ export class DshControlPlane implements DshBridgePort {
     this.now = options.now ?? (() => new Date());
     this.newReceiptId = options.receiptId ?? randomUUID;
     this.operationTimeoutMs = options.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
+    this.promptObservationTimeoutMs =
+      options.promptObservationTimeoutMs ?? DEFAULT_PROMPT_OBSERVATION_TIMEOUT_MS;
     this.permissionTimeoutMs = options.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
     this.projectionCoordinator = options.projectionCoordinator;
     this.sessionActivity = options.sessionActivity;
@@ -560,6 +579,9 @@ export class DshControlPlane implements DshBridgePort {
     this.durableBinding = null;
     if (!Number.isSafeInteger(this.operationTimeoutMs) || this.operationTimeoutMs <= 0) {
       throw new Error('DSH bridge operationTimeoutMs must be a positive safe integer');
+    }
+    if (!Number.isSafeInteger(this.promptObservationTimeoutMs) || this.promptObservationTimeoutMs <= 0) {
+      throw new Error('DSH bridge promptObservationTimeoutMs must be a positive safe integer');
     }
     if (!Number.isSafeInteger(this.permissionTimeoutMs) || this.permissionTimeoutMs <= 0) {
       throw new Error('DSH bridge permissionTimeoutMs must be a positive safe integer');
@@ -583,6 +605,8 @@ export class DshControlPlane implements DshBridgePort {
         // not retry it or incorrectly mark the native session closed. F3 will
         // persist this ambiguity and reconcile through a fresh bridge.
         this.needsReconcileReason ??= 'ACP carrier closed';
+        for (const watchdog of this.promptObservationWatchdogs.values()) watchdog.clear();
+        this.promptObservationWatchdogs.clear();
         // Revoke before async durable work. A bridge cannot safely reuse a
         // token after EOF, even if persistence below is delayed or fails.
         void this.internalMcpLeaseFactory?.revokeAll().catch(() => undefined);
@@ -710,6 +734,7 @@ export class DshControlPlane implements DshBridgePort {
           pendingPermissionTools: new Map(),
           pendingPromptReceiptIds: new Set(),
           promptInFlight: false,
+          promptWaitReason: null,
           nextFollowSequence: 1,
           projectionTail: Promise.resolve(),
           mcpLease,
@@ -1059,6 +1084,7 @@ export class DshControlPlane implements DshBridgePort {
     // lease before it begins so a configuration change cannot slip between
     // its user-approved content and the ensuing ACP prompt.
     state.promptInFlight = true;
+    state.promptWaitReason = 'running';
     try {
       let prompt: readonly unknown[];
       try {
@@ -1075,8 +1101,7 @@ export class DshControlPlane implements DshBridgePort {
       let result: { stopReason: DshBridgePromptStopReason };
       const sequenceBeforeSend = state.nextFollowSequence;
       try {
-        result = await this.withOperationTimeout(
-          'prompt',
+        result = await this.observePromptWithoutProgress(state, () =>
           this.client.prompt({
             sessionId: state.binding.runtimeSessionId,
             prompt,
@@ -1117,6 +1142,7 @@ export class DshControlPlane implements DshBridgePort {
       };
     } finally {
       state.promptInFlight = false;
+      state.promptWaitReason = null;
     }
   }
 
@@ -1222,8 +1248,8 @@ export class DshControlPlane implements DshBridgePort {
         reason,
         ...diagnostics,
         ...failure,
-        // A boolean is enough to distinguish an entirely silent timeout from
-        // one that made observable progress. Never log projected contents.
+        // Never log projected contents. This only records whether safe owned
+        // follow updates were observed before a genuine terminal failure.
         followUpdatesObserved: context?.followUpdatesObserved ?? null,
         runtimeReleaseId: this.durableBinding?.runtimeIdentity.runtimeReleaseId ?? null,
         runtimeVersion: this.durableBinding?.runtimeIdentity.runtimeVersion ?? null,
@@ -1389,6 +1415,7 @@ export class DshControlPlane implements DshBridgePort {
         pendingPermissionTools: new Map(),
         pendingPromptReceiptIds: new Set(),
         promptInFlight: false,
+        promptWaitReason: null,
         nextFollowSequence: firstUnprojectedSequence(normalized.lastProjectedSequence),
         projectionTail: Promise.resolve(),
         durableRevision: normalized.revision,
@@ -1850,6 +1877,76 @@ export class DshControlPlane implements DshBridgePort {
     });
   }
 
+  /**
+   * ACP owns prompt completion. A lack of notifications is not a terminal
+   * condition: the runtime can be executing a foreground tool or waiting for
+   * a one-shot permission decision. Keep an idle observation solely for
+   * diagnostics; transport close, an explicit cancel, or a native terminal
+   * reply remains responsible for changing session or receipt state.
+   */
+  private observePromptWithoutProgress<Result>(
+    state: LiveBindingState,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    return new Promise<Result>((resolve, reject) => {
+      let settled = false;
+      let observationTimer: ReturnType<typeof setTimeout> | undefined;
+      const sessionId = state.binding.cindySessionId;
+      let watchdog: { refresh: () => void; clear: () => void };
+
+      const cleanup = (): void => {
+        if (observationTimer) clearTimeout(observationTimer);
+        if (this.promptObservationWatchdogs.get(sessionId) === watchdog) {
+          this.promptObservationWatchdogs.delete(sessionId);
+        }
+      };
+      const refresh = (): void => {
+        if (settled) return;
+        if (observationTimer) clearTimeout(observationTimer);
+        observationTimer = setTimeout(() => {
+          if (settled) return;
+          this.logger?.warn('DSH prompt remains active without observable progress', {
+            cindySessionId: sessionId,
+            inactivityMs: this.promptObservationTimeoutMs,
+            waitReason: state.promptWaitReason ?? 'running',
+            runtimeReleaseId: this.durableBinding?.runtimeIdentity.runtimeReleaseId ?? null,
+            runtimeVersion: this.durableBinding?.runtimeIdentity.runtimeVersion ?? null,
+          });
+        }, this.promptObservationTimeoutMs);
+        observationTimer.unref?.();
+      };
+
+      watchdog = { refresh, clear: cleanup };
+      this.promptObservationWatchdogs.get(sessionId)?.clear();
+      this.promptObservationWatchdogs.set(sessionId, watchdog);
+      refresh();
+
+      let operationPromise: Promise<Result>;
+      try {
+        operationPromise = operation();
+      } catch (error) {
+        settled = true;
+        cleanup();
+        reject(error);
+        return;
+      }
+      operationPromise.then(
+        (result) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(result);
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        },
+      );
+    });
+  }
+
   private async resolvePermissionRequest(params: unknown): Promise<unknown> {
     const native = parseNativePermissionRequest(params);
     if (!native) return { outcome: { outcome: 'cancelled' } };
@@ -1858,38 +1955,63 @@ export class DshControlPlane implements DshBridgePort {
         candidate.active && candidate.binding.runtimeSessionId === native.runtimeSessionId,
     );
     if (!state) return { outcome: { outcome: 'cancelled' } };
-    // The runtime can issue this request immediately after its tool_call
-    // notification. Wait only for the already-queued durable projection: the
-    // adapter must never decide from an uncommitted native event, but a real
-    // runtime generally will not repeat an early-cancelled request.
-    const permissionDeadline = Date.now() + this.permissionTimeoutMs;
-    if (
-      this.projectionCoordinator &&
-      !(await this.waitForPermissionProjection(state, this.permissionTimeoutMs))
-    ) {
-      return { outcome: { outcome: 'cancelled' } };
+    const startedAt = Date.now();
+    const wasPromptInFlight = state.promptInFlight;
+    if (wasPromptInFlight) {
+      state.promptWaitReason = 'permission';
+      this.promptObservationWatchdogs.get(state.binding.cindySessionId)?.refresh();
     }
-    const remainingPermissionMs = permissionDeadline - Date.now();
-    if (remainingPermissionMs <= 0) return { outcome: { outcome: 'cancelled' } };
-    const resolver = state.permissionResolver;
-    if (!resolver) return { outcome: { outcome: 'cancelled' } };
-    // A native id is one-shot: remove it before awaiting a resolver so a
-    // duplicate request cannot reuse a decision while the first one is open.
-    const request = state.pendingPermissionTools.get(native.nativeToolCallId);
-    if (!request) return { outcome: { outcome: 'cancelled' } };
-    state.pendingPermissionTools.delete(native.nativeToolCallId);
+    this.logger?.debug('DSH permission request received', {
+      cindySessionId: state.binding.cindySessionId,
+      permissionTimeoutMs: this.permissionTimeoutMs,
+      promptInFlight: wasPromptInFlight,
+    });
+    let outcome: 'selected' | 'cancelled' = 'cancelled';
+    try {
+      // The runtime can issue this request immediately after its tool_call
+      // notification. Wait only for the already-queued durable projection: the
+      // adapter must never decide from an uncommitted native event, but a real
+      // runtime generally will not repeat an early-cancelled request.
+      const permissionDeadline = Date.now() + this.permissionTimeoutMs;
+      if (
+        this.projectionCoordinator &&
+        !(await this.waitForPermissionProjection(state, this.permissionTimeoutMs))
+      ) {
+        return { outcome: { outcome: 'cancelled' } };
+      }
+      const remainingPermissionMs = permissionDeadline - Date.now();
+      if (remainingPermissionMs <= 0) return { outcome: { outcome: 'cancelled' } };
+      const resolver = state.permissionResolver;
+      if (!resolver) return { outcome: { outcome: 'cancelled' } };
+      // A native id is one-shot: remove it before awaiting a resolver so a
+      // duplicate request cannot reuse a decision while the first one is open.
+      const request = state.pendingPermissionTools.get(native.nativeToolCallId);
+      if (!request) return { outcome: { outcome: 'cancelled' } };
+      state.pendingPermissionTools.delete(native.nativeToolCallId);
 
-    const decision = await this.resolvePermissionOnce(resolver, request, remainingPermissionMs);
-    if (
-      !state.active ||
-      state.permissionResolver !== resolver ||
-      this.needsReconcileReason !== null ||
-      !decision ||
-      !native.offeredOptions.has(decision)
-    ) {
-      return { outcome: { outcome: 'cancelled' } };
+      const decision = await this.resolvePermissionOnce(resolver, request, remainingPermissionMs);
+      if (
+        !state.active ||
+        state.permissionResolver !== resolver ||
+        this.needsReconcileReason !== null ||
+        !decision ||
+        !native.offeredOptions.has(decision)
+      ) {
+        return { outcome: { outcome: 'cancelled' } };
+      }
+      outcome = 'selected';
+      return { outcome: { outcome: 'selected', optionId: decision } };
+    } finally {
+      if (wasPromptInFlight && state.promptInFlight && state.promptWaitReason === 'permission') {
+        state.promptWaitReason = 'running';
+        this.promptObservationWatchdogs.get(state.binding.cindySessionId)?.refresh();
+      }
+      this.logger?.debug('DSH permission request resolved', {
+        cindySessionId: state.binding.cindySessionId,
+        outcome,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      });
     }
-    return { outcome: { outcome: 'selected', optionId: decision } };
   }
 
   private resolvePermissionOnce(
@@ -1994,6 +2116,10 @@ export class DshControlPlane implements DshBridgePort {
       update: record.update,
     };
     state.nextFollowSequence += 1;
+    // The frame passed the same owner/session validation that permits a
+    // durable follow event. It is therefore safe to reset the diagnostic
+    // no-progress observation before its asynchronous projection tail settles.
+    this.promptObservationWatchdogs.get(state.binding.cindySessionId)?.refresh();
     if (this.projectionCoordinator) {
       if (state.durableRevision === undefined) {
         void this.blockAfterProjectionFailure(

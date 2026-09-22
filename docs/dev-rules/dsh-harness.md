@@ -238,7 +238,8 @@ release，只要该能力在 Cindy 选择的 native profile、平台和权限下
 runtime 的 ACP v1 初始化和 capability negotiation；(b) Cindy 能在空 managed Home、非项目
 launcher cwd 中通过公开 ACP 完成 create/close/list/reconcile/resume（若 runtime advertises）/
 prompt/cancel/close 的真实 lifecycle；(c) `DshBridgePort` 对每个命令的 ownership、receipt、
-timeout（关闭 carrier、禁止重试）、EOF/exit 和 reconcile 语义有独立测试。**已验证 alpha.3 的 lifecycle 事实**：active
+非 prompt operation timeout（关闭 carrier、禁止重试）、prompt 静默观察、EOF/exit 和 reconcile
+语义有独立测试。**已验证 alpha.3 的 lifecycle 事实**：active
 session 不会出现在 `session/list`，也不能 `resume`；Cindy `close` 必须保留可恢复 binding，之后
 才 list/reconcile/resume，不得把 close 误当删除。上游没有另一套 Host API 不是阻塞理由；私有
 state scraping、Web UI 驱动和未经验证的 profile patch 仍然禁止。
@@ -1003,6 +1004,11 @@ sequence、lifecycle 状态和创建 / 更新时刻；不保存 token、credenti
   projection tail 全部持久化并投递，之后才能越过 adapter 边界。`usage_update` 只更新用量快照，
   仅在当前 prompt 尚未终止时可投递 running 状态；它不独立拥有 turn 生命周期。空闲期或终止后的
   迟到用量不得把任务重新置为 running，终态只能由已确认的 prompt receipt 收口。
+- 活跃 ACP session 的 prompt 不因 Cindy 一段时间未收到 `session/update` 而结束、关闭 carrier 或
+  标为 `uncertain`：前台工具执行和 `session/request_permission` 的一次性决策都可能合法静默。
+  无进展阈值只能记录脱敏诊断；只有 native terminal receipt、用户显式取消、carrier EOF/exit 或
+  其他已确认的 native 失败才能改变 receipt / binding 生命周期。非 prompt operation timeout 继续
+  关闭 carrier 并进入 reconcile，且任何不确定 prompt 一律不重发。
 - 重连一律先 follow、再以页式 history 补洞并按 sequence 去重；无法证明连续性时停止 live
   projection，显示“需同步”，不可把 Cindy 缓存当作新的 native truth。
 - migration 只追加，绝不修改历史 migration。旧 `cc` / `codex` / `pi` 数据保持原样；`dsh`
@@ -1093,7 +1099,7 @@ Mobile 的“完整”是任务连续性，不是机械复制 Desktop。任何�
 
 | 阶段 | 目标与主要交付 | 关键实现范围 | 退出门槛 |
 |-------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **F0：Cindy Bridge Gate** | 形成 release evidence packet、ACP compatibility fixture 与 Cindy bridge lifecycle contract | 受管 runtime、ACP v1 capability snapshot、Cindy `DshBridgePort` 命令/receipt/operation-timeout/EOF/exit 行为、许可 / notices、平台矩阵 | 同一制品证明 Cindy 通过公开 ACP 可创建、恢复（若 advertise）、follow/update、prompt、cancel、close；超时/断线均关闭 carrier、标记 reconcile 且绝不重发；不支持项诚实 capability-gate，而不是等待上游 Host |
+| **F0：Cindy Bridge Gate** | 形成 release evidence packet、ACP compatibility fixture 与 Cindy bridge lifecycle contract | 受管 runtime、ACP v1 capability snapshot、Cindy `DshBridgePort` 命令/receipt/operation-timeout/EOF/exit 行为、许可 / notices、平台矩阵 | 同一制品证明 Cindy 通过公开 ACP 可创建、恢复（若 advertise）、follow/update、prompt、cancel、close；非 prompt timeout、carrier EOF/exit 关闭 carrier、标记 reconcile 且绝不重发；活跃 prompt 的静默仅记录诊断并继续等待 native terminal receipt；不支持项诚实 capability-gate，而不是等待上游 Host |
 | **F1：身份闭包** | `dsh` 成为第四个 AgentKind，且无 silent fallback | maker-core / Desktop / Mobile / device-link / model catalog / scheduler / search / DB decoder / remote type 的全量 inventory 和 exhaustive tests | 任意 dsh 输入从 DB、IPC、URL、mobile payload 到 UI 均保持 dsh；未知值显式拒绝，不归为 `cc` |
 | **F2：受管 runtime 与 Host supervisor** | DSH binary distribution、Host scope registry、健康和有界清理 | `agent-binaries`、`tools/dsh`、Desktop Main `dsh-host/`、safe storage adapter、process monitor | hash / sidecar / platform / account switch / crash / stale endpoint / quit 通过；Renderer 无新增特权 |
 | **F3：Cindy bridge 与 binding（局部交付）** | 已交付 Main-only durable owner binding、CAS lifecycle/cursor、live follow 的 display-safe projection journal、no-replay prompt receipt ledger、receipt-guarded restart rehydrate、只订阅 committed-safe events 的 `DshAgent`，以及 Helper.app binding / real-binary follow→SQLite E2E；受监督 bridge 强制组合 binding、receipt、journal 三个 Main-owned store，才提供 adapter admission | append-only migration、Main bridge client、binding store、receipt ledger、worker journal transaction、per-owner projection queue 与 bridge-injected adapter；F5c 仅在 fixed Helper、fresh list、settled ledger 和同一 Cindy opaque handle 都通过时，从 Main 恢复 inactive binding 并 native resume；仍缺 history synchronizer 与完整恢复产品面 | 未达标：多会话真实隔离、history gap 补齐、uncertain receipt 的 verified-history 收口与无 raw-log scraping 均仍为后续 gate |

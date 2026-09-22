@@ -1950,17 +1950,18 @@ describe('DshControlPlane', () => {
     await expect(bridge.list({ scopeId: 'scope-a' })).rejects.toThrow('needs reconciliation');
   });
 
-  it('reports a prompt deadline as a safe terminal category and records no prompt contents', async () => {
+  it('keeps a silent active prompt running and records only a redacted observation', async () => {
     vi.useFakeTimers();
     const client = new FakeDshAcpClient();
     const store = new MemoryDshBindingStore();
     const promptReceipts = fakePromptReceiptStore();
     const errorLog = vi.fn();
+    const warningLog = vi.fn();
     const logger = {
       trace: vi.fn(),
       debug: vi.fn(),
       info: vi.fn(),
-      warn: vi.fn(),
+      warn: warningLog,
       error: errorLog,
       fatal: vi.fn(),
       child: vi.fn(),
@@ -1971,33 +1972,164 @@ describe('DshControlPlane', () => {
       logger,
       assertAuthorizedCwd: assertProjectCwd,
       operationTimeoutMs: 5,
-      receiptId: () => 'receipt-timeout',
+      promptObservationTimeoutMs: 5,
+      receiptId: () => 'receipt-observation',
     });
     await initializeWithDurableBinding(bridge, store, promptReceipts);
     const created = await bridge.create({ cindySessionId: 'cindy-1', cwd: '/project' });
-    client.prompt = vi.fn(() => new Promise(() => undefined));
+    const nativePrompt = deferred<DshAcpPromptResult>();
+    client.promptGate = nativePrompt.promise;
 
     const prompting = bridge.prompt({
       ...created,
       text: 'private prompt must not reach diagnostics',
     });
-    const timeoutExpectation = expect(prompting).rejects.toMatchObject({ code: 'prompt-timeout' });
+    await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(5);
-    await timeoutExpectation;
-    expect(promptReceipts.markUncertain).toHaveBeenCalledWith({
-      cindySessionId: 'cindy-1',
-      receiptIds: ['receipt-timeout'],
-    });
-    expect(errorLog).toHaveBeenCalledWith(
-      'DSH prompt terminal receipt unavailable',
+
+    expect(warningLog).toHaveBeenCalledWith(
+      'DSH prompt remains active without observable progress',
       expect.objectContaining({
-        reason: 'terminal-receipt-unavailable',
-        failureClass: 'timeout',
-        timeoutMs: 5,
-        followUpdatesObserved: false,
+        cindySessionId: 'cindy-1',
+        inactivityMs: 5,
+        waitReason: 'running',
       }),
     );
-    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('private prompt');
+    expect(promptReceipts.markUncertain).not.toHaveBeenCalled();
+    expect(errorLog).not.toHaveBeenCalled();
+    expect(client.calls).not.toContainEqual(expect.objectContaining({ method: 'transport/close' }));
+    await expect(bridge.list({ scopeId: 'scope-a' })).resolves.toHaveLength(1);
+    expect(JSON.stringify(warningLog.mock.calls)).not.toContain('private prompt');
+
+    nativePrompt.resolve({ stopReason: 'end_turn' });
+    await expect(prompting).resolves.toMatchObject({
+      receiptId: 'receipt-observation',
+      stopReason: 'end_turn',
+    });
+  });
+
+  it('resets the prompt observation after an owned update and accepts a late terminal receipt', async () => {
+    vi.useFakeTimers();
+    const client = new FakeDshAcpClient();
+    const store = new MemoryDshBindingStore();
+    const promptReceipts = fakePromptReceiptStore();
+    const nativePrompt = deferred<DshAcpPromptResult>();
+    client.promptGate = nativePrompt.promise;
+    const bridge = new DshControlPlane({
+      scopeId: 'scope-a',
+      client,
+      assertAuthorizedCwd: assertProjectCwd,
+      operationTimeoutMs: 30,
+      promptObservationTimeoutMs: 30,
+      receiptId: () => 'receipt-progress',
+    });
+    await initializeWithDurableBinding(bridge, store, promptReceipts);
+    await bridge.create({ cindySessionId: 'cindy-1', cwd: '/project' });
+    const binding = (await bridge.list({ scopeId: 'scope-a' }))[0]!;
+
+    const prompting = bridge.prompt({ ...binding, text: 'allow the native turn to finish' });
+    const promptExpectation = expect(prompting).resolves.toMatchObject({
+      operation: 'prompt',
+      receiptId: 'receipt-progress',
+      stopReason: 'end_turn',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(28);
+    client.emitNotification('session/update', {
+      sessionId: binding.runtimeSessionId,
+      update: { sessionUpdate: 'agent_message_chunk', content: { text: 'progress' } },
+    });
+    await vi.advanceTimersByTimeAsync(7);
+    nativePrompt.resolve({ stopReason: 'end_turn' });
+
+    await promptExpectation;
+    expect(promptReceipts.acknowledge).toHaveBeenCalledWith({
+      cindySessionId: 'cindy-1',
+      receiptId: 'receipt-progress',
+      stopReason: 'end_turn',
+    });
+    expect(promptReceipts.markUncertain).not.toHaveBeenCalled();
+    expect(client.calls).not.toContainEqual(expect.objectContaining({ method: 'transport/close' }));
+  });
+
+  it('keeps a prompt open while a one-shot permission decision exceeds the former idle deadline', async () => {
+    vi.useFakeTimers();
+    const client = new FakeDshAcpClient();
+    const store = new MemoryDshBindingStore();
+    const promptReceipts = fakePromptReceiptStore();
+    const nativePrompt = deferred<DshAcpPromptResult>();
+    const permissionDecision = deferred<'allow-once'>();
+    client.promptGate = nativePrompt.promise;
+    const resolver = vi.fn(() => permissionDecision.promise);
+    const debugLog = vi.fn();
+    const logger = {
+      trace: vi.fn(),
+      debug: debugLog,
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      fatal: vi.fn(),
+      child: vi.fn(),
+    } as unknown as Logger;
+    const bridge = new DshControlPlane({
+      scopeId: 'scope-a',
+      client,
+      logger,
+      assertAuthorizedCwd: assertProjectCwd,
+      operationTimeoutMs: 30,
+      promptObservationTimeoutMs: 120,
+      permissionTimeoutMs: 60,
+      receiptId: () => 'receipt-permission',
+    });
+    await initializeWithDurableBinding(bridge, store, promptReceipts);
+    const adapter = await bridge.create({ cindySessionId: 'cindy-1', cwd: '/project' });
+    bridge.bindPermissionResolver(adapter, resolver);
+    const binding = (await bridge.list({ scopeId: 'scope-a' }))[0]!;
+
+    const prompting = bridge.prompt({ ...binding, text: 'wait for a one-shot permission decision' });
+    await vi.advanceTimersByTimeAsync(0);
+    client.emitNotification('session/update', {
+      sessionId: binding.runtimeSessionId,
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'native-tool-permission',
+        title: 'bash',
+        status: 'in_progress',
+        rawInput: { command: 'pwd' },
+      },
+    });
+    const waiting = client.requestFromRuntime('session/request_permission', {
+      sessionId: binding.runtimeSessionId,
+      toolCall: { toolCallId: 'native-tool-permission' },
+      options: [{ optionId: 'allow-once', kind: 'allow_once' }],
+    });
+    // Do not use waitFor under fake timers here: it advances the native
+    // permission deadline that this test deliberately keeps pending.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resolver).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(45);
+
+    expect(promptReceipts.markUncertain).not.toHaveBeenCalled();
+    expect(client.calls).not.toContainEqual(expect.objectContaining({ method: 'transport/close' }));
+    permissionDecision.resolve('allow-once');
+    await expect(waiting).resolves.toEqual({ outcome: { outcome: 'selected', optionId: 'allow-once' } });
+    expect(debugLog).toHaveBeenCalledWith(
+      'DSH permission request received',
+      expect.objectContaining({ cindySessionId: 'cindy-1', promptInFlight: true }),
+    );
+    expect(debugLog).toHaveBeenCalledWith(
+      'DSH permission request resolved',
+      expect.objectContaining({ cindySessionId: 'cindy-1', outcome: 'selected' }),
+    );
+    expect(JSON.stringify(debugLog.mock.calls)).not.toContain('native-tool-permission');
+    expect(JSON.stringify(debugLog.mock.calls)).not.toContain('pwd');
+
+    nativePrompt.resolve({ stopReason: 'end_turn' });
+    await expect(prompting).resolves.toMatchObject({
+      receiptId: 'receipt-permission',
+      stopReason: 'end_turn',
+    });
   });
 
   it('rejects an invalid operation timeout at construction', () => {
@@ -2010,6 +2142,18 @@ describe('DshControlPlane', () => {
           operationTimeoutMs: 0,
         }),
     ).toThrow('operationTimeoutMs must be a positive safe integer');
+  });
+
+  it('rejects an invalid prompt observation timeout at construction', () => {
+    expect(
+      () =>
+        new DshControlPlane({
+          scopeId: 'scope-a',
+          client: new FakeDshAcpClient(),
+          assertAuthorizedCwd: assertProjectCwd,
+          promptObservationTimeoutMs: 0,
+        }),
+    ).toThrow('promptObservationTimeoutMs must be a positive safe integer');
   });
 
   it('requires Main to supply a workdir authorization policy', () => {
